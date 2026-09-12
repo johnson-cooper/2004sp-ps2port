@@ -5970,7 +5970,8 @@ bool client_read(Client *c) {
             c->packet_type = -1;
             return true;
         }
-        strcpy(_Component.instances[com]->text, text);
+        strncpy(_Component.instances[com]->text, text, DOUBLE_STR - 1);
+        _Component.instances[com]->text[DOUBLE_STR - 1] = '\0';
         free(text);
         if (_Component.instances[com]->layer == c->tab_interface_id[c->selected_tab]) {
             c->redraw_sidebar = true;

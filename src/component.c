@@ -207,7 +207,8 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
 
         if (com->type == TYPE_TEXT) {
             char *text = gjstr(dat);
-            strcpy(com->text, text);
+            strncpy(com->text, text, DOUBLE_STR - 1);
+            com->text[DOUBLE_STR - 1] = '\0';
             free(text);
             com->activeText = gjstr(dat);
         }
@@ -314,7 +315,8 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
 
         if (com->buttonType == BUTTON_OK || com->buttonType == BUTTON_TOGGLE || com->buttonType == BUTTON_SELECT || com->buttonType == BUTTON_CONTINUE) {
             char *option = gjstr(dat);
-            strcpy(com->option, option);
+            strncpy(com->option, option, HALF_STR - 1);
+            com->option[HALF_STR - 1] = '\0';
 
             if (strlen(com->option) == 0) {
                 if (com->buttonType == BUTTON_OK) {
