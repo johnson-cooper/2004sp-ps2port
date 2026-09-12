@@ -17,6 +17,7 @@ typedef struct {
     int seqTurnLeftId;   // = -1;
     int seqTurnRightId;  // = -1;
     int seqRunId;        // = -1;
+    int turnRate;        // = 32; degrees-per-tick turn increment (out of 0x800); NpcType.turnspeed overrides this for NPCs
     char chat[CHAT_LENGTH + 1];
     int chatTimer; // = 100;
     int chatColor;
@@ -24,6 +25,9 @@ typedef struct {
     int damage;
     int damageType;
     int combatCycle; // = -1000;
+    int damage2;
+    int damageType2;
+    int combatCycle2; // = -1000;
     int health;
     int totalHealth;
     int targetId; // = -1;

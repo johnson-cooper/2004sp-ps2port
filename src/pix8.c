@@ -6,6 +6,7 @@
 #include "packet.h"
 #include "pix2d.h"
 #include "pix8.h"
+#include "platform.h"
 
 extern Pix2D _Pix2D;
 
@@ -20,6 +21,9 @@ Pix8 *pix8_new(int width, int height, int *palette, int palette_count) {
 }
 
 void pix8_free(Pix8 *pix8) {
+    if (!pix8) {
+        return;
+    }
     free(pix8->pixels);
     free(pix8->palette);
     free(pix8);
@@ -32,6 +36,13 @@ Pix8 *pix8_from_archive(Jagfile *jag, const char *name, int sprite) {
 
     Packet *dat = jagfile_to_packet(jag, filename);
     Packet *idx = jagfile_to_packet(jag, "index.dat");
+    if (!dat || !idx) {
+        rs2_error("DEBUG pix8_from_archive: missing sprite %s (index %d)\n", filename, sprite);
+        packet_free(dat);
+        packet_free(idx);
+        free(filename);
+        return NULL;
+    }
     idx->pos = g2(dat);
     const int crop_w = g2(idx);
     const int crop_h = g2(idx);

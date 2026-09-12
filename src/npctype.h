@@ -29,6 +29,11 @@ typedef struct {
     int vislevel; // = -1;
     int resizeh;  // = 128;
     int resizev;  // = 128;
+    bool alwaysontop;
+    int8_t ambient;
+    int contrast; // stored pre-multiplied by 5, matches rev254 wire decode
+    int headicon;
+    int turnspeed;
 
     // custom
     int models_count;

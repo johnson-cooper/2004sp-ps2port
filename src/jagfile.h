@@ -18,3 +18,4 @@ Jagfile *jagfile_new(int8_t *src, int length);
 void jagfile_free(Jagfile *jagfile);
 Packet *jagfile_to_packet(Jagfile *jagfile, const char *name);
 uint8_t *jagfile_to_bytes(Jagfile *jagfile, const char* name, int *length);
+bool jagfile_has(Jagfile *jagfile, const char *name);

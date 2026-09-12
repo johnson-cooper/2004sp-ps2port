@@ -27,8 +27,11 @@
 #define SCREEN_FB_HEIGHT SCREEN_HEIGHT
 #endif
 
-#define SCREEN_WIDTH 789
-#define SCREEN_HEIGHT 532
+// rev254 "fixed" mode (config.ini's resizable=0) uses a 765x503 frame with a single backtop1 top
+// panel - Client3 was hardcoded to the "resizable" mode's larger 789x532 frame (which needs a
+// second backtop2 top panel to cover the extra width), confirmed against the reference client.
+#define SCREEN_WIDTH 765
+#define SCREEN_HEIGHT 503
 
 #ifdef __vita__
 #define SCREEN_CENTER_XOFF ((SCREEN_FB_WIDTH - SCREEN_WIDTH) / 2)
@@ -69,7 +72,7 @@
 #define PIX3D_POOL_COUNT 20
 #endif
 #define LOCBUFFER_COUNT 100
-#define MAX_NPC_COUNT 8192
+#define MAX_NPC_COUNT 16384 // rev254's npc index field is 14 bits (max real index 16382, 16383 is the loop sentinel) - see getNpcPosNewVis
 #define MAX_PLAYER_COUNT 2048
 #define LOCAL_PLAYER_INDEX 2047
 #define VARPS_COUNT 2000

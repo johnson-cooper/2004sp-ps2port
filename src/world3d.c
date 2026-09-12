@@ -1520,7 +1520,7 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
             if (draw) {
                 Wall *wall = tile->wall;
 
-                if (!world3d_wall_visible(world3d, occludeLevel, tileX, tileZ, wall->typeA)) {
+                if (wall && !world3d_wall_visible(world3d, occludeLevel, tileX, tileZ, wall->typeA)) {
                     model_draw(wall->modelA, 0, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw, wall->x - _World3D.eyeX, wall->y - _World3D.eyeY, wall->z - _World3D.eyeZ, wall->bitset);
                 }
 
@@ -1542,6 +1542,12 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
 
                 for (int x = loc->minSceneTileX; x <= loc->maxSceneTileX; x++) {
                     for (int z = loc->minSceneTileZ; z <= loc->maxSceneTileZ; z++) {
+                        // a loc with a corrupted/mis-decoded size (see the loctype_decode desync fix)
+                        // could produce a scene-tile bounding box outside the 0-103 tiles[][] grid;
+                        // guard it rather than reading out of bounds.
+                        if (x < 0 || x >= 104 || z < 0 || z >= 104) {
+                            continue;
+                        }
                         Ground *other = tiles[x][z];
 
                         if (!other->visible) {

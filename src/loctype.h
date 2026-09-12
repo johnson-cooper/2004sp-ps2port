@@ -67,6 +67,8 @@ typedef struct {
     int offsetz;
     int forceapproach;
     bool forcedecor;
+    bool breakroutefinding;
+    int raiseobject;
 
     // custom
     int shapes_and_models_count;

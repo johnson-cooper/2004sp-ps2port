@@ -30,6 +30,11 @@ static NpcType *npctype_new(void) {
     npc->vislevel = -1;
     npc->resizeh = 128;
     npc->resizev = 128;
+    npc->alwaysontop = false;
+    npc->ambient = 0;
+    npc->contrast = 0;
+    npc->headicon = -1;
+    npc->turnspeed = 32; // TODO: verify rev254 default against real data
     return npc;
 }
 
@@ -74,8 +79,16 @@ NpcType *npctype_get(int id) {
 
     _NpcType.cachePos = (_NpcType.cachePos + 1) % 20;
     NpcType *npc = _NpcType.cache[_NpcType.cachePos] = npctype_new();
-    _NpcType.dat->pos = _NpcType.offsets[id];
     npc->index = id;
+    if (id < 0 || id >= _NpcType.count) {
+        // rev254 servers can reference npc type ids beyond what's in Client3's loaded npc.idx
+        // (offsets[] only has _NpcType.count entries) - indexing it out of bounds here set
+        // _NpcType.dat->pos to garbage, and decoding from that garbage offset segfaulted during
+        // NPC_INFO processing. Fall back to npctype_new()'s built-in defaults instead.
+        rs2_error("npctype_get: npc type id %d out of range (max %d), using defaults\n", id, _NpcType.count - 1);
+        return npc;
+    }
+    _NpcType.dat->pos = _NpcType.offsets[id];
     npctype_decode(npc, _NpcType.dat);
     return npc;
 }
@@ -157,8 +170,25 @@ static void npctype_decode(NpcType *npc, Packet *dat) {
             npc->resizeh = g2(dat);
         } else if (code == 98) {
             npc->resizev = g2(dat);
+        } else if (code == 99) {
+            npc->alwaysontop = true;
+        } else if (code == 100) {
+            npc->ambient = g1b(dat);
+        } else if (code == 101) {
+            npc->contrast = g1b(dat) * 5;
+        } else if (code == 102) {
+            npc->headicon = g2(dat);
+        } else if (code == 103) {
+            npc->turnspeed = g2(dat);
         } else {
+            // see objtype_decode()/loctype_decode() for the same fix - an opcode this decoder
+            // doesn't recognise (rev254 npc.dat can contain some) would otherwise desync dat->pos,
+            // and g1/g2/g1b do no bounds checking, so that desync can read arbitrarily far past the
+            // buffer and crash much later, far from this site (confirmed: this was the real cause of
+            // a sporadic crash whose location moved between world3d_draw and client_draw_minimap
+            // depending on which garbage-decoded npc type got rendered first). Stop decoding instead.
             rs2_error("Error unrecognised npc config code: %d\n", code);
+            return;
         }
     }
 }
@@ -190,7 +220,7 @@ Model *npctype_get_sequencedmodel(NpcType *npc, int primaryTransformId, int seco
         }
 
         model_create_label_references(model, true);
-        model_calculate_normals(model, 64, 850, -30, -50, -30, true, true);
+        model_calculate_normals(model, npc->ambient + 64, npc->contrast + 850, -30, -50, -30, true, true);
         lrucache_put(_NpcType.modelCache, npc->index, &model->link);
     }
 

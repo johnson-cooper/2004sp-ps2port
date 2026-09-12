@@ -32,6 +32,7 @@
 #include "../npctype.h"
 #include "../objstackentity.h"
 #include "../objtype.h"
+#include "../ondemand.h"
 #include "../packet.h"
 #include "../pix24.h"
 #include "../pix3d.h"
@@ -48,6 +49,7 @@
 #include "../thirdparty/bzip.h"
 #include "../thirdparty/ini.h"
 #include "../thirdparty/isaac.h"
+#include "../varbittype.h"
 #include "../varptype.h"
 #include "../wordenc/wordfilter.h"
 #include "../wordenc/wordpack.h"
@@ -67,6 +69,7 @@ extern ObjTypeData _ObjType;
 extern ComponentData _Component;
 extern IdkTypeData _IdkType;
 extern VarpTypeData _VarpType;
+extern VarBitTypeData _VarBitType;
 extern SeqTypeData _SeqType;
 extern LocTypeData _LocType;
 extern SpotAnimTypeData _SpotAnimType;
@@ -78,7 +81,7 @@ extern SceneData _World3D;
 extern Custom _Custom;
 
 ClientData _Client = {
-    .clientversion = 225,
+    .clientversion = 254,
     .members = true,
     .nodeid = 10,
     .socketip = "localhost",
@@ -102,6 +105,10 @@ static void client_scenemap_free(Client *c);
 static void client_build_scene(Client *c);
 static void client_clear_caches(void);
 static void client_update_orbit_camera(Client *c);
+static int8_t *client_load_map_file(const char *kind, int mapsquareX, int mapsquareZ, int *out_size);
+static int8_t *client_load_raw_file(const char *filename_only, int *out_size);
+static inline bool component_valid(int id);
+static inline Component *component_get(int id);
 
 void client_init_global(void) {
     int acc = 0;
@@ -177,16 +184,45 @@ void client_load(Client *c) {
                 retry = 60;
             }
 #else
-            // TODO: hardcoded for now add openurl
-            c->archive_checksum[0] = 0;
-            c->archive_checksum[1] = 784449929;
-            c->archive_checksum[2] = -1494598746;
-            c->archive_checksum[3] = 1614084464;
-            c->archive_checksum[4] = 855958935;
-            c->archive_checksum[5] = -2000991154;
-            c->archive_checksum[6] = -313801935;
-            c->archive_checksum[7] = 1570981179;
-            c->archive_checksum[8] = -1532605973;
+            // Native builds don't fetch this over HTTP (client_openurl is a stub) - read the same
+            // 36-byte binary CRC table from the local cache instead, matching the file a bulk cache
+            // download saves as rom/cache/client/crc. Falls back to a stale rev225 hardcoded table
+            // (guaranteed to fail the server's CRC check) only if that file isn't present at all.
+            char crc_filename[PATH_MAX];
+#ifdef _arch_dreamcast
+            snprintf(crc_filename, sizeof(crc_filename), "cache/client/crc.");
+#elif defined(NXDK)
+            snprintf(crc_filename, sizeof(crc_filename), "D:\\cache\\client\\crc");
+#else
+            snprintf(crc_filename, sizeof(crc_filename), "rom/cache/client/crc");
+#endif
+            FILE *crc_file = fopen(crc_filename, "rb");
+            bool crc_loaded = false;
+            if (crc_file) {
+                int8_t crc_buf[36];
+                if (fread(crc_buf, 1, 36, crc_file) == 36) {
+                    Packet *checksums = packet_new(crc_buf, 36);
+                    for (int i = 0; i < 9; i++) {
+                        c->archive_checksum[i] = g4(checksums);
+                    }
+                    checksums->data = NULL; // stack buffer, don't let packet_free() try to free it
+                    packet_free(checksums);
+                    crc_loaded = true;
+                }
+                fclose(crc_file);
+            }
+            if (!crc_loaded) {
+                rs2_error("Failed to load local crc file, falling back to stale hardcoded checksums\n");
+                c->archive_checksum[0] = 0;
+                c->archive_checksum[1] = 784449929;
+                c->archive_checksum[2] = -1494598746;
+                c->archive_checksum[3] = 1614084464;
+                c->archive_checksum[4] = 855958935;
+                c->archive_checksum[5] = -2000991154;
+                c->archive_checksum[6] = -313801935;
+                c->archive_checksum[7] = 1570981179;
+                c->archive_checksum[8] = -1532605973;
+            }
 #endif
         } else {
             Packet *checksums = packet_new(buffer, size); // 36
@@ -221,6 +257,21 @@ void client_load(Client *c) {
     if (!config || !inter || !media || !models || !textures || !wordenc || !sounds) {
         c->error_loading = true;
         return;
+    }
+
+    // rev254 delivers real model data through ondemand.zip instead of the "models" archive above
+    // (which the server doesn't even serve for rev254 - "models" here is a stale placeholder kept
+    // only so the NULL-check above still passes). Not fatal if missing: model_from_id() falls back
+    // to the old models.jag-based path (producing wrong/missing geometry, not a crash) when
+    // ondemand isn't loaded, matching how every other best-effort fallback in this file behaves.
+    int ondemand_zip_size = 0;
+    int8_t *ondemand_zip_data = client_load_raw_file("ondemand.zip", &ondemand_zip_size);
+    if (ondemand_zip_data) {
+        if (!ondemand_load(ondemand_zip_data, ondemand_zip_size)) {
+            free(ondemand_zip_data);
+        }
+        // on success, ondemand_load() keeps ondemand_zip_data alive for the client's lifetime
+        // (miniz's mz_zip_reader_init_mem does not copy the buffer) - do not free it here.
     }
 
     c->levelTileFlags = calloc(4, sizeof(*c->levelTileFlags));
@@ -273,7 +324,9 @@ void client_load(Client *c) {
             break;
         }
     }
-    c->image_mapflag = pix24_from_archive(media, "mapflag", 0);
+    // rev254's media archive calls this sprite "mapmarker" (frame 0 = destination flag, frame 1 =
+    // hint/quest arrow, used elsewhere) - "mapflag" doesn't exist in this revision's real archive.
+    c->image_mapflag = pix24_from_archive(media, "mapmarker", 0);
     for (int i = 0; i < 8; i++) {
         c->image_crosses[i] = pix24_from_archive(media, "cross", i);
     }
@@ -303,35 +356,53 @@ void client_load(Client *c) {
     pix8_flip_horizontally(c->image_redstone2hv);
     pix8_flip_vertically(c->image_redstone2hv);
     Pix24 *backleft1 = pix24_from_archive(media, "backleft1", 0);
-    c->area_backleft1 = pixmap_new(backleft1->width, backleft1->height);
-    pix24_blit_opaque(backleft1, 0, 0);
+    if (backleft1) {
+        c->area_backleft1 = pixmap_new(backleft1->width, backleft1->height);
+        pix24_blit_opaque(backleft1, 0, 0);
+    }
     Pix24 *backleft2 = pix24_from_archive(media, "backleft2", 0);
-    c->area_backleft2 = pixmap_new(backleft2->width, backleft2->height);
-    pix24_blit_opaque(backleft2, 0, 0);
+    if (backleft2) {
+        c->area_backleft2 = pixmap_new(backleft2->width, backleft2->height);
+        pix24_blit_opaque(backleft2, 0, 0);
+    }
     Pix24 *backright1 = pix24_from_archive(media, "backright1", 0);
-    c->area_backright1 = pixmap_new(backright1->width, backright1->height);
-    pix24_blit_opaque(backright1, 0, 0);
+    if (backright1) {
+        c->area_backright1 = pixmap_new(backright1->width, backright1->height);
+        pix24_blit_opaque(backright1, 0, 0);
+    }
     Pix24 *backright2 = pix24_from_archive(media, "backright2", 0);
-    c->area_backright2 = pixmap_new(backright2->width, backright2->height);
-    pix24_blit_opaque(backright2, 0, 0);
+    if (backright2) {
+        c->area_backright2 = pixmap_new(backright2->width, backright2->height);
+        pix24_blit_opaque(backright2, 0, 0);
+    }
     Pix24 *backtop1 = pix24_from_archive(media, "backtop1", 0);
-    c->area_backtop1 = pixmap_new(backtop1->width, backtop1->height);
-    pix24_blit_opaque(backtop1, 0, 0);
-    Pix24 *backtop2 = pix24_from_archive(media, "backtop2", 0);
-    c->area_backtop2 = pixmap_new(backtop2->width, backtop2->height);
-    pix24_blit_opaque(backtop2, 0, 0);
+    if (backtop1) {
+        c->area_backtop1 = pixmap_new(backtop1->width, backtop1->height);
+        pix24_blit_opaque(backtop1, 0, 0);
+    }
+    // rev254's game frame has a single full-width top panel (backtop1) - there is no "backtop2"
+    // sprite in this revision's real media archive (confirmed against the reference client), so
+    // attempting to load and draw one always failed and left a permanent black gap at (561, 0).
     Pix24 *backvmid1 = pix24_from_archive(media, "backvmid1", 0);
-    c->area_backvmid1 = pixmap_new(backvmid1->width, backvmid1->height);
-    pix24_blit_opaque(backvmid1, 0, 0);
+    if (backvmid1) {
+        c->area_backvmid1 = pixmap_new(backvmid1->width, backvmid1->height);
+        pix24_blit_opaque(backvmid1, 0, 0);
+    }
     Pix24 *backvmid2 = pix24_from_archive(media, "backvmid2", 0);
-    c->area_backvmid2 = pixmap_new(backvmid2->width, backvmid2->height);
-    pix24_blit_opaque(backvmid2, 0, 0);
+    if (backvmid2) {
+        c->area_backvmid2 = pixmap_new(backvmid2->width, backvmid2->height);
+        pix24_blit_opaque(backvmid2, 0, 0);
+    }
     Pix24 *backvmid3 = pix24_from_archive(media, "backvmid3", 0);
-    c->area_backvmid3 = pixmap_new(backvmid3->width, backvmid3->height);
-    pix24_blit_opaque(backvmid3, 0, 0);
+    if (backvmid3) {
+        c->area_backvmid3 = pixmap_new(backvmid3->width, backvmid3->height);
+        pix24_blit_opaque(backvmid3, 0, 0);
+    }
     Pix24 *backhmid2 = pix24_from_archive(media, "backhmid2", 0);
-    c->area_backhmid2 = pixmap_new(backhmid2->width, backhmid2->height);
-    pix24_blit_opaque(backhmid2, 0, 0);
+    if (backhmid2) {
+        c->area_backhmid2 = pixmap_new(backhmid2->width, backhmid2->height);
+        pix24_blit_opaque(backhmid2, 0, 0);
+    }
 
     int rand_r = (int)(jrand() * 21.0) - 10;
     int rand_g = (int)(jrand() * 21.0) - 10;
@@ -354,8 +425,15 @@ void client_load(Client *c) {
 
     client_draw_progress(c, "Unpacking models", 83);
     model_unpack(models);
-    animbase_unpack(models);
-    animframe_unpack(models);
+    if (ondemand_is_loaded()) {
+        // rev254 delivers anim frames (and their embedded base skeletons) via ondemand.zip -
+        // see animframe_unpack_ondemand() for why mixing rev225 animation data with correctly
+        // decoded rev254 model geometry produced visibly stretched/twisted limbs.
+        animframe_unpack_ondemand();
+    } else {
+        animbase_unpack(models);
+        animframe_unpack(models);
+    }
 
     client_draw_progress(c, "Unpacking config", 86);
     seqtype_unpack(config);
@@ -366,6 +444,7 @@ void client_load(Client *c) {
     idktype_unpack(config);
     spotanimtype_unpack(config);
     varptype_unpack(config);
+    varbittype_unpack(config);
 
     _ObjType.membersWorld = _Client.members;
     if (!_Client.lowmem) {
@@ -380,10 +459,15 @@ void client_load(Client *c) {
     component_unpack(inter, media, fonts);
 
     client_draw_progress(c, "Preparing game engine", 97);
+    // rev254's real "mapback" sprite is 172x156 - these scan bounds (and the offset subtracted per
+    // row) assumed a differently-shaped rev225 image and read past the buffer / used the wrong hole
+    // position, corrupting the circular minimap clip mask. Bounds confirmed against the reference
+    // client: compass scan x<34 (was 35), minimap scan y in [5,156) x in [25,172) with offset -25
+    // (was y in [9,160) x in [10,168) offset -21).
     for (int y = 0; y < 33; y++) {
         int left = 999;
         int right = 0;
-        for (int x = 0; x < 35; x++) {
+        for (int x = 0; x < 34; x++) {
             if (c->image_mapback->pixels[x + y * c->image_mapback->width] == 0) {
                 if (left == 999) {
                     left = x;
@@ -397,10 +481,10 @@ void client_load(Client *c) {
         c->compass_mask_line_lengths[y] = right - left;
     }
 
-    for (int y = 9; y < 160; y++) {
+    for (int y = 5; y < 156; y++) {
         int left = 999;
         int right = 0;
-        for (int x = 10; x < 168; x++) {
+        for (int x = 25; x < 172; x++) {
             if (c->image_mapback->pixels[x + y * c->image_mapback->width] == 0 && (x > 34 || y > 34)) {
                 if (left == 999) {
                     left = x;
@@ -410,8 +494,8 @@ void client_load(Client *c) {
                 break;
             }
         }
-        c->minimap_mask_line_offsets[y - 9] = left - 21;
-        c->minimap_mask_line_lengths[y - 9] = right - left;
+        c->minimap_mask_line_offsets[y - 5] = left - 25;
+        c->minimap_mask_line_lengths[y - 5] = right - left;
     }
 
     pix3d_init3d(479, 96);
@@ -438,7 +522,6 @@ void client_load(Client *c) {
     pix24_free(backright1);
     pix24_free(backright2);
     pix24_free(backtop1);
-    pix24_free(backtop2);
     pix24_free(backvmid1);
     pix24_free(backvmid2);
     pix24_free(backvmid3);
@@ -492,28 +575,28 @@ void client_load_title_background(Client *c) {
     pix24_blit_opaque(title, 0, 0);
 
     pixmap_bind(c->image_title1);
-    pix24_blit_opaque(title, -661, 0);
+    pix24_blit_opaque(title, -637, 0);
 
     pixmap_bind(c->image_title2);
     pix24_blit_opaque(title, -128, 0);
 
     pixmap_bind(c->image_title3);
-    pix24_blit_opaque(title, -214, -386);
+    pix24_blit_opaque(title, -202, -371);
 
     pixmap_bind(c->image_title4);
-    pix24_blit_opaque(title, -214, -186);
+    pix24_blit_opaque(title, -202, -171);
 
     pixmap_bind(c->image_title5);
     pix24_blit_opaque(title, 0, -265);
 
     pixmap_bind(c->image_title6);
-    pix24_blit_opaque(title, -574, -265);
+    pix24_blit_opaque(title, -562, -265);
 
     pixmap_bind(c->image_title7);
-    pix24_blit_opaque(title, -128, -186);
+    pix24_blit_opaque(title, -128, -171);
 
     pixmap_bind(c->image_title8);
-    pix24_blit_opaque(title, -574, -186);
+    pix24_blit_opaque(title, -562, -171);
 
     int *mirror = malloc(title->width * sizeof(int));
     for (int y = 0; y < title->height; y++) {
@@ -528,31 +611,31 @@ void client_load_title_background(Client *c) {
     free(mirror);
 
     pixmap_bind(c->image_title0);
-    pix24_blit_opaque(title, 394, 0);
+    pix24_blit_opaque(title, 382, 0);
 
     pixmap_bind(c->image_title1);
-    pix24_blit_opaque(title, -267, 0);
+    pix24_blit_opaque(title, -255, 0);
 
     pixmap_bind(c->image_title2);
-    pix24_blit_opaque(title, 266, 0);
+    pix24_blit_opaque(title, 254, 0);
 
     pixmap_bind(c->image_title3);
-    pix24_blit_opaque(title, 180, -386);
+    pix24_blit_opaque(title, 180, -371);
 
     pixmap_bind(c->image_title4);
-    pix24_blit_opaque(title, 180, -186);
+    pix24_blit_opaque(title, 180, -171);
 
     pixmap_bind(c->image_title5);
-    pix24_blit_opaque(title, 394, -265);
+    pix24_blit_opaque(title, 382, -265);
 
     pixmap_bind(c->image_title6);
     pix24_blit_opaque(title, -180, -265);
 
     pixmap_bind(c->image_title7);
-    pix24_blit_opaque(title, 212, -186);
+    pix24_blit_opaque(title, 254, -171);
 
     pixmap_bind(c->image_title8);
-    pix24_blit_opaque(title, -180, -186);
+    pix24_blit_opaque(title, -180, -171);
 
     pix24_free(title);
     title = pix24_from_archive(c->archive_title, "logo", 0);
@@ -821,7 +904,7 @@ static void client_draw_flames(Client *c) {
         dstOffset += 128 - step - offset;
     }
 
-    pixmap_draw(c->image_title1, 661, 0);
+    pixmap_draw(c->image_title1, 637, 0);
 }
 
 void client_run_flames(Client *c) {
@@ -965,6 +1048,9 @@ void handleChatMouseInput(Client *c, int mouseX, int mouseY) {
 }
 
 void handleInterfaceInput(Client *c, Component *com, int mouseX, int mouseY, int x, int y, int scrollPosition) {
+    if (!com) {
+        return;
+    }
     if (com->type != 0 || !com->childId || com->hide || (mouseX < x || mouseY < y || mouseX > x + com->width || mouseY > y + com->height)) {
         return;
     }
@@ -1224,7 +1310,7 @@ void handlePrivateChatInput(Client *c, int mouse_x, int mouse_y) {
             if ((type == 3 || type == 7) && (type == 7 || c->private_chat_setting == 0 || (c->private_chat_setting == 1 && client_is_friend(c, c->message_sender[i])))) {
                 int y = 329 - lineOffset * 13;
                 // super.mouseX was used here for no reason when they are both passed to func
-                if (mouse_x > 8 && mouse_x < 520 && mouse_y - 11 > y - 10 && mouse_y - 11 <= y + 3) {
+                if (mouse_x > 4 && mouse_x < 516 && mouse_y - 4 > y - 10 && mouse_y - 4 <= y + 3) {
                     if (c->rights) {
                         sprintf(c->menu_option[c->menu_size], "Report abuse @whi@%s", c->message_sender[i]);
                         c->menu_action[c->menu_size] = 2034;
@@ -1282,13 +1368,19 @@ void addNpcOptions(Client *cl, NpcType *npc, int a, int b, int c) {
         return;
     }
 
+    // npc->name is only set if the npc's config data actually included a name entry (npctype.c code
+    // 2) - a type id beyond the loaded npc.idx range (falls back to npctype_new()'s defaults) or a
+    // real type that simply has no name both leave it NULL, and this used to strcpy() it unguarded -
+    // a real crash confirmed when clicking such an NPC.
+    const char *npc_name = npc->name ? npc->name : "Unknown";
+
     char tooltip[MAX_STR];
     if (npc->vislevel != 0) {
         char tmp[HALF_STR];
-        strcpy(tmp, npc->name);
+        strcpy(tmp, npc_name);
         sprintf(tooltip, "%s%s (level-%d)", tmp, getCombatLevelColorTag(cl->local_player->combatLevel, npc->vislevel), npc->vislevel);
     } else {
-        strcpy(tooltip, npc->name);
+        strcpy(tooltip, npc_name);
     }
 
     if (cl->obj_selected == 1) {
@@ -1539,23 +1631,34 @@ void handleViewportOptions(Client *c) {
         }
 
         if (entityType == 1) {
+            // c->npcs[typeId] is a 3D-picked entity index (from the model click/hover picking
+            // system) - the picked npc can have already been removed/desynced by the time this
+            // runs, and this was dereferenced with no NULL check at all. Confirmed real crash:
+            // clicking an NPC whose slot had gone stale segfaulted here immediately.
             NpcEntity *npc = c->npcs[typeId];
-            if (npc->type->size == 1 && (npc->pathing_entity.x & 0x7f) == 64 && (npc->pathing_entity.z & 0x7f) == 64) {
-                for (int i = 0; i < c->npc_count; i++) {
-                    NpcEntity *other = c->npcs[c->npc_ids[i]];
+            // npc->type is set immediately when an NpcEntity is created (getNpcPosNewVis) and only
+            // ever cleared to NULL right before the entity itself is freed (getNpcPos's removal
+            // loop) - but defend against it anyway since npc itself being non-NULL doesn't
+            // guarantee type is populated for every code path that can reach this pick.
+            if (npc && npc->type) {
+                if (npc->type->size == 1 && (npc->pathing_entity.x & 0x7f) == 64 && (npc->pathing_entity.z & 0x7f) == 64) {
+                    for (int i = 0; i < c->npc_count; i++) {
+                        NpcEntity *other = c->npcs[c->npc_ids[i]];
 
-                    if (other && other != npc && other->type->size == 1 && other->pathing_entity.x == npc->pathing_entity.x && other->pathing_entity.z == npc->pathing_entity.z) {
-                        addNpcOptions(c, other->type, c->npc_ids[i], x, z);
+                        if (other && other != npc && other->type && other->type->size == 1 && other->pathing_entity.x == npc->pathing_entity.x && other->pathing_entity.z == npc->pathing_entity.z) {
+                            addNpcOptions(c, other->type, c->npc_ids[i], x, z);
+                        }
                     }
                 }
-            }
 
-            addNpcOptions(c, npc->type, typeId, x, z);
+                addNpcOptions(c, npc->type, typeId, x, z);
+            }
         }
 
         if (entityType == 0) {
+            // see the entityType == 1 branch above for the same fix, same rationale.
             PlayerEntity *player = c->players[typeId];
-            if ((player->pathing_entity.x & 0x7f) == 64 && (player->pathing_entity.z & 0x7f) == 64) {
+            if (player && (player->pathing_entity.x & 0x7f) == 64 && (player->pathing_entity.z & 0x7f) == 64) {
                 for (int i = 0; i < c->npc_count; i++) {
                     NpcEntity *other = c->npcs[c->npc_ids[i]];
 
@@ -1573,7 +1676,9 @@ void handleViewportOptions(Client *c) {
                 }
             }
 
-            addPlayerOptions(c, player, typeId, x, z);
+            if (player) {
+                addPlayerOptions(c, player, typeId, x, z);
+            }
         }
 
         if (entityType == 3) {
@@ -1663,11 +1768,11 @@ void client_handle_input(Client *c) {
     handlePrivateChatInput(c, c->shell->mouse_x, c->shell->mouse_y);
     c->lastHoveredInterfaceId = 0;
 
-    if (c->shell->mouse_x > 8 && c->shell->mouse_y > 11 && c->shell->mouse_x < 520 && c->shell->mouse_y < 345) {
+    if (c->shell->mouse_x > 4 && c->shell->mouse_y > 4 && c->shell->mouse_x < 516 && c->shell->mouse_y < 338) {
         if (c->viewport_interface_id == -1) {
             handleViewportOptions(c);
         } else {
-            handleInterfaceInput(c, _Component.instances[c->viewport_interface_id], c->shell->mouse_x, c->shell->mouse_y, 8, 11, 0);
+            handleInterfaceInput(c, component_get(c->viewport_interface_id), c->shell->mouse_x, c->shell->mouse_y, 4, 4, 0);
         }
     }
 
@@ -1677,11 +1782,11 @@ void client_handle_input(Client *c) {
 
     c->lastHoveredInterfaceId = 0;
 
-    if (c->shell->mouse_x > 562 && c->shell->mouse_y > 231 && c->shell->mouse_x < 752 && c->shell->mouse_y < 492) {
+    if (c->shell->mouse_x > 553 && c->shell->mouse_y > 205 && c->shell->mouse_x < 743 && c->shell->mouse_y < 466) {
         if (c->sidebar_interface_id != -1) {
-            handleInterfaceInput(c, _Component.instances[c->sidebar_interface_id], c->shell->mouse_x, c->shell->mouse_y, 562, 231, 0);
+            handleInterfaceInput(c, component_get(c->sidebar_interface_id), c->shell->mouse_x, c->shell->mouse_y, 553, 205, 0);
         } else if (c->tab_interface_id[c->selected_tab] != -1) {
-            handleInterfaceInput(c, _Component.instances[c->tab_interface_id[c->selected_tab]], c->shell->mouse_x, c->shell->mouse_y, 562, 231, 0);
+            handleInterfaceInput(c, component_get(c->tab_interface_id[c->selected_tab]), c->shell->mouse_x, c->shell->mouse_y, 553, 205, 0);
         }
     }
 
@@ -1692,11 +1797,11 @@ void client_handle_input(Client *c) {
 
     c->lastHoveredInterfaceId = 0;
 
-    if (c->shell->mouse_x > 22 && c->shell->mouse_y > 375 && c->shell->mouse_x < 431 && c->shell->mouse_y < 471) {
+    if (c->shell->mouse_x > 17 && c->shell->mouse_y > 357 && c->shell->mouse_x < 426 && c->shell->mouse_y < 453) {
         if (c->chat_interface_id == -1) {
-            handleChatMouseInput(c, c->shell->mouse_x - 22, c->shell->mouse_y - 375);
+            handleChatMouseInput(c, c->shell->mouse_x - 17, c->shell->mouse_y - 357);
         } else {
-            handleInterfaceInput(c, _Component.instances[c->chat_interface_id], c->shell->mouse_x, c->shell->mouse_y, 22, 375, 0);
+            handleInterfaceInput(c, component_get(c->chat_interface_id), c->shell->mouse_x, c->shell->mouse_y, 17, 357, 0);
         }
     }
 
@@ -1846,7 +1951,7 @@ bool handleInterfaceAction(Client *c, Component *com) {
 
     if (clientCode == 326) {
         // IF_PLAYERDESIGN
-        p1isaac(c->out, 52);
+        p1isaac(c->out, 13); // IDK_SAVEDESIGN
         p1(c->out, c->design_gender_male ? 0 : 1);
         for (int i = 0; i < 7; i++) {
             p1(c->out, c->designIdentikits[i]);
@@ -1866,7 +1971,7 @@ bool handleInterfaceAction(Client *c, Component *com) {
 
         if (strlen(c->reportAbuseInput) > 0) {
             // BUG_REPORT
-            p1isaac(c->out, 190);
+            p1isaac(c->out, 203); // REPORT_ABUSE
             p8(c->out, jstring_to_base37(c->reportAbuseInput));
             p1(c->out, clientCode - 601);
             p1(c->out, c->reportAbuseMuteOption ? 1 : 0);
@@ -1925,15 +2030,15 @@ void showContextMenu(Client *c) {
 
     int x;
     int y;
-    if (c->shell->mouse_click_x > 8 && c->shell->mouse_click_y > 11 && c->shell->mouse_click_x < 520 && c->shell->mouse_click_y < 345) {
-        x = c->shell->mouse_click_x - width / 2 - 8;
+    if (c->shell->mouse_click_x > 4 && c->shell->mouse_click_y > 4 && c->shell->mouse_click_x < 516 && c->shell->mouse_click_y < 338) {
+        x = c->shell->mouse_click_x - width / 2 - 4;
         if (x + width > 512) {
             x = 512 - width;
         } else if (x < 0) {
             x = 0;
         }
 
-        y = c->shell->mouse_click_y - 11;
+        y = c->shell->mouse_click_y - 4;
         if (y + height > 334) {
             y = 334 - height;
         } else if (y < 0) {
@@ -1947,15 +2052,15 @@ void showContextMenu(Client *c) {
         c->menu_width = width;
         c->menu_height = c->menu_size * 15 + 22;
     }
-    if (c->shell->mouse_click_x > 562 && c->shell->mouse_click_y > 231 && c->shell->mouse_click_x < 752 && c->shell->mouse_click_y < 492) {
-        x = c->shell->mouse_click_x - width / 2 - 562;
+    if (c->shell->mouse_click_x > 553 && c->shell->mouse_click_y > 205 && c->shell->mouse_click_x < 743 && c->shell->mouse_click_y < 466) {
+        x = c->shell->mouse_click_x - width / 2 - 553;
         if (x < 0) {
             x = 0;
         } else if (x + width > 190) {
             x = 190 - width;
         }
 
-        y = c->shell->mouse_click_y - 231;
+        y = c->shell->mouse_click_y - 205;
         if (y < 0) {
             y = 0;
         } else if (y + height > 261) {
@@ -1969,15 +2074,15 @@ void showContextMenu(Client *c) {
         c->menu_width = width;
         c->menu_height = c->menu_size * 15 + 22;
     }
-    if (c->shell->mouse_click_x > 22 && c->shell->mouse_click_y > 375 && c->shell->mouse_click_x < 501 && c->shell->mouse_click_y < 471) {
-        x = c->shell->mouse_click_x - width / 2 - 22;
+    if (c->shell->mouse_click_x > 17 && c->shell->mouse_click_y > 357 && c->shell->mouse_click_x < 496 && c->shell->mouse_click_y < 453) {
+        x = c->shell->mouse_click_x - width / 2 - 17;
         if (x < 0) {
             x = 0;
         } else if (x + width > 479) {
             x = 479 - width;
         }
 
-        y = c->shell->mouse_click_y - 375;
+        y = c->shell->mouse_click_y - 357;
         if (y < 0) {
             y = 0;
         } else if (y + height > 96) {
@@ -2019,7 +2124,7 @@ void updateMergeLocs(Client *c) {
         if (_Client.cyclelogic5 > 85) {
             _Client.cyclelogic5 = 0;
             // ANTICHEAT_CYCLELOGIC5
-            p1isaac(c->out, 85);
+            p1isaac(c->out, 100); // ANTICHEAT_CYCLELOGIC5
         }
     }
 }
@@ -2283,12 +2388,12 @@ static void updateFacingDirection(Client *c, PathingEntity *e) {
     int remainingYaw = e->dstYaw - e->yaw & 0x7ff;
 
     if (remainingYaw != 0) {
-        if (remainingYaw < 32 || remainingYaw > 2016) {
+        if (remainingYaw < e->turnRate || remainingYaw > 2048 - e->turnRate) {
             e->yaw = e->dstYaw;
         } else if (remainingYaw > 1024) {
-            e->yaw -= 32;
+            e->yaw -= e->turnRate;
         } else {
-            e->yaw += 32;
+            e->yaw += e->turnRate;
         }
 
         e->yaw &= 0x7ff;
@@ -2419,8 +2524,8 @@ void updatePlayers(Client *c) {
     _Client.cyclelogic6++;
     if (_Client.cyclelogic6 > 1406) {
         _Client.cyclelogic6 = 0;
-        // ANTICHEAT_c->CYCLELOGIC6
-        p1isaac(c->out, 219);
+        // ANTICHEAT_CYCLELOGIC1 (variable/self-length-prefixed shape matched rev254's CYCLELOGIC1, not CYCLELOGIC6 as originally commented)
+        p1isaac(c->out, 51); // ANTICHEAT_CYCLELOGIC1
         p1(c->out, 0);
         int start = c->out->pos;
         p1(c->out, 162);
@@ -2734,15 +2839,15 @@ static bool client_try_move(Client *c, int srcX, int srcZ, int dx, int dz, int t
 
         if (type == 0) {
             // MOVE_GAMECLICK
-            p1isaac(c->out, 181);
+            p1isaac(c->out, 6); // MOVE_GAMECLICK
             p1(c->out, bufferSize + bufferSize + 3);
         } else if (type == 1) {
             // MOVE_MINIMAPCLICK
-            p1isaac(c->out, 165);
+            p1isaac(c->out, 220); // MOVE_MINIMAPCLICK
             p1(c->out, bufferSize + bufferSize + 3 + 14);
         } else if (type == 2) {
             // MOVE_OPCLICK
-            p1isaac(c->out, 93);
+            p1isaac(c->out, 127); // MOVE_OPCLICK
             p1(c->out, bufferSize + bufferSize + 3);
         }
 
@@ -2850,7 +2955,7 @@ static void addFriend(Client *c, int64_t username) {
         c->redraw_sidebar = true;
 
         // FRIENDLIST_ADD
-        p1isaac(c->out, 118);
+        p1isaac(c->out, 9); // FRIENDLIST_ADD
         p8(c->out, username);
     }
 }
@@ -2887,7 +2992,7 @@ static void addIgnore(Client *c, int64_t username) {
     c->ignoreName37[c->ignoreCount++] = username;
     c->redraw_sidebar = true;
     // IGNORELIST_ADD
-    p1isaac(c->out, 79);
+    p1isaac(c->out, 189); // IGNORELIST_ADD
     p8(c->out, username);
 }
 
@@ -2906,7 +3011,7 @@ static void removeFriend(Client *c, int64_t username) {
                 c->friendName37[j] = c->friendName37[j + 1];
             }
             // FRIENDLIST_DEL
-            p1isaac(c->out, 11);
+            p1isaac(c->out, 84); // FRIENDLIST_DEL
             p8(c->out, username);
             return;
         }
@@ -2926,7 +3031,7 @@ static void removeIgnore(Client *c, int64_t username) {
                 c->ignoreName37[j] = c->ignoreName37[j + 1];
             }
             // IGNORELIST_DEL
-            p1isaac(c->out, 171);
+            p1isaac(c->out, 193); // IGNORELIST_DEL
             p8(c->out, username);
             return;
         }
@@ -2970,10 +3075,10 @@ static void useMenuOption(Client *cl, int optionId) {
 
                     if (action == 903) {
                         // OPPLAYER4
-                        p1isaac(cl->out, 206);
+                        p1isaac(cl->out, 72); // OPPLAYER4
                     } else if (action == 363) {
                         // OPPLAYER1
-                        p1isaac(cl->out, 164);
+                        p1isaac(cl->out, 192); // OPPLAYER1
                     }
 
                     p2(cl->out, cl->player_ids[i]);
@@ -2990,7 +3095,7 @@ static void useMenuOption(Client *cl, int optionId) {
         }
     } else if (action == 450) {
         // OPLOCU
-        if (interactWithLoc(cl, 75, b, c, a)) {
+        if (interactWithLoc(cl, 240, b, c, a)) { // OPLOCU
             p2(cl->out, cl->objInterface);
             p2(cl->out, cl->objSelectedSlot);
             p2(cl->out, cl->objSelectedInterface);
@@ -3003,30 +3108,31 @@ static void useMenuOption(Client *cl, int optionId) {
 
             if (_Client.oplogic5 >= 90) {
                 // ANTICHEAT_OPLOGIC5
-                p1isaac(cl->out, 220);
+                p1isaac(cl->out, 233); // ANTICHEAT_OPLOGIC5
+                p1(cl->out, 154);
             }
 
             // OPHELD4
-            p1isaac(cl->out, 157);
+            p1isaac(cl->out, 163); // OPHELD4
         } else if (action == 347) {
             // OPHELD5
-            p1isaac(cl->out, 211);
+            p1isaac(cl->out, 74); // OPHELD5
         } else if (action == 422) {
             // OPHELD3
-            p1isaac(cl->out, 133);
+            p1isaac(cl->out, 80); // OPHELD3
         } else if (action == 405) {
             _Client.oplogic3 += a;
             if (_Client.oplogic3 >= 97) {
                 // ANTICHEAT_OPLOGIC3
-                p1isaac(cl->out, 30);
-                p3(cl->out, 14953816);
+                p1isaac(cl->out, 56); // ANTICHEAT_OPLOGIC3
+                p4(cl->out, 0);
             }
 
             // OPHELD1
-            p1isaac(cl->out, 195);
+            p1isaac(cl->out, 243); // OPHELD1
         } else if (action == 38) {
             // OPHELD2
-            p1isaac(cl->out, 71);
+            p1isaac(cl->out, 228); // OPHELD2
         }
 
         p2(cl->out, a);
@@ -3056,7 +3162,7 @@ static void useMenuOption(Client *cl, int optionId) {
 
             if (action == 542) {
                 // OPNPC2
-                p1isaac(cl->out, 8);
+                p1isaac(cl->out, 195); // OPNPC2
             } else if (action == 6) {
                 if ((a & 0x3) == 0) {
                     _Client.oplogic2++;
@@ -3064,18 +3170,18 @@ static void useMenuOption(Client *cl, int optionId) {
 
                 if (_Client.oplogic2 >= 124) {
                     // ANTICHEAT_OPLOGIC2
-                    p1isaac(cl->out, 88);
-                    p4(cl->out, 0);
+                    p1isaac(cl->out, 77); // ANTICHEAT_OPLOGIC2
+                    p2(cl->out, 37954);
                 }
 
                 // OPNPC3
-                p1isaac(cl->out, 27);
+                p1isaac(cl->out, 69); // OPNPC3
             } else if (action == 963) {
                 // OPNPC4
-                p1isaac(cl->out, 113);
+                p1isaac(cl->out, 122); // OPNPC4
             } else if (action == 728) {
                 // OPNPC1
-                p1isaac(cl->out, 194);
+                p1isaac(cl->out, 143); // OPNPC1
             } else if (action == 245) {
                 if ((a & 0x3) == 0) {
                     _Client.oplogic4++;
@@ -3083,12 +3189,12 @@ static void useMenuOption(Client *cl, int optionId) {
 
                 if (_Client.oplogic4 >= 85) {
                     // ANTICHEAT_OPLOGIC4
-                    p1isaac(cl->out, 176);
-                    p2(cl->out, 39596);
+                    p1isaac(cl->out, 121); // ANTICHEAT_OPLOGIC4
+                    p1(cl->out, 131);
                 }
 
                 // OPNPC5
-                p1isaac(cl->out, 100);
+                p1isaac(cl->out, 118); // OPNPC5
             }
 
             p2(cl->out, a);
@@ -3105,7 +3211,7 @@ static void useMenuOption(Client *cl, int optionId) {
         cl->cross_cycle = 0;
 
         // OPOBJU
-        p1isaac(cl->out, 239);
+        p1isaac(cl->out, 245); // OPOBJU
         p2(cl->out, b + cl->sceneBaseTileX);
         p2(cl->out, c + cl->sceneBaseTileZ);
         p2(cl->out, a);
@@ -3126,10 +3232,10 @@ static void useMenuOption(Client *cl, int optionId) {
         client_add_message(cl, 0, examine, "");
     } else if (action == 285) {
         // OPLOC1
-        interactWithLoc(cl, 245, b, c, a);
+        interactWithLoc(cl, 33, b, c, a); // OPLOC1
     } else if (action == 881) {
         // OPHELDU
-        p1isaac(cl->out, 130);
+        p1isaac(cl->out, 200); // OPHELDU
         p2(cl->out, a);
         p2(cl->out, b);
         p2(cl->out, c);
@@ -3151,7 +3257,7 @@ static void useMenuOption(Client *cl, int optionId) {
         }
     } else if (action == 391) {
         // OPHELDT
-        p1isaac(cl->out, 48);
+        p1isaac(cl->out, 102); // OPHELDT
         p2(cl->out, a);
         p2(cl->out, b);
         p2(cl->out, c);
@@ -3173,7 +3279,7 @@ static void useMenuOption(Client *cl, int optionId) {
         if (cl->menu_visible) {
             world3d_click(b - 8, c - 11);
         } else {
-            world3d_click(cl->shell->mouse_click_x - 8, cl->shell->mouse_click_y - 11);
+            world3d_click(cl->shell->mouse_click_x - 4, cl->shell->mouse_click_y - 4);
         }
     } else if (action == 188) {
         cl->obj_selected = 1;
@@ -3189,7 +3295,7 @@ static void useMenuOption(Client *cl, int optionId) {
     } else if (action == 44) {
         if (!cl->pressed_continue_option) {
             // RESUME_PAUSEBUTTON
-            p1isaac(cl->out, 235);
+            p1isaac(cl->out, 146); // RESUME_PAUSEBUTTON
             p2(cl->out, c);
             cl->pressed_continue_option = true;
         }
@@ -3216,7 +3322,7 @@ static void useMenuOption(Client *cl, int optionId) {
             cl->cross_mode = 2;
             cl->cross_cycle = 0;
             // OPNPCU
-            p1isaac(cl->out, 202);
+            p1isaac(cl->out, 119); // OPNPCU
             p2(cl->out, a);
             p2(cl->out, cl->objInterface);
             p2(cl->out, cl->objSelectedSlot);
@@ -3234,23 +3340,23 @@ static void useMenuOption(Client *cl, int optionId) {
 
             if (action == 1101) {
                 // OPPLAYER1
-                p1isaac(cl->out, 164);
+                p1isaac(cl->out, 192); // OPPLAYER1
             } else if (action == 151) {
                 _Client.oplogic8++;
                 if (_Client.oplogic8 >= 90) {
                     // ANTICHEAT_OPLOGIC8
-                    p1isaac(cl->out, 2);
-                    p2(cl->out, 31114);
+                    p1isaac(cl->out, 206); // ANTICHEAT_OPLOGIC8
+                    p1(cl->out, 19);
                 }
 
                 // OPPLAYER2
-                p1isaac(cl->out, 53);
+                p1isaac(cl->out, 17); // OPPLAYER2
             } else if (action == 1373) {
                 // OPPLAYER4
-                p1isaac(cl->out, 206);
+                p1isaac(cl->out, 72); // OPPLAYER4
             } else if (action == 1544) {
                 // OPPLAYER3
-                p1isaac(cl->out, 185);
+                p1isaac(cl->out, 18); // OPPLAYER3
             }
 
             p2(cl->out, a);
@@ -3266,7 +3372,7 @@ static void useMenuOption(Client *cl, int optionId) {
             cl->cross_cycle = 0;
 
             // OPNPCT
-            p1isaac(cl->out, 134);
+            p1isaac(cl->out, 231); // OPNPCT
             p2(cl->out, a);
             p2(cl->out, cl->activeSpellId);
         }
@@ -3298,7 +3404,7 @@ static void useMenuOption(Client *cl, int optionId) {
         }
     } else if (action == 55) {
         // OPLOCT
-        if (interactWithLoc(cl, 9, b, c, a)) {
+        if (interactWithLoc(cl, 26, b, c, a)) { // OPLOCT
             p2(cl->out, cl->activeSpellId);
         }
     } else if (action == 224 || action == 993 || action == 99 || action == 746 || action == 877) {
@@ -3314,19 +3420,19 @@ static void useMenuOption(Client *cl, int optionId) {
 
         if (action == 224) {
             // OPOBJ1
-            p1isaac(cl->out, 140);
+            p1isaac(cl->out, 141); // OPOBJ1
         } else if (action == 746) {
             // OPOBJ4
-            p1isaac(cl->out, 178);
+            p1isaac(cl->out, 47); // OPOBJ4
         } else if (action == 877) {
             // OPOBJ5
-            p1isaac(cl->out, 247);
+            p1isaac(cl->out, 97); // OPOBJ5
         } else if (action == 99) {
             // OPOBJ3
-            p1isaac(cl->out, 200);
+            p1isaac(cl->out, 178); // OPOBJ3
         } else if (action == 993) {
             // OPOBJ2
-            p1isaac(cl->out, 40);
+            p1isaac(cl->out, 67); // OPOBJ2
         }
 
         p2(cl->out, b + cl->sceneBaseTileX);
@@ -3338,7 +3444,8 @@ static void useMenuOption(Client *cl, int optionId) {
             char examine[MAX_STR];
 
             if (!npc->type->desc) {
-                sprintf(examine, "It's a %s.", npc->type->name);
+                // see addNpcOptions() - npc->type->name can be NULL for a type with no name entry
+                sprintf(examine, "It's a %s.", npc->type->name ? npc->type->name : "Unknown");
             } else {
                 strcpy(examine, npc->type->desc);
             }
@@ -3347,7 +3454,7 @@ static void useMenuOption(Client *cl, int optionId) {
         }
     } else if (action == 504) {
         // OPLOC2
-        interactWithLoc(cl, 172, b, c, a);
+        interactWithLoc(cl, 213, b, c, a); // OPLOC2
     } else if (action == 930) {
         Component *com = _Component.instances[c];
         cl->spell_selected = 1;
@@ -3397,13 +3504,13 @@ static void useMenuOption(Client *cl, int optionId) {
 
         if (notify) {
             // IF_BUTTON
-            p1isaac(cl->out, 155);
+            p1isaac(cl->out, 244); // IF_BUTTON
             p2(cl->out, c);
         }
     } else if (action == 602 || action == 596 || action == 22 || action == 892 || action == 415) {
         if (action == 22) {
             // INV_BUTTON3
-            p1isaac(cl->out, 212);
+            p1isaac(cl->out, 59); // INV_BUTTON3
         } else if (action == 415) {
             if ((c & 0x3) == 0) {
                 _Client.oplogic7++;
@@ -3411,15 +3518,15 @@ static void useMenuOption(Client *cl, int optionId) {
 
             if (_Client.oplogic7 >= 55) {
                 // ANTICHEAT_OPLOGIC7
-                p1isaac(cl->out, 17);
+                p1isaac(cl->out, 187); // ANTICHEAT_OPLOGIC7
                 p4(cl->out, 0);
             }
 
             // INV_BUTTON5
-            p1isaac(cl->out, 6);
+            p1isaac(cl->out, 62); // INV_BUTTON5
         } else if (action == 602) {
             // INV_BUTTON1
-            p1isaac(cl->out, 31);
+            p1isaac(cl->out, 181); // INV_BUTTON1
         } else if (action == 892) {
             if ((b & 0x3) == 0) {
                 _Client.oplogic9++;
@@ -3427,15 +3534,15 @@ static void useMenuOption(Client *cl, int optionId) {
 
             if (_Client.oplogic9 >= 130) {
                 // ANTICHEAT_OPLOGIC9
-                p1isaac(cl->out, 238);
-                p1(cl->out, 177);
+                p1isaac(cl->out, 162); // ANTICHEAT_OPLOGIC9
+                p3(cl->out, 13018169);
             }
 
             // INV_BUTTON4
-            p1isaac(cl->out, 38);
+            p1isaac(cl->out, 160); // INV_BUTTON4
         } else if (action == 596) {
             // INV_BUTTON2
-            p1isaac(cl->out, 59);
+            p1isaac(cl->out, 70); // INV_BUTTON2
         }
 
         p2(cl->out, a);
@@ -3461,12 +3568,12 @@ static void useMenuOption(Client *cl, int optionId) {
 
         if (_Client.oplogic1 >= 99) {
             // ANTICHEAT_OPLOGIC1
-            p1isaac(cl->out, 7);
+            p1isaac(cl->out, 28); // ANTICHEAT_OPLOGIC1
             p4(cl->out, 0);
         }
 
         // OPLOC4
-        interactWithLoc(cl, 97, b, c, a);
+        interactWithLoc(cl, 87, b, c, a); // OPLOC4
     } else if (action == 965) {
         bool success = client_try_move(cl, cl->local_player->pathing_entity.pathTileX[0], cl->local_player->pathing_entity.pathTileZ[0], b, c, 2, 0, 0, 0, 0, 0, false);
         if (!success) {
@@ -3479,7 +3586,7 @@ static void useMenuOption(Client *cl, int optionId) {
         cl->cross_cycle = 0;
 
         // OPOBJT
-        p1isaac(cl->out, 138);
+        p1isaac(cl->out, 202); // OPOBJT
         p2(cl->out, b + cl->sceneBaseTileX);
         p2(cl->out, c + cl->sceneBaseTileZ);
         p2(cl->out, a);
@@ -3488,15 +3595,15 @@ static void useMenuOption(Client *cl, int optionId) {
         _Client.oplogic6 += cl->sceneBaseTileZ;
         if (_Client.oplogic6 >= 92) {
             // ANTICHEAT_OPLOGIC6
-            p1isaac(cl->out, 66);
-            p4(cl->out, 0);
+            p1isaac(cl->out, 131); // ANTICHEAT_OPLOGIC6
+            p2(cl->out, 6118);
         }
 
         // OPLOC5
-        interactWithLoc(cl, 116, b, c, a);
+        interactWithLoc(cl, 147, b, c, a); // OPLOC5
     } else if (action == 364) {
         // OPLOC3
-        interactWithLoc(cl, 96, b, c, a);
+        interactWithLoc(cl, 98, b, c, a); // OPLOC3
     } else if (action == 1102) {
         ObjType *obj = objtype_get(a);
         char examine[MAX_STR];
@@ -3509,7 +3616,7 @@ static void useMenuOption(Client *cl, int optionId) {
         client_add_message(cl, 0, examine, "");
     } else if (action == 960) {
         // IF_BUTTON
-        p1isaac(cl->out, 155);
+        p1isaac(cl->out, 244); // IF_BUTTON
         p2(cl->out, c);
 
         Component *com = _Component.instances[c];
@@ -3552,7 +3659,7 @@ static void useMenuOption(Client *cl, int optionId) {
             cl->cross_cycle = 0;
 
             // OPPLAYERU
-            p1isaac(cl->out, 248);
+            p1isaac(cl->out, 113); // OPPLAYERU
             p2(cl->out, a);
             p2(cl->out, cl->objInterface);
             p2(cl->out, cl->objSelectedSlot);
@@ -3560,7 +3667,7 @@ static void useMenuOption(Client *cl, int optionId) {
         }
     } else if (action == 465) {
         // IF_BUTTON
-        p1isaac(cl->out, 155);
+        p1isaac(cl->out, 244); // IF_BUTTON
         p2(cl->out, c);
 
         Component *com = _Component.instances[c];
@@ -3600,7 +3707,7 @@ static void useMenuOption(Client *cl, int optionId) {
             cl->cross_cycle = 0;
 
             // OPPLAYERT
-            p1isaac(cl->out, 177);
+            p1isaac(cl->out, 68); // OPPLAYERT
             p2(cl->out, a);
             p2(cl->out, cl->activeSpellId);
         }
@@ -3775,7 +3882,7 @@ static void handleInputKey(Client *c) {
 
                         if (c->social_action == 3 && len > 0) {
                             // MESSAGE_PRIVATE
-                            p1isaac(c->out, 148);
+                            p1isaac(c->out, 214); // MESSAGE_PRIVATE
                             p1(c->out, 0);
                             int start = c->out->pos;
                             p8(c->out, c->social_name37);
@@ -3788,7 +3895,7 @@ static void handleInputKey(Client *c) {
                                 c->private_chat_setting = 1;
                                 c->redraw_privacy_settings = true;
                                 // CHAT_SETMODE
-                                p1isaac(c->out, 244);
+                                p1isaac(c->out, 129); // CHAT_SETMODE
                                 p1(c->out, c->public_chat_setting);
                                 p1(c->out, c->private_chat_setting);
                                 p1(c->out, c->trade_chat_setting);
@@ -3826,7 +3933,7 @@ static void handleInputKey(Client *c) {
                             // } catch (Exception ignored) {
                             // }
                             // RESUME_P_COUNTDIALOG
-                            p1isaac(c->out, 237);
+                            p1isaac(c->out, 161); // RESUME_P_COUNTDIALOG
                             p4(c->out, value);
                         }
                         c->chatback_input_open = false;
@@ -3927,7 +4034,7 @@ static void handleInputKey(Client *c) {
 
                         if (strstartswith(c->chat_typed, "::")) {
                             // CLIENT_CHEAT
-                            p1isaac(c->out, 4);
+                            p1isaac(c->out, 86); // CLIENT_CHEAT
                             p1(c->out, len - 1);
                             char *sub = substring(c->chat_typed, 2, len);
                             pjstr(c->out, sub);
@@ -3983,7 +4090,7 @@ static void handleInputKey(Client *c) {
                             }
 
                             // MESSAGE_PUBLIC
-                            p1isaac(c->out, 158);
+                            p1isaac(c->out, 83); // MESSAGE_PUBLIC
                             p1(c->out, 0);
                             int start = c->out->pos;
                             p1(c->out, color);
@@ -4003,7 +4110,7 @@ static void handleInputKey(Client *c) {
                                 c->public_chat_setting = 3;
                                 c->redraw_privacy_settings = true;
                                 // CHAT_SETMODE
-                                p1isaac(c->out, 244);
+                                p1isaac(c->out, 129); // CHAT_SETMODE
                                 p1(c->out, c->public_chat_setting);
                                 p1(c->out, c->private_chat_setting);
                                 p1(c->out, c->trade_chat_setting);
@@ -4031,7 +4138,7 @@ static void handleMouseInput(Client *c) {
     }
 
     int button = c->shell->mouse_click_button;
-    if (c->spell_selected == 1 && c->shell->mouse_click_x >= 520 && c->shell->mouse_click_y >= 165 && c->shell->mouse_click_x <= 788 && c->shell->mouse_click_y <= 230) {
+    if (c->spell_selected == 1 && c->shell->mouse_click_x >= 516 && c->shell->mouse_click_y >= 160 && c->shell->mouse_click_x <= 765 && c->shell->mouse_click_y <= 205) {
         button = 0;
     }
 
@@ -4041,14 +4148,14 @@ static void handleMouseInput(Client *c) {
             int y = c->shell->mouse_y;
 
             if (c->menu_area == 0) {
-                x -= 8;
-                y -= 11;
+                x -= 4;
+                y -= 4;
             } else if (c->menu_area == 1) {
-                x -= 562;
-                y -= 231;
+                x -= 553;
+                y -= 205;
             } else if (c->menu_area == 2) {
-                x -= 22;
-                y -= 375;
+                x -= 17;
+                y -= 357;
             }
 
             if (x < c->menu_x - 10 || x > c->menu_x + c->menu_width + 10 || y < c->menu_y - 10 || y > c->menu_y + c->menu_height + 10) {
@@ -4071,14 +4178,14 @@ static void handleMouseInput(Client *c) {
             int clickY = c->shell->mouse_click_y;
 
             if (c->menu_area == 0) {
-                clickX -= 8;
-                clickY -= 11;
+                clickX -= 4;
+                clickY -= 4;
             } else if (c->menu_area == 1) {
-                clickX -= 562;
-                clickY -= 231;
+                clickX -= 553;
+                clickY -= 205;
             } else if (c->menu_area == 2) {
-                clickX -= 22;
-                clickY -= 375;
+                clickX -= 17;
+                clickY -= 357;
             }
 
             int option = -1;
@@ -4107,9 +4214,13 @@ static void handleMouseInput(Client *c) {
             if (action == 602 || action == 596 || action == 22 || action == 892 || action == 415 || action == 405 || action == 38 || action == 422 || action == 478 || action == 347 || action == 188) {
                 int slot = c->menuParamB[c->menu_size - 1];
                 int comId = c->menuParamC[c->menu_size - 1];
-                Component *com = _Component.instances[comId];
+                // menuParamC's component id traces back to menu-building code that stores whatever
+                // id a hovered/picked entity happened to carry - same unchecked-network/state-id
+                // class of bug fixed everywhere else this session. com->draggable was dereferenced
+                // with zero validation.
+                Component *com = component_get(comId);
 
-                if (com->draggable) {
+                if (com && com->draggable) {
                     c->objGrabThreshold = false;
                     c->obj_drag_cycles = 0;
                     c->objDragInterfaceId = comId;
@@ -4118,11 +4229,11 @@ static void handleMouseInput(Client *c) {
                     c->objGrabX = c->shell->mouse_click_x;
                     c->objGrabY = c->shell->mouse_click_y;
 
-                    if (_Component.instances[comId]->layer == c->viewport_interface_id) {
+                    if (com->layer == c->viewport_interface_id) {
                         c->obj_drag_area = 1;
                     }
 
-                    if (_Component.instances[comId]->layer == c->chat_interface_id) {
+                    if (com->layer == c->chat_interface_id) {
                         c->obj_drag_area = 3;
                     }
 
@@ -4149,8 +4260,8 @@ static void handleMouseInput(Client *c) {
 
 static void handleMinimapInput(Client *c) {
     if (c->shell->mouse_click_button == 1) {
-        int x = c->shell->mouse_click_x - 21 - 561;
-        int y = c->shell->mouse_click_y - 9 - 5;
+        int x = c->shell->mouse_click_x - 25 - 550;
+        int y = c->shell->mouse_click_y - 4 - 4;
 
         if (x >= 0 && y >= 0 && x < 146 && y < 151) {
             x -= 73;
@@ -4193,59 +4304,62 @@ static void handleTabInput(Client *c) {
         return;
     }
 
-    if (c->shell->mouse_click_x >= 549 && c->shell->mouse_click_x <= 583 && c->shell->mouse_click_y >= 195 && c->shell->mouse_click_y < 231 && c->tab_interface_id[0] != -1) {
+    // hit-box values below are irregular (169 vs 168, 203/502 vs 505/503, differing widths) exactly
+    // like the real client's own tab boxes - copied verbatim from the reference rather than
+    // "normalized", since these correspond to the fixed-mode (765x503) frame's actual sprite seams.
+    if (c->shell->mouse_click_x >= 539 && c->shell->mouse_click_x <= 573 && c->shell->mouse_click_y >= 169 && c->shell->mouse_click_y < 205 && c->tab_interface_id[0] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 0;
         c->redraw_sideicons = true;
-    } else if (c->shell->mouse_click_x >= 579 && c->shell->mouse_click_x <= 609 && c->shell->mouse_click_y >= 194 && c->shell->mouse_click_y < 231 && c->tab_interface_id[1] != -1) {
+    } else if (c->shell->mouse_click_x >= 569 && c->shell->mouse_click_x <= 599 && c->shell->mouse_click_y >= 168 && c->shell->mouse_click_y < 205 && c->tab_interface_id[1] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 1;
         c->redraw_sideicons = true;
-    } else if (c->shell->mouse_click_x >= 607 && c->shell->mouse_click_x <= 637 && c->shell->mouse_click_y >= 194 && c->shell->mouse_click_y < 231 && c->tab_interface_id[2] != -1) {
+    } else if (c->shell->mouse_click_x >= 597 && c->shell->mouse_click_x <= 627 && c->shell->mouse_click_y >= 168 && c->shell->mouse_click_y < 205 && c->tab_interface_id[2] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 2;
         c->redraw_sideicons = true;
-    } else if (c->shell->mouse_click_x >= 635 && c->shell->mouse_click_x <= 679 && c->shell->mouse_click_y >= 194 && c->shell->mouse_click_y < 229 && c->tab_interface_id[3] != -1) {
+    } else if (c->shell->mouse_click_x >= 625 && c->shell->mouse_click_x <= 669 && c->shell->mouse_click_y >= 168 && c->shell->mouse_click_y < 203 && c->tab_interface_id[3] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 3;
         c->redraw_sideicons = true;
-    } else if (c->shell->mouse_click_x >= 676 && c->shell->mouse_click_x <= 706 && c->shell->mouse_click_y >= 194 && c->shell->mouse_click_y < 231 && c->tab_interface_id[4] != -1) {
+    } else if (c->shell->mouse_click_x >= 666 && c->shell->mouse_click_x <= 696 && c->shell->mouse_click_y >= 168 && c->shell->mouse_click_y < 205 && c->tab_interface_id[4] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 4;
         c->redraw_sideicons = true;
-    } else if (c->shell->mouse_click_x >= 704 && c->shell->mouse_click_x <= 734 && c->shell->mouse_click_y >= 194 && c->shell->mouse_click_y < 231 && c->tab_interface_id[5] != -1) {
+    } else if (c->shell->mouse_click_x >= 694 && c->shell->mouse_click_x <= 724 && c->shell->mouse_click_y >= 168 && c->shell->mouse_click_y < 205 && c->tab_interface_id[5] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 5;
         c->redraw_sideicons = true;
-    } else if (c->shell->mouse_click_x >= 732 && c->shell->mouse_click_x <= 766 && c->shell->mouse_click_y >= 195 && c->shell->mouse_click_y < 231 && c->tab_interface_id[6] != -1) {
+    } else if (c->shell->mouse_click_x >= 722 && c->shell->mouse_click_x <= 756 && c->shell->mouse_click_y >= 169 && c->shell->mouse_click_y < 205 && c->tab_interface_id[6] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 6;
         c->redraw_sideicons = true;
-    } else if (c->shell->mouse_click_x >= 550 && c->shell->mouse_click_x <= 584 && c->shell->mouse_click_y >= 492 && c->shell->mouse_click_y < 528 && c->tab_interface_id[7] != -1) {
+    } else if (c->shell->mouse_click_x >= 540 && c->shell->mouse_click_x <= 574 && c->shell->mouse_click_y >= 466 && c->shell->mouse_click_y < 502 && c->tab_interface_id[7] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 7;
         c->redraw_sideicons = true;
-    } else if (c->shell->mouse_click_x >= 582 && c->shell->mouse_click_x <= 612 && c->shell->mouse_click_y >= 492 && c->shell->mouse_click_y < 529 && c->tab_interface_id[8] != -1) {
+    } else if (c->shell->mouse_click_x >= 572 && c->shell->mouse_click_x <= 602 && c->shell->mouse_click_y >= 466 && c->shell->mouse_click_y < 503 && c->tab_interface_id[8] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 8;
         c->redraw_sideicons = true;
-    } else if (c->shell->mouse_click_x >= 609 && c->shell->mouse_click_x <= 639 && c->shell->mouse_click_y >= 492 && c->shell->mouse_click_y < 529 && c->tab_interface_id[9] != -1) {
+    } else if (c->shell->mouse_click_x >= 599 && c->shell->mouse_click_x <= 629 && c->shell->mouse_click_y >= 466 && c->shell->mouse_click_y < 503 && c->tab_interface_id[9] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 9;
         c->redraw_sideicons = true;
-    } else if (c->shell->mouse_click_x >= 637 && c->shell->mouse_click_x <= 681 && c->shell->mouse_click_y >= 493 && c->shell->mouse_click_y < 528 && c->tab_interface_id[10] != -1) {
+    } else if (c->shell->mouse_click_x >= 627 && c->shell->mouse_click_x <= 671 && c->shell->mouse_click_y >= 467 && c->shell->mouse_click_y < 502 && c->tab_interface_id[10] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 10;
         c->redraw_sideicons = true;
-    } else if (c->shell->mouse_click_x >= 679 && c->shell->mouse_click_x <= 709 && c->shell->mouse_click_y >= 492 && c->shell->mouse_click_y < 529 && c->tab_interface_id[11] != -1) {
+    } else if (c->shell->mouse_click_x >= 669 && c->shell->mouse_click_x <= 699 && c->shell->mouse_click_y >= 466 && c->shell->mouse_click_y < 503 && c->tab_interface_id[11] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 11;
         c->redraw_sideicons = true;
-    } else if (c->shell->mouse_click_x >= 706 && c->shell->mouse_click_x <= 736 && c->shell->mouse_click_y >= 492 && c->shell->mouse_click_y < 529 && c->tab_interface_id[12] != -1) {
+    } else if (c->shell->mouse_click_x >= 696 && c->shell->mouse_click_x <= 726 && c->shell->mouse_click_y >= 466 && c->shell->mouse_click_y < 503 && c->tab_interface_id[12] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 12;
         c->redraw_sideicons = true;
-    } else if (c->shell->mouse_click_x >= 734 && c->shell->mouse_click_x <= 768 && c->shell->mouse_click_y >= 492 && c->shell->mouse_click_y < 528 && c->tab_interface_id[13] != -1) {
+    } else if (c->shell->mouse_click_x >= 724 && c->shell->mouse_click_x <= 758 && c->shell->mouse_click_y >= 466 && c->shell->mouse_click_y < 502 && c->tab_interface_id[13] != -1) {
         c->redraw_sidebar = true;
         c->selected_tab = 13;
         c->redraw_sideicons = true;
@@ -4254,9 +4368,9 @@ static void handleTabInput(Client *c) {
     _Client.cyclelogic1++;
     if (_Client.cyclelogic1 > 150) {
         _Client.cyclelogic1 = 0;
-        // ANTICHEAT_CYCLELOGIC1
-        p1isaac(c->out, 233);
-        p1(c->out, 43);
+        // ANTICHEAT_CYCLELOGIC6 (fixed 1-byte shape matched rev254's CYCLELOGIC6, not CYCLELOGIC1 as originally commented - real CYCLELOGIC1 is variable-length, see the c->out 51 site above)
+        p1isaac(c->out, 36); // ANTICHEAT_CYCLELOGIC6
+        p1(c->out, 62);
     }
 }
 
@@ -4265,37 +4379,37 @@ static void handleChatSettingsInput(Client *c) {
         return;
     }
 
-    if (c->shell->mouse_click_x >= 8 && c->shell->mouse_click_x <= 108 && c->shell->mouse_click_y >= 490 && c->shell->mouse_click_y <= 522) {
+    if (c->shell->mouse_click_x >= 6 && c->shell->mouse_click_x <= 106 && c->shell->mouse_click_y >= 467 && c->shell->mouse_click_y <= 499) {
         c->public_chat_setting = (c->public_chat_setting + 1) % 4;
         c->redraw_privacy_settings = true;
         c->redraw_chatback = true;
 
         // CHAT_SETMODE
-        p1isaac(c->out, 244);
+        p1isaac(c->out, 129); // CHAT_SETMODE
         p1(c->out, c->public_chat_setting);
         p1(c->out, c->private_chat_setting);
         p1(c->out, c->trade_chat_setting);
-    } else if (c->shell->mouse_click_x >= 137 && c->shell->mouse_click_x <= 237 && c->shell->mouse_click_y >= 490 && c->shell->mouse_click_y <= 522) {
+    } else if (c->shell->mouse_click_x >= 135 && c->shell->mouse_click_x <= 235 && c->shell->mouse_click_y >= 467 && c->shell->mouse_click_y <= 499) {
         c->private_chat_setting = (c->private_chat_setting + 1) % 3;
         c->redraw_privacy_settings = true;
         c->redraw_chatback = true;
 
         // CHAT_SETMODE
-        p1isaac(c->out, 244);
+        p1isaac(c->out, 129); // CHAT_SETMODE
         p1(c->out, c->public_chat_setting);
         p1(c->out, c->private_chat_setting);
         p1(c->out, c->trade_chat_setting);
-    } else if (c->shell->mouse_click_x >= 275 && c->shell->mouse_click_x <= 375 && c->shell->mouse_click_y >= 490 && c->shell->mouse_click_y <= 522) {
+    } else if (c->shell->mouse_click_x >= 273 && c->shell->mouse_click_x <= 373 && c->shell->mouse_click_y >= 467 && c->shell->mouse_click_y <= 499) {
         c->trade_chat_setting = (c->trade_chat_setting + 1) % 3;
         c->redraw_privacy_settings = true;
         c->redraw_chatback = true;
 
         // CHAT_SETMODE
-        p1isaac(c->out, 244);
+        p1isaac(c->out, 129); // CHAT_SETMODE
         p1(c->out, c->public_chat_setting);
         p1(c->out, c->private_chat_setting);
         p1(c->out, c->trade_chat_setting);
-    } else if (c->shell->mouse_click_x >= 416 && c->shell->mouse_click_x <= 516 && c->shell->mouse_click_y >= 490 && c->shell->mouse_click_y <= 522) {
+    } else if (c->shell->mouse_click_x >= 412 && c->shell->mouse_click_x <= 512 && c->shell->mouse_click_y >= 467 && c->shell->mouse_click_y <= 499) {
         closeInterfaces(c);
 
         c->reportAbuseInput[0] = '\0';
@@ -4389,7 +4503,7 @@ void client_update_game(Client *c) {
         Packet *tracking = inputtracking_flush(&_InputTracking);
         if (tracking) {
             // EVENT_TRACKING
-            p1isaac(c->out, 81);
+            p1isaac(c->out, 142); // EVENT_TRACKING
             p2(c->out, tracking->pos);
             pdata(c->out, tracking->data, tracking->pos, 0);
             packet_release(tracking);
@@ -4408,11 +4522,9 @@ void client_update_game(Client *c) {
         if ((c->shell->action_key[1] == 1 || c->shell->action_key[2] == 1 || c->shell->action_key[3] == 1 || c->shell->action_key[4] == 1) && c->camera_moved_write++ > 5) {
             c->camera_moved_write = 0;
             // EVENT_CAMERA_POSITION
-            p1isaac(c->out, 189);
+            p1isaac(c->out, 91); // EVENT_CAMERA_POSITION
             p2(c->out, c->orbit_camera_pitch);
             p2(c->out, c->orbit_camera_yaw);
-            p1(c->out, c->minimap_anticheat_angle);
-            p1(c->out, c->minimap_zoom);
         }
 
         c->scene_delta++;
@@ -4465,10 +4577,11 @@ void client_update_game(Client *c) {
                         com->invSlotObjCount[c->objDragSlot] = count;
 
                         // INV_BUTTOND
-                        p1isaac(c->out, 159);
+                        p1isaac(c->out, 176); // INV_BUTTOND
                         p2(c->out, c->objDragInterfaceId);
                         p2(c->out, c->objDragSlot);
                         p2(c->out, c->hoveredSlot);
+                        p1(c->out, 0); // TODO: rev254 bank-arrange-mode byte; always 0 until bank rearrange mode is implemented, see audit
                     }
                 } else if ((c->mouseButtonsOption == 1 || isAddFriendOption(c, c->menu_size - 1)) && c->menu_size > 2) {
                     showContextMenu(c);
@@ -4485,8 +4598,8 @@ void client_update_game(Client *c) {
         if (_Client.cyclelogic3 > 127) {
             _Client.cyclelogic3 = 0;
             // ANTICHEAT_CYCLELOGIC3
-            p1isaac(c->out, 215);
-            p3(c->out, 4991788);
+            p1isaac(c->out, 4); // ANTICHEAT_CYCLELOGIC3
+            p1(c->out, 50);
         }
 
         if (_World3D.clickTileX != -1) {
@@ -4540,7 +4653,7 @@ void client_update_game(Client *c) {
             c->idle_timeout = 250;
             c->shell->idle_cycles -= 500;
             // IDLE_TIMER
-            p1isaac(c->out, 70);
+            p1isaac(c->out, 144); // IDLE_TIMER
         }
 
         c->cameraOffsetCycle++;
@@ -4607,14 +4720,14 @@ void client_update_game(Client *c) {
         if (_Client.cyclelogic4 > 110) {
             _Client.cyclelogic4 = 0;
             // ANTICHEAT_CYCLELOGIC4
-            p1isaac(c->out, 236);
-            p4(c->out, 0);
+            p1isaac(c->out, 226); // ANTICHEAT_CYCLELOGIC4
+            p1(c->out, 232);
         }
 
         c->heartbeatTimer++;
         if (c->heartbeatTimer > 50) {
             // NO_TIMEOUT
-            p1isaac(c->out, 108);
+            p1isaac(c->out, 239); // NO_TIMEOUT
         }
 
         // try {
@@ -4630,6 +4743,131 @@ void client_update_game(Client *c) {
         // client_logout(c);
         // }
     }
+}
+
+// Loads a "<kind><mapsquareX>_<mapsquareZ>" map file (kind is "m" for land or "l" for locs) from
+// the platform cache path, mirroring the per-platform path conventions client_load()/load_archive()
+// already use. Returns NULL (and logs) if the file is missing - there is no rev254 server-side
+// fallback request for missing map data (see REBUILD_NORMAL below), so a missing file here means an
+// incomplete local cache, not a recoverable network condition.
+static int8_t *client_load_map_file(const char *kind, int mapsquareX, int mapsquareZ, int *out_size) {
+    char filename[PATH_MAX];
+#ifdef _arch_dreamcast
+    snprintf(filename, sizeof(filename), "cache/client/maps/%s%d_%d.", kind, mapsquareX, mapsquareZ);
+#elif defined(NXDK)
+    snprintf(filename, sizeof(filename), "D:\\cache\\client\\maps\\%s%d_%d", kind, mapsquareX, mapsquareZ);
+#elif defined(__EMSCRIPTEN__)
+    snprintf(filename, sizeof(filename), "%s%d_%d", kind, mapsquareX, mapsquareZ);
+#else
+    snprintf(filename, sizeof(filename), "rom/cache/client/maps/%s%d_%d", kind, mapsquareX, mapsquareZ);
+#endif
+
+#if ANDROID
+    SDL_RWops *file = SDL_RWFromFile(filename, "rb");
+#else
+    FILE *file = fopen(filename, "rb");
+#endif
+    if (!file) {
+        rs2_error("Missing map data: %s\n", filename);
+        return NULL;
+    }
+
+    size_t size;
+#ifdef ANDROID
+    size = SDL_RWseek(file, 0, RW_SEEK_END);
+    SDL_RWseek(file, 0, RW_SEEK_SET);
+#else
+    fseek(file, 0, SEEK_END);
+    size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+#endif
+
+    int8_t *data = malloc(size);
+#ifdef ANDROID
+    if (SDL_RWread(file, data, 1, size) != size) {
+#else
+    if (fread(data, 1, size, file) != size) {
+#endif
+        rs2_error("Failed to read file: %s\n", strerror(errno));
+    }
+#ifdef ANDROID
+    SDL_RWclose(file);
+#else
+    fclose(file);
+#endif
+
+    *out_size = (int)size;
+    return data;
+}
+
+// Reads one whole file straight from the platform's cache path with no Jagfile/.jag-specific
+// header parsing (unlike load_archive() above, which expects the classic bzip2 .jag container) -
+// used for ondemand.zip, a real generic ZIP file the server serves as-is (see ondemand.c).
+static int8_t *client_load_raw_file(const char *filename_only, int *out_size) {
+    char filename[PATH_MAX];
+#ifdef _arch_dreamcast
+    snprintf(filename, sizeof(filename), "cache/client/%s", filename_only);
+#elif defined(NXDK)
+    snprintf(filename, sizeof(filename), "D:\\cache\\client\\%s", filename_only);
+#elif defined(__EMSCRIPTEN__)
+    snprintf(filename, sizeof(filename), "%s", filename_only);
+#else
+    snprintf(filename, sizeof(filename), "rom/cache/client/%s", filename_only);
+#endif
+
+#if ANDROID
+    SDL_RWops *file = SDL_RWFromFile(filename, "rb");
+#else
+    FILE *file = fopen(filename, "rb");
+#endif
+    if (!file) {
+        rs2_error("Missing file: %s\n", filename);
+        return NULL;
+    }
+
+    size_t size;
+#ifdef ANDROID
+    size = SDL_RWseek(file, 0, RW_SEEK_END);
+    SDL_RWseek(file, 0, RW_SEEK_SET);
+#else
+    fseek(file, 0, SEEK_END);
+    size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+#endif
+
+    int8_t *data = malloc(size);
+#ifdef ANDROID
+    if (SDL_RWread(file, data, 1, size) != size) {
+#else
+    if (fread(data, 1, size, file) != size) {
+#endif
+        rs2_error("Failed to read file: %s\n", strerror(errno));
+    }
+#ifdef ANDROID
+    SDL_RWclose(file);
+#else
+    fclose(file);
+#endif
+
+    *out_size = (int)size;
+    return data;
+}
+
+// Several IF_SET* server packets carry a raw component id straight from the network. rev254's
+// Progressive server can reference interfaces/components Client3 hasn't instantiated locally (or
+// ids past the loaded interface archive's range), which is an out-of-bounds/NULL dereference on
+// _Component.instances[id] - this was the root cause of a real crash during login. Every direct
+// network-supplied component id must be checked with this before dereferencing.
+static inline bool component_valid(int id) {
+    return id >= 0 && id < _Component.count && _Component.instances[id] != NULL;
+}
+
+// Same rationale as component_valid() above, but for the many call sites that index
+// _Component.instances[] directly with a *stored* interface id (viewport/sidebar/chat/tab/sticky
+// chat interface ids set earlier from a server packet) rather than one just read off the wire -
+// returns NULL instead of an out-of-bounds/garbage pointer when the id turns out to be invalid.
+static inline Component *component_get(int id) {
+    return component_valid(id) ? _Component.instances[id] : NULL;
 }
 
 bool client_read(Client *c) {
@@ -4680,10 +4918,18 @@ bool client_read(Client *c) {
     c->last_packet_type1 = c->last_packet_type0;
     c->last_packet_type0 = c->packet_type;
 
-    if (c->packet_type == 150) {
+    if (c->packet_type == 186) { // VARP_SMALL
         // VARP_SMALL
         int varp = g2(c->in);
         int8_t value = g1b(c->in);
+        // rev254 servers can send varp ids outside Client3's VARPS_COUNT table; without this check
+        // an out-of-range id is an out-of-bounds heap write that corrupts unrelated memory and crashes
+        // later, far from this packet, which is what made the original crash so hard to bisect.
+        if (varp < 0 || varp >= VARPS_COUNT) {
+            rs2_error("VARP_SMALL: varp id %d out of range (max %d), ignoring\n", varp, VARPS_COUNT - 1);
+            c->packet_type = -1;
+            return true;
+        }
         c->varCache[varp] = value;
         if (c->varps[varp] != value) {
             c->varps[varp] = value;
@@ -4696,7 +4942,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 152) {
+    if (c->packet_type == 111) { // UPDATE_FRIENDLIST
         // UPDATE_FRIENDLIST
         int64_t username = g8(c->in);
         int world = g1(c->in);
@@ -4751,13 +4997,13 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 43) {
+    if (c->packet_type == 143) { // UPDATE_REBOOT_TIMER
         // UPDATE_REBOOT_TIMER
         c->system_update_timer = g2(c->in) * 30;
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 80) {
+    if (c->packet_type == 80) { // TODO: legacy DATA_LAND_DONE has no rev254 equivalent (JS5/bulk cache fetch replaces it), see audit
         // DATA_LAND_DONE
         int x = g1(c->in);
         int z = g1(c->in);
@@ -4782,14 +5028,13 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 1) {
+    if (c->packet_type == 123) { // NPC_INFO
         // NPC_INFO
         getNpcPos(c, c->in, c->packet_size);
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 237) {
-        // REBUILD_NORMAL
+    if (c->packet_type == 209) { // REBUILD_NORMAL
         int zoneX = g2(c->in);
         int zoneZ = g2(c->in);
         if (c->sceneCenterZoneX == zoneX && c->sceneCenterZoneZ == zoneZ && c->scene_state != 0) {
@@ -4804,9 +5049,16 @@ bool client_read(Client *c) {
         pixmap_bind(c->area_viewport);
         drawStringCenter(c->font_plain12, 257, 151, "Loading - please wait.", BLACK);
         drawStringCenter(c->font_plain12, 256, 150, "Loading - please wait.", WHITE);
-        pixmap_draw(c->area_viewport, 8, 11);
-        // signlink.looprate(5);
-        int regions = (c->packet_size - 2) / 10;
+        pixmap_draw(c->area_viewport, 4, 4);
+
+        // rev254 no longer sends a per-region CRC list in this packet (see the revision-254 audit) -
+        // the client is expected to already have the full map pack locally and computes the needed
+        // mapsquare grid itself from the center zone, matching the reference client's own algorithm.
+        int minMapsquareX = (c->sceneCenterZoneX - 6) / 8;
+        int maxMapsquareX = (c->sceneCenterZoneX + 6) / 8;
+        int minMapsquareZ = (c->sceneCenterZoneZ - 6) / 8;
+        int maxMapsquareZ = (c->sceneCenterZoneZ + 6) / 8;
+        int regions = (maxMapsquareX - minMapsquareX + 1) * (maxMapsquareZ - minMapsquareZ + 1);
 
         client_scenemap_free(c);
         c->sceneMapLandData = calloc(regions, sizeof(int8_t *));
@@ -4815,176 +5067,53 @@ bool client_read(Client *c) {
         c->sceneMapLandDataIndexLength = calloc(regions, sizeof(int));
         c->sceneMapLocDataIndexLength = calloc(regions, sizeof(int));
         c->sceneMapIndexLength = regions;
-        // REBUILD_GETMAPS
-        p1isaac(c->out, 150);
-        p1(c->out, 0);
-        int mapCount = 0;
-        for (int i = 0; i < regions; i++) {
-            int mapsquareX = g1(c->in);
-            int mapsquareZ = g1(c->in);
-            int landCrc = g4(c->in);
-            int locCrc = g4(c->in);
-            c->sceneMapIndex[i] = (mapsquareX << 8) + mapsquareZ;
-            int8_t *data = NULL;
-            size_t size = 0;
-            if (landCrc != 0) {
-                // data = signlink.cacheload("m" + mapsquareX + "_" + mapsquareZ);
-                // custom NOTE move these
-                char filename[PATH_MAX];
-#ifdef _arch_dreamcast
-                snprintf(filename, sizeof(filename), "cache/client/maps/m%d_%d.", mapsquareX, mapsquareZ);
-#elif defined(NXDK)
-                snprintf(filename, sizeof(filename), "D:\\cache\\client\\maps\\m%d_%d", mapsquareX, mapsquareZ);
-#elif defined(__EMSCRIPTEN__)
-                snprintf(filename, sizeof(filename), "m%d_%d", mapsquareX, mapsquareZ);
-#else
-                snprintf(filename, sizeof(filename), "rom/cache/client/maps/m%d_%d", mapsquareX, mapsquareZ);
-#endif
 
-#if ANDROID
-                SDL_RWops *file = SDL_RWFromFile(filename, "rb");
-#else
-                FILE *file = fopen(filename, "rb");
-#endif
-                if (!file) {
-                    // rs2_error("%s: %s\n", filename, strerror(errno));
-                } else {
-#ifdef ANDROID
-                    size_t size = SDL_RWseek(file, 0, RW_SEEK_END);
-                    SDL_RWseek(file, 0, RW_SEEK_SET);
-#else
-                    fseek(file, 0, SEEK_END);
-                    size = ftell(file);
-                    fseek(file, 0, SEEK_SET);
-#endif
+        int i = 0;
+        for (int mapsquareX = minMapsquareX; mapsquareX <= maxMapsquareX; mapsquareX++) {
+            for (int mapsquareZ = minMapsquareZ; mapsquareZ <= maxMapsquareZ; mapsquareZ++) {
+                c->sceneMapIndex[i] = (mapsquareX << 8) + mapsquareZ;
 
-                    data = malloc(size);
-#ifdef ANDROID
-                    if (SDL_RWread(file, data, 1, size) != size) {
-#else
-                    if (fread(data, 1, size, file) != size) {
-#endif
-                        rs2_error("Failed to read file: %s\n", strerror(errno));
-                    }
-#ifdef ANDROID
-                    SDL_RWclose(file);
-#else
-                    fclose(file);
-#endif
+                int landSize = 0;
+                int8_t *landData = client_load_map_file("m", mapsquareX, mapsquareZ, &landSize);
+                if (landData) {
+                    c->sceneMapLandDataIndexLength[i] = landSize;
+                    c->sceneMapLandData[i] = landData;
                 }
 
-                if (data) {
-                    if (rs_crc32(data, size) != landCrc) {
-                        // rs2_log("mapdata CRC check failed\n");
-                        // free(data);
-                        // data = NULL;
-                    }
-                }
-                if (!data) {
-                    c->scene_state = 0;
-                    p1(c->out, 0);
-                    p1(c->out, mapsquareX);
-                    p1(c->out, mapsquareZ);
-                    mapCount += 3;
-                } else {
-                    c->sceneMapLandDataIndexLength[i] = (int)size;
-                    c->sceneMapLandData[i] = data;
-                }
-            }
-            if (locCrc != 0) {
-                // data = signlink.cacheload("l" + mapsquareX + "_" + mapsquareZ);
-                // custom NOTE move this
-                char filename[PATH_MAX];
-#ifdef _arch_dreamcast
-                snprintf(filename, sizeof(filename), "cache/client/maps/l%d_%d.", mapsquareX, mapsquareZ);
-#elif defined(NXDK)
-                snprintf(filename, sizeof(filename), "D:\\cache\\client\\maps\\l%d_%d", mapsquareX, mapsquareZ);
-#elif defined(__EMSCRIPTEN__)
-            snprintf(filename, sizeof(filename), "l%d_%d", mapsquareX, mapsquareZ);
-#else
-            snprintf(filename, sizeof(filename), "rom/cache/client/maps/l%d_%d", mapsquareX, mapsquareZ);
-#endif
-
-#if ANDROID
-                SDL_RWops *file = SDL_RWFromFile(filename, "rb");
-#else
-                FILE *file = fopen(filename, "rb");
-#endif
-                if (!file) {
-                    // rs2_error("%s: %s\n", filename, strerror(errno));
-                } else {
-#ifdef ANDROID
-                    size_t size = SDL_RWseek(file, 0, RW_SEEK_END);
-                    SDL_RWseek(file, 0, RW_SEEK_SET);
-#else
-                    fseek(file, 0, SEEK_END);
-                    size = ftell(file);
-                    fseek(file, 0, SEEK_SET);
-#endif
-
-                    data = malloc(size);
-#ifdef ANDROID
-                    if (SDL_RWread(file, data, 1, size) != size) {
-#else
-                    if (fread(data, 1, size, file) != size) {
-#endif
-                        rs2_error("Failed to read file: %s\n", strerror(errno));
-                    }
-#ifdef ANDROID
-                    SDL_RWclose(file);
-#else
-                    fclose(file);
-#endif
+                int locSize = 0;
+                int8_t *locData = client_load_map_file("l", mapsquareX, mapsquareZ, &locSize);
+                if (locData) {
+                    c->sceneMapLocDataIndexLength[i] = locSize;
+                    c->sceneMapLocData[i] = locData;
                 }
 
-                if (data) {
-                    if (rs_crc32(data, size) != locCrc) {
-                        // rs2_log("mapdata CRC check failed\n");
-                        // free(data);
-                        // data = NULL;
-                    }
-                }
-                if (!data) {
-                    c->scene_state = 0;
-                    p1(c->out, 1);
-                    p1(c->out, mapsquareX);
-                    p1(c->out, mapsquareZ);
-                    mapCount += 3;
-                } else {
-                    c->sceneMapLocDataIndexLength[i] = (int)size;
-                    c->sceneMapLocData[i] = data;
-                }
+                i++;
             }
         }
-        psize1(c->out, mapCount);
-        // signlink.looprate(50);
+
         pixmap_bind(c->area_viewport);
-        if (c->scene_state == 0) {
-            drawStringCenter(c->font_plain12, 257, 166, "Map area updated since last visit, so load will take longer this time only", BLACK);
-            drawStringCenter(c->font_plain12, 256, 165, "Map area updated since last visit, so load will take longer this time only", WHITE);
-        }
-        pixmap_draw(c->area_viewport, 8, 11);
+        pixmap_draw(c->area_viewport, 4, 4);
         int dx = c->sceneBaseTileX - c->mapLastBaseX;
         int dz = c->sceneBaseTileZ - c->mapLastBaseZ;
         c->mapLastBaseX = c->sceneBaseTileX;
         c->mapLastBaseZ = c->sceneBaseTileZ;
-        for (int i = 0; i < MAX_NPC_COUNT; i++) {
-            NpcEntity *npc = c->npcs[i];
+        for (int j = 0; j < MAX_NPC_COUNT; j++) {
+            NpcEntity *npc = c->npcs[j];
             if (npc) {
-                for (int j = 0; j < 10; j++) {
-                    npc->pathing_entity.pathTileX[j] -= dx;
-                    npc->pathing_entity.pathTileZ[j] -= dz;
+                for (int k = 0; k < 10; k++) {
+                    npc->pathing_entity.pathTileX[k] -= dx;
+                    npc->pathing_entity.pathTileZ[k] -= dz;
                 }
                 npc->pathing_entity.x -= dx * 128;
                 npc->pathing_entity.z -= dz * 128;
             }
         }
-        for (int i = 0; i < MAX_PLAYER_COUNT; i++) {
-            PlayerEntity *player = c->players[i];
+        for (int j = 0; j < MAX_PLAYER_COUNT; j++) {
+            PlayerEntity *player = c->players[j];
             if (player) {
-                for (int j = 0; j < 10; j++) {
-                    player->pathing_entity.pathTileX[j] -= dx;
-                    player->pathing_entity.pathTileZ[j] -= dz;
+                for (int k = 0; k < 10; k++) {
+                    player->pathing_entity.pathTileX[k] -= dx;
+                    player->pathing_entity.pathTileZ[k] -= dz;
                 }
                 player->pathing_entity.x -= dx * 128;
                 player->pathing_entity.z -= dz * 128;
@@ -5032,17 +5161,26 @@ bool client_read(Client *c) {
             c->flagSceneTileZ -= dz;
         }
         c->cutscene = false;
+
+        // rev254 replaces the old REBUILD_GETMAPS retry-request with a simple completion ack once
+        // local data is loaded (see the revision-254 audit) - no payload.
+        p1isaac(c->out, 134); // MAP_BUILD_COMPLETE
+
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 197) {
+    if (c->packet_type == 161) { // IF_SETPLAYERHEAD
         // IF_SETPLAYERHEAD
         int com = g2(c->in);
+        if (!component_valid(com)) {
+            c->packet_type = -1;
+            return true;
+        }
         _Component.instances[com]->model = playerentity_get_headmodel(c->local_player);
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 25) {
+    if (c->packet_type == 64) { // HINT_ARROW
         // HINT_ARROW
         c->hint_type = g1(c->in);
         if (c->hint_type == 1) {
@@ -5080,7 +5218,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 54) {
+    if (c->packet_type == 54) { // TODO: rev254 MIDI_SONG(163,2) is fixed 2 bytes, not this embedded name+crc+len payload; needs redesign, see audit
         // MIDI_SONG
         char *name = gjstr(c->in);
         int crc = g4(c->in);
@@ -5096,13 +5234,13 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 142) {
+    if (c->packet_type == 21) { // LOGOUT
         // LOGOUT
         client_logout(c);
         c->packet_type = -1;
         return false;
     }
-    if (c->packet_type == 20) {
+    if (c->packet_type == 20) { // TODO: legacy DATA_LOC_DONE has no rev254 equivalent (JS5/bulk cache fetch replaces it), see audit
         // DATA_LOC_DONE
         int x = g1(c->in);
         int z = g1(c->in);
@@ -5127,25 +5265,27 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 19) {
+    if (c->packet_type == 108) { // UNSET_MAP_FLAG
         // UNSET_MAP_FLAG
         c->flagSceneTileX = 0;
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 139) {
+    if (c->packet_type == 213) { // UPDATE_PID
         // UPDATE_UID192
         c->local_pid = g2(c->in);
+        g1(c->in); // TODO: rev254 UPDATE_PID is 1 byte longer than rev225's; unidentified extra field, discarded for now
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 151 || c->packet_type == 23 || c->packet_type == 50 || c->packet_type == 191 || c->packet_type == 69 || c->packet_type == 49 || c->packet_type == 223 || c->packet_type == 42 || c->packet_type == 76 || c->packet_type == 59) {
+    if (c->packet_type == 98 || c->packet_type == 218 || c->packet_type == 8 || c->packet_type == 114 || c->packet_type == 37 || c->packet_type == 115 || c->packet_type == 120 || c->packet_type == 30 || c->packet_type == 88 || c->packet_type == 70) {
+        // OBJ_COUNT, P_LOCMERGE, OBJ_REVEAL, MAP_ANIM, MAP_PROJANIM, OBJ_DEL, OBJ_ADD, LOC_ANIM, LOC_DEL, LOC_ADD_CHANGE
         // Zone Protocol
         readZonePacket(c, c->in, c->packet_type);
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 28) {
+    if (c->packet_type == 249) { // IF_OPENMAIN_SIDE
         // IF_OPENMAINSIDEMODAL
         int main = g2(c->in);
         int side = g2(c->in);
@@ -5165,10 +5305,16 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 175) {
+    if (c->packet_type == 196) { // VARP_LARGE
         // VARP_LARGE
         int varp = g2(c->in);
         int value = g4(c->in);
+        // see VARP_SMALL above: rev254 varp ids can exceed VARPS_COUNT, don't write out of bounds.
+        if (varp < 0 || varp >= VARPS_COUNT) {
+            rs2_error("VARP_LARGE: varp id %d out of range (max %d), ignoring\n", varp, VARPS_COUNT - 1);
+            c->packet_type = -1;
+            return true;
+        }
         c->varCache[varp] = value;
         if (c->varps[varp] != value) {
             c->varps[varp] = value;
@@ -5181,15 +5327,30 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 146) {
+    if (c->packet_type == 95) { // IF_SETANIM
         // IF_SETANIM
         int com = g2(c->in);
         int seqId = g2(c->in);
+        if (!component_valid(com)) {
+            c->packet_type = -1;
+            return true;
+        }
+        // unlike every other seqId consumer this session (getPlayerExtended/getNpcPosExtended), this
+        // one stored the raw network value with no 65535->-1 sentinel normalization and no bounds
+        // check at all - client_draw_interface's type==6 (animated model) branch later indexes
+        // _SeqType.instances[seqId] unconditionally whenever anim != -1, so an out-of-range or
+        // still-raw-65535 value here was a real crash confirmed to fire when an interface (e.g. an
+        // NPC dialogue's animated chat-head) uses this animation. Confirmed real root cause of
+        // "crashes when I click an NPC" (both left-click default-interact and right-click Talk-to
+        // open the same dialogue interface).
+        if (seqId == 65535 || seqId < 0 || seqId >= _SeqType.count) {
+            seqId = -1;
+        }
         _Component.instances[com]->anim = seqId;
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 167) {
+    if (c->packet_type == 91) { // IF_SETTAB
         // IF_OPENSIDEOVERLAY
         int com = g2(c->in);
         int tab = g1(c->in);
@@ -5202,7 +5363,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 220) {
+    if (c->packet_type == 220) { // TODO: legacy DATA_LOC has no rev254 equivalent (JS5/bulk cache fetch replaces it), see audit
         // DATA_LOC
         int x = g1(c->in);
         int z = g1(c->in);
@@ -5224,12 +5385,12 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 133) {
+    if (c->packet_type == 29) { // FINISH_TRACKING
         // FINISH_TRACKING
         Packet *tracking = inputtracking_stop(&_InputTracking);
         if (tracking) {
             // EVENT_TRACKING
-            p1isaac(c->out, 81);
+            p1isaac(c->out, 142); // EVENT_TRACKING
             p2(c->out, tracking->pos);
             pdata(c->out, tracking->data, tracking->pos, 0);
             packet_release(tracking);
@@ -5237,10 +5398,14 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 98) {
+    if (c->packet_type == 28) { // UPDATE_INV_FULL
         // UPDATE_INV_FULL
         c->redraw_sidebar = true;
         int com = g2(c->in);
+        if (!component_valid(com)) {
+            c->packet_type = -1;
+            return true;
+        }
         Component *inv = _Component.instances[com];
         int size = g1(c->in);
         for (int i = 0; i < size; i++) {
@@ -5258,13 +5423,13 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 226) {
+    if (c->packet_type == 251) { // ENABLE_TRACKING
         // ENABLE_TRACKING
         inputtracking_set_enabled(&_InputTracking);
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 243) {
+    if (c->packet_type == 5) { // P_COUNTDIALOG
         // P_COUNTDIALOG
         c->show_social_input = false;
         c->chatback_input_open = true;
@@ -5273,9 +5438,13 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 15) {
+    if (c->packet_type == 168) { // UPDATE_INV_STOP_TRANSMIT
         // UPDATE_INV_STOP_TRANSMIT
         int com = g2(c->in);
+        if (!component_valid(com)) {
+            c->packet_type = -1;
+            return true;
+        }
         Component *inv = _Component.instances[com];
         for (int i = 0; i < inv->width * inv->height; i++) {
             inv->invSlotObjId[i] = -1;
@@ -5284,12 +5453,13 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 140) {
+    if (c->packet_type == 146) { // LAST_LOGIN_INFO
         // LAST_LOGIN_INFO
         c->lastAddress = g4(c->in);
         c->daysSinceLastLogin = g2(c->in);
         c->daysSinceRecoveriesChanged = g1(c->in);
         c->unreadMessages = g2(c->in);
+        g1(c->in); // TODO: rev254 LAST_LOGIN_INFO is 1 byte longer than rev225's; unidentified extra field, discarded for now
         if (c->lastAddress != 0 && c->viewport_interface_id == -1) {
             if (_Custom.hide_dns) {
                 _Client.dns = "unknown";
@@ -5313,7 +5483,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 126) {
+    if (c->packet_type == 58) { // TUT_FLASH
         // TUTORIAL_FLASHSIDE
         c->flashing_tab = g1(c->in);
         if (c->flashing_tab == c->selected_tab) {
@@ -5327,7 +5497,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 212) {
+    if (c->packet_type == 212) { // TODO: rev254 MIDI_JINGLE(242,4) is fixed 4 bytes, not this embedded/decompressed payload; needs redesign, see audit
         // MIDI_JINGLE
         if (c->midiActive && !_Client.lowmem) {
             int delay = g2(c->in);
@@ -5341,13 +5511,13 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 254) {
+    if (c->packet_type == 75) { // SET_MULTIWAY
         // SET_MULTIWAY
         c->in_multizone = g1(c->in);
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 12) {
+    if (c->packet_type == 25) { // SYNTH_SOUND
         // SYNTH_SOUND
         int id = g2(c->in);
         int loop = g1(c->in);
@@ -5361,27 +5531,35 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 204) {
+    if (c->packet_type == 3) { // IF_SETNPCHEAD
         // IF_SETNPCHEAD
         int com = g2(c->in);
         int npcId = g2(c->in);
+        if (!component_valid(com)) {
+            c->packet_type = -1;
+            return true;
+        }
         NpcType *npc = npctype_get(npcId);
         _Component.instances[com]->model = npctype_get_headmodel(npc);
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 7) {
+    if (c->packet_type == 173) { // UPDATE_ZONE_PARTIAL_FOLLOWS
         // UPDATE_ZONE_PARTIAL_FOLLOWS
         c->baseX = g1(c->in);
         c->baseZ = g1(c->in);
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 103) {
+    if (c->packet_type == 103) { // TODO: no rev254 equivalent identified for IF_SETRECOL, see audit
         // IF_SETRECOL
         int com = g2(c->in);
         int src = g2(c->in);
         int dst = g2(c->in);
+        if (!component_valid(com)) {
+            c->packet_type = -1;
+            return true;
+        }
         Component *inter = _Component.instances[com];
         Model *model = inter->model;
         if (model) {
@@ -5390,7 +5568,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 32) {
+    if (c->packet_type == 24) { // CHAT_FILTER_SETTINGS
         // CHAT_FILTER_SETTINGS
         c->public_chat_setting = g1(c->in);
         c->private_chat_setting = g1(c->in);
@@ -5400,7 +5578,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 195) {
+    if (c->packet_type == 187) { // IF_OPENSIDE
         // IF_OPENSIDEMODAL
         int com = g2(c->in);
         reset_interface_animation(com);
@@ -5420,7 +5598,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 14) {
+    if (c->packet_type == 141) { // IF_OPENCHAT
         // IF_OPENCHATMODAL
         int com = g2(c->in);
         reset_interface_animation(com);
@@ -5436,18 +5614,22 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 209) {
+    if (c->packet_type == 27) { // IF_SETPOSITION
         // IF_SETPOSITION
         int com = g2(c->in);
         int x = g2b(c->in);
         int z = g2b(c->in);
+        if (!component_valid(com)) {
+            c->packet_type = -1;
+            return true;
+        }
         Component *inter = _Component.instances[com];
         inter->x = x;
         inter->y = z;
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 3) {
+    if (c->packet_type == 55) { // CAM_MOVETO
         // CAM_MOVETO
         c->cutscene = true;
         c->cutsceneSrcLocalTileX = g1(c->in);
@@ -5463,7 +5645,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 135) {
+    if (c->packet_type == 159) { // UPDATE_ZONE_FULL_FOLLOWS
         // UPDATE_ZONE_FULL_FOLLOWS
         c->baseX = g1(c->in);
         c->baseZ = g1(c->in);
@@ -5486,7 +5668,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 132) {
+    if (c->packet_type == 132) { // TODO: legacy DATA_LAND has no rev254 equivalent (JS5/bulk cache fetch replaces it), see audit
         // DATA_LAND
         int x = g1(c->in);
         int z = g1(c->in);
@@ -5508,7 +5690,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 41) {
+    if (c->packet_type == 60) { // MESSAGE_PRIVATE
         // MESSAGE_PRIVATE
         int64_t from = g8(c->in);
         int messageId = g4(c->in);
@@ -5546,7 +5728,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 193) {
+    if (c->packet_type == 140) { // RESET_CLIENT_VARCACHE
         // RESET_CLIENT_VARCACHE
         for (int i = 0; i < VARPS_COUNT; i++) {
             if (c->varps[i] != c->varCache[i]) {
@@ -5558,15 +5740,19 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 87) {
+    if (c->packet_type == 211) { // IF_SETMODEL
         // IF_SETMODEL
         int com = g2(c->in);
         int model = g2(c->in);
+        if (!component_valid(com)) {
+            c->packet_type = -1;
+            return true;
+        }
         _Component.instances[com]->model = model_from_id(model, false);
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 185) {
+    if (c->packet_type == 239) { // TUT_OPEN
         // TUTORIAL_OPENCHAT
         int com = g2b(c->in);
         c->sticky_chat_interface_id = com;
@@ -5574,7 +5760,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 68) {
+    if (c->packet_type == 94) { // UPDATE_RUNENERGY
         // UPDATE_RUNENERGY
         if (c->selected_tab == 12) {
             c->redraw_sidebar = true;
@@ -5583,7 +5769,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 74) {
+    if (c->packet_type == 0) { // CAM_LOOKAT
         // CAM_LOOKAT
         c->cutscene = true;
         c->cutsceneDstLocalTileX = g1(c->in);
@@ -5611,7 +5797,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 84) {
+    if (c->packet_type == 138) { // IF_SETTAB_ACTIVE
         // IF_SHOWSIDE
         c->selected_tab = g1(c->in);
         c->redraw_sidebar = true;
@@ -5619,7 +5805,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 4) {
+    if (c->packet_type == 73) { // MESSAGE_GAME
         // MESSAGE_GAME
         char *message = gjstr(c->in);
         int64_t username;
@@ -5656,11 +5842,15 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 46) {
+    if (c->packet_type == 222) { // IF_SETOBJECT
         // IF_SETOBJECT
         int com = g2(c->in);
         int objId = g2(c->in);
         int zoom = g2(c->in);
+        if (!component_valid(com)) {
+            c->packet_type = -1;
+            return true;
+        }
         ObjType *obj = objtype_get(objId);
         _Component.instances[com]->model = objtype_get_interfacemodel(obj, 50, false);
         _Component.instances[com]->xan = obj->xan2d;
@@ -5669,7 +5859,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 168) {
+    if (c->packet_type == 197) { // IF_OPENMAIN
         // IF_OPENMAINMODAL
         int com = g2(c->in);
         reset_interface_animation(com);
@@ -5691,10 +5881,14 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 2) {
+    if (c->packet_type == 38) { // IF_SETCOLOUR
         // IF_SETCOLOUR
         int com = g2(c->in);
         int color = g2(c->in);
+        if (!component_valid(com)) {
+            c->packet_type = -1;
+            return true;
+        }
         int r = color >> 10 & 0x1f;
         int g = color >> 5 & 0x1f;
         int b = color & 0x1f;
@@ -5702,7 +5896,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 136) {
+    if (c->packet_type == 203) { // RESET_ANIMS
         // RESET_ANIMS
         for (int i = 0; i < MAX_PLAYER_COUNT; i++) {
             if (c->players[i]) {
@@ -5717,15 +5911,19 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 26) {
+    if (c->packet_type == 227) { // IF_SETHIDE
         // IF_SETHIDE
         int com = g2(c->in);
         bool hide = g1(c->in) == 1;
+        if (!component_valid(com)) {
+            c->packet_type = -1;
+            return true;
+        }
         _Component.instances[com]->hide = hide;
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 21) {
+    if (c->packet_type == 63) { // UPDATE_IGNORELIST
         // UPDATE_IGNORELIST
         c->ignoreCount = c->packet_size / 8;
         for (int i = 0; i < c->ignoreCount; i++) {
@@ -5734,7 +5932,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 239) {
+    if (c->packet_type == 167) { // CAM_RESET
         // CAM_RESET
         c->cutscene = false;
         for (int i = 0; i < 5; i++) {
@@ -5743,7 +5941,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 129) {
+    if (c->packet_type == 174) { // IF_CLOSE
         // IF_CLOSE
         if (c->sidebar_interface_id != -1) {
             c->sidebar_interface_id = -1;
@@ -5763,10 +5961,15 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 201) {
+    if (c->packet_type == 41) { // IF_SETTEXT
         // IF_SETTEXT
         int com = g2(c->in);
         char *text = gjstr(c->in);
+        if (!component_valid(com)) {
+            free(text);
+            c->packet_type = -1;
+            return true;
+        }
         strcpy(_Component.instances[com]->text, text);
         free(text);
         if (_Component.instances[com]->layer == c->tab_interface_id[c->selected_tab]) {
@@ -5775,7 +5978,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 44) {
+    if (c->packet_type == 136) { // UPDATE_STAT
         // UPDATE_STAT
         c->redraw_sidebar = true;
         int stat = g1(c->in);
@@ -5792,7 +5995,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 162) {
+    if (c->packet_type == 61) { // UPDATE_ZONE_PARTIAL_ENCLOSED
         // UPDATE_ZONE_PARTIAL_ENCLOSED
         c->baseX = g1(c->in);
         c->baseZ = g1(c->in);
@@ -5803,7 +6006,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 22) {
+    if (c->packet_type == 164) { // UPDATE_RUNWEIGHT
         // UPDATE_RUNWEIGHT
         if (c->selected_tab == 12) {
             c->redraw_sidebar = true;
@@ -5812,7 +6015,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 13) {
+    if (c->packet_type == 225) { // CAM_SHAKE
         // CAM_SHAKE
         int type = g1(c->in);
         int jitter = g1(c->in);
@@ -5826,10 +6029,14 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 213) {
+    if (c->packet_type == 170) { // UPDATE_INV_PARTIAL
         // UPDATE_INV_PARTIAL
         c->redraw_sidebar = true;
         int com = g2(c->in);
+        if (!component_valid(com)) {
+            c->packet_type = -1;
+            return true;
+        }
         Component *inv = _Component.instances[com];
         while (c->in->pos < c->packet_size) {
             int slot = g1(c->in);
@@ -5846,7 +6053,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 184) {
+    if (c->packet_type == 87) { // PLAYER_INFO
         // PLAYER_INFO
         getPlayer(c, c->in, c->packet_size);
         if (c->scene_state == 1) {
@@ -5858,7 +6065,7 @@ bool client_read(Client *c) {
             pixmap_bind(c->area_viewport);
             drawStringCenter(c->font_plain12, 257, 151, "Loading - please wait.", BLACK);
             drawStringCenter(c->font_plain12, 256, 150, "Loading - please wait.", WHITE);
-            pixmap_draw(c->area_viewport, 8, 11);
+            pixmap_draw(c->area_viewport, 4, 4);
             _World.levelBuilt = c->currentLevel;
             client_build_scene(c);
         }
@@ -5869,9 +6076,21 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
+    if (c->packet_type == 255) { // FRIENDLIST_LOADED
+        // TODO: no rev225 equivalent existed to model this on; discarding the 1-byte payload for now
+        // since any unhandled opcode falls through to the T1 error path below, which logs the client out.
+        g1(c->in);
+        c->packet_type = -1;
+        return true;
+    }
     rs2_error("T1 - %i,%i - %i,%i\n", c->packet_type, c->packet_size, c->last_packet_type1, c->last_packet_type2);
     // signlink.reporterror("T1 - " + c->packet_type + "," + c->packetSize + " - " + c->lastPacketType1 + "," + c->lastPacketType2);
-    client_logout(c);
+    // rev254: an unrecognised opcode here means "not yet implemented" (the byte count was already read
+    // correctly via SERVERPROT_SIZES, so the stream isn't desynced), not necessarily real corruption
+    // like it would have been for a matched, fully-implemented rev225 protocol - don't force a logout
+    // over a missing feature. TODO: revisit once the remaining rev254-only opcodes are all implemented.
+    // client_logout(c);
+    c->packet_type = -1;
     // } catch (@Pc(3862) IOException ex) {
     // client_try_reconnect(c);
     // } catch (@Pc(3867) Exception ex) {
@@ -6039,7 +6258,13 @@ void getPlayerExtended(Client *c, Packet *buf, int size) {
     (void)size;
     for (int i = 0; i < c->entityUpdateCount; i++) {
         int index = c->entityUpdateIds[i];
-        PlayerEntity *player = c->players[index];
+        // see getNpcPosExtended's identical fix for the same rationale - c->players[index] was
+        // dereferenced (via getPlayerExtended2) completely unconditionally with no NULL check, the
+        // real cause of a crash confirmed to fire during combat (both npc and player extended-info
+        // updates get frequent during combat, and both had this exact same gap).
+        static PlayerEntity dummy_player;
+        memset(&dummy_player, 0, sizeof(dummy_player));
+        PlayerEntity *player = c->players[index] ? c->players[index] : &dummy_player;
         int mask = g1(buf);
         if ((mask & 0x80) == 128) {
             mask += g1(buf) << 8;
@@ -6066,14 +6291,20 @@ void getPlayerExtended2(Client *c, PlayerEntity *player, int index, int mask, Pa
     }
     if ((mask & 0x2) == 2) {
         int seqId = g2(buf);
-        if (seqId == 65535) {
+        // treat an out-of-range seqId the same as the existing "no animation" sentinel (65535->-1):
+        // rev254 can send a seq id beyond Client3's loaded _SeqType.count, and indexing
+        // _SeqType.instances[] with it (or with -1, before this fix) was an out-of-bounds/negative
+        // array read - see the sentinel checks reordered below, which must run before any
+        // _SeqType.instances[] access so an invalid id short-circuits before the dereference.
+        if (seqId == 65535 || seqId < 0 || seqId >= _SeqType.count) {
             seqId = -1;
         }
         if (seqId == player->pathing_entity.primarySeqId) {
             player->pathing_entity.primarySeqLoop = 0;
         }
         int delay = g1(buf);
-        if (seqId == -1 || player->pathing_entity.primarySeqId == -1 || _SeqType.instances[seqId]->priority > _SeqType.instances[player->pathing_entity.primarySeqId]->priority || _SeqType.instances[player->pathing_entity.primarySeqId]->priority == 0) {
+        // TODO: duplicatebehaviour!=0 assumed to mean "RESET" (restart from frame 0); verify polarity against real gameplay, see audit
+        if (seqId == -1 || player->pathing_entity.primarySeqId == -1 || (seqId == player->pathing_entity.primarySeqId && _SeqType.instances[seqId]->duplicatebehaviour != 0) || _SeqType.instances[seqId]->priority > _SeqType.instances[player->pathing_entity.primarySeqId]->priority || _SeqType.instances[player->pathing_entity.primarySeqId]->priority == 0) {
             player->pathing_entity.primarySeqId = seqId;
             player->pathing_entity.primarySeqFrame = 0;
             player->pathing_entity.primarySeqCycle = 0;
@@ -6169,6 +6400,13 @@ void getPlayerExtended2(Client *c, PlayerEntity *player, int index, int mask, Pa
         player->pathing_entity.pathTileX[0] = player->pathing_entity.forceMoveEndSceneTileX;
         player->pathing_entity.pathTileZ[0] = player->pathing_entity.forceMoveEndSceneTileZ;
     }
+    if ((mask & 0x400) == 1024) {
+        player->pathing_entity.damage2 = g1(buf);
+        player->pathing_entity.damageType2 = g1(buf);
+        player->pathing_entity.combatCycle2 = _Client.loop_cycle + 400;
+        player->pathing_entity.health = g1(buf);
+        player->pathing_entity.totalHealth = g1(buf);
+    }
 }
 
 void getPlayer(Client *c, Packet *buf, int size) {
@@ -6253,7 +6491,7 @@ static void client_build_scene(Client *c) {
     int8_t *data = calloc(100000, sizeof(int8_t));
 
     // NO_TIMEOUT
-    p1isaac(c->out, 108);
+    p1isaac(c->out, 239); // NO_TIMEOUT
     for (int i = 0; i < maps; i++) {
         int x = (c->sceneMapIndex[i] >> 8) * 64 - c->sceneBaseTileX;
         int z = (c->sceneMapIndex[i] & 0xff) * 64 - c->sceneBaseTileZ;
@@ -6271,7 +6509,7 @@ static void client_build_scene(Client *c) {
     }
 
     // NO_TIMEOUT
-    p1isaac(c->out, 108);
+    p1isaac(c->out, 239); // NO_TIMEOUT
     for (int i = 0; i < maps; i++) {
         int8_t *src = c->sceneMapLocData[i];
         if (src) {
@@ -6288,12 +6526,12 @@ static void client_build_scene(Client *c) {
     free(data);
 
     // NO_TIMEOUT
-    p1isaac(c->out, 108);
+    p1isaac(c->out, 239); // NO_TIMEOUT
     world_build(world, c->scene, c->levelCollisionMap);
     pixmap_bind(c->area_viewport);
 
     // NO_TIMEOUT
-    p1isaac(c->out, 108);
+    p1isaac(c->out, 239); // NO_TIMEOUT
     for (LocEntity *loc = (LocEntity *)linklist_head(c->locList); loc; loc = (LocEntity *)linklist_next(c->locList)) {
         if ((c->levelTileFlags[1][loc->x][loc->z] & 0x2) == 2) {
             loc->level--;
@@ -6555,7 +6793,7 @@ void createMinimap(Client *c, int level) {
 
 void closeInterfaces(Client *c) {
     // CLOSE_MODAL
-    p1isaac(c->out, 231);
+    p1isaac(c->out, 58); // CLOSE_MODAL
 
     if (c->sidebar_interface_id != -1) {
         c->sidebar_interface_id = -1;
@@ -6715,14 +6953,14 @@ void readZonePacket(Client *c, Packet *buf, int opcode) {
     int x = c->baseX + (pos >> 4 & 0x7);
     int z = c->baseZ + (pos & 0x7);
 
-    if (opcode == 59 || opcode == 76) {
+    if (opcode == 70 || opcode == 88) {
         // LOC_ADD_CHANGE || LOC_DEL
         int info = g1(buf);
         int shape = info >> 2;
         int angle = info & 0x3;
         int layer = LOC_SHAPE_TO_LAYER[shape];
         int id;
-        if (opcode == 76) {
+        if (opcode == 88) {
             id = -1;
         } else {
             id = g2(buf);
@@ -6773,7 +7011,7 @@ void readZonePacket(Client *c, Packet *buf, int opcode) {
             loc->angle = angle;
             addLoc(c, c->currentLevel, x, z, id, angle, shape, layer);
         }
-    } else if (opcode == 42) {
+    } else if (opcode == 30) {
         // LOC_ANIM
         int info = g1(buf);
         int shape = info >> 2;
@@ -6793,12 +7031,15 @@ void readZonePacket(Client *c, Packet *buf, int opcode) {
             if (layer == 3) {
                 bitset = world3d_get_grounddecorationbitset(c->scene, c->currentLevel, x, z);
             }
-            if (bitset != 0) {
+            // LOC_ANIM's seq id is read raw off the network with no sentinel normalization at all
+            // (unlike the player/npc extended-info seqIds above) - guard it the same way before
+            // indexing _SeqType.instances[].
+            if (bitset != 0 && id >= 0 && id < _SeqType.count) {
                 LocEntity *loc = locentity_new(bitset >> 14 & 0x7fff, c->currentLevel, layer, x, z, _SeqType.instances[id], false);
                 linklist_add_tail(c->locList, &loc->link);
             }
         }
-    } else if (opcode == 223) {
+    } else if (opcode == 120) {
         // OBJ_ADD
         int id = g2(buf);
         int count = g2(buf);
@@ -6812,7 +7053,7 @@ void readZonePacket(Client *c, Packet *buf, int opcode) {
             linklist_add_tail(c->level_obj_stacks[c->currentLevel][x][z], &obj->link);
             sortObjStacks(c, x, z);
         }
-    } else if (opcode == 49) {
+    } else if (opcode == 115) {
         // OBJ_DEL
         int id = g2(buf);
         if (x >= 0 && z >= 0 && x < 104 && z < 104) {
@@ -6832,7 +7073,7 @@ void readZonePacket(Client *c, Packet *buf, int opcode) {
                 sortObjStacks(c, x, z);
             }
         }
-    } else if (opcode == 69) {
+    } else if (opcode == 37) {
         // MAP_PROJANIM
         int dx = x + g1b(buf);
         int dz = z + g1b(buf);
@@ -6853,7 +7094,7 @@ void readZonePacket(Client *c, Packet *buf, int opcode) {
             projectileentity_update_velocity(proj, dx, getHeightmapY(c, c->currentLevel, dx, dz) - dstHeight, dz, startDelay + _Client.loop_cycle);
             linklist_add_tail(c->projectiles, &proj->entity.link);
         }
-    } else if (opcode == 191) {
+    } else if (opcode == 114) {
         // MAP_ANIM
         int id = g2(buf);
         int height = g1(buf);
@@ -6864,7 +7105,7 @@ void readZonePacket(Client *c, Packet *buf, int opcode) {
             SpotAnimEntity *spotanim = spotanimentity_new(id, c->currentLevel, x, z, getHeightmapY(c, c->currentLevel, x, z) - height, _Client.loop_cycle, delay);
             linklist_add_tail(c->spotanims, &spotanim->entity.link);
         }
-    } else if (opcode == 50) {
+    } else if (opcode == 8) {
         // OBJ_REVEAL
         int id = g2(buf);
         int count = g2(buf);
@@ -6879,7 +7120,7 @@ void readZonePacket(Client *c, Packet *buf, int opcode) {
             linklist_add_tail(c->level_obj_stacks[c->currentLevel][x][z], &obj->link);
             sortObjStacks(c, x, z);
         }
-    } else if (opcode == 23) {
+    } else if (opcode == 218) {
         // LOC_MERGE
         int info = g1(buf);
         int shape = info >> 2;
@@ -6947,7 +7188,7 @@ void readZonePacket(Client *c, Packet *buf, int opcode) {
             player->minTileZ = z + south;
             player->maxTileZ = z + north;
         }
-    } else if (opcode == 151) {
+    } else if (opcode == 98) {
         // OBJ_COUNT
         int id = g2(buf);
         int oldCount = g2(buf);
@@ -7003,22 +7244,41 @@ void getNpcPosExtended(Client *c, Packet *buf, int size) {
     (void)size;
     for (int i = 0; i < c->entityUpdateCount; i++) {
         int id = c->entityUpdateIds[i];
-        NpcEntity *npc = c->npcs[id];
+        // the mask byte (and whichever optional fields it flags) must always be consumed to keep
+        // the packet's byte framing correct, even if this specific npc slot has already gone stale
+        // by the time this runs (e.g. removed the same tick, or a timing gap between the position
+        // pass queuing this update and this extended-info pass consuming it) - c->npcs[id] was
+        // dereferenced completely unconditionally here with no NULL check at all, unlike every other
+        // npc-array access fixed elsewhere this session. Route the writes at a disposable dummy
+        // instead of skipping them, so the read logic/stream position below stays untouched.
+        static NpcEntity dummy_npc;
+        memset(&dummy_npc, 0, sizeof(dummy_npc));
+        NpcEntity *npc = c->npcs[id] ? c->npcs[id] : &dummy_npc;
         int mask = g1(buf);
 
         npc->pathing_entity.lastMask = mask;
         npc->pathing_entity.lastMaskCycle = _Client.loop_cycle;
 
+        if ((mask & 0x1) == 1) {
+            npc->pathing_entity.damage2 = g1(buf);
+            npc->pathing_entity.damageType2 = g1(buf);
+            npc->pathing_entity.combatCycle2 = _Client.loop_cycle + 400;
+            npc->pathing_entity.health = g1(buf);
+            npc->pathing_entity.totalHealth = g1(buf);
+        }
         if ((mask & 0x2) == 2) {
             int seqId = g2(buf);
-            if (seqId == 65535) {
+            // see getPlayerExtended's identical fix above for why out-of-range must map to -1 and
+            // why the sentinel checks below must run before any _SeqType.instances[] access.
+            if (seqId == 65535 || seqId < 0 || seqId >= _SeqType.count) {
                 seqId = -1;
             }
             if (seqId == npc->pathing_entity.primarySeqId) {
                 npc->pathing_entity.primarySeqLoop = 0;
             }
             int delay = g1(buf);
-            if (seqId == -1 || npc->pathing_entity.primarySeqId == -1 || _SeqType.instances[seqId]->priority > _SeqType.instances[npc->pathing_entity.primarySeqId]->priority || _SeqType.instances[npc->pathing_entity.primarySeqId]->priority == 0) {
+            // TODO: duplicatebehaviour!=0 assumed to mean "RESET" (restart from frame 0); verify polarity against real gameplay, see audit
+            if (seqId == -1 || npc->pathing_entity.primarySeqId == -1 || (seqId == npc->pathing_entity.primarySeqId && _SeqType.instances[seqId]->duplicatebehaviour != 0) || _SeqType.instances[seqId]->priority > _SeqType.instances[npc->pathing_entity.primarySeqId]->priority || _SeqType.instances[npc->pathing_entity.primarySeqId]->priority == 0) {
                 npc->pathing_entity.primarySeqId = seqId;
                 npc->pathing_entity.primarySeqFrame = 0;
                 npc->pathing_entity.primarySeqCycle = 0;
@@ -7049,6 +7309,7 @@ void getNpcPosExtended(Client *c, Packet *buf, int size) {
             npc->pathing_entity.seqTurnAroundId = npc->type->walkanim_b;
             npc->pathing_entity.seqTurnLeftId = npc->type->walkanim_r;
             npc->pathing_entity.seqTurnRightId = npc->type->walkanim_l;
+            npc->pathing_entity.turnRate = npc->type->turnspeed;
             npc->pathing_entity.seqStandId = npc->type->readyanim;
         }
         if ((mask & 0x40) == 64) {
@@ -7076,8 +7337,15 @@ void getNpcPosExtended(Client *c, Packet *buf, int size) {
 
 void getNpcPosNewVis(Client *c, Packet *buf, int size) {
     while (buf->bit_pos + 21 < size * 8) {
-        int index = gbit(buf, 13);
-        if (index == 8191) {
+        // rev254's npc index field is 14 bits (sentinel 16383/0x3FFF), not 13 bits (8191) - the
+        // narrower rev225-era width read 1 bit less per new npc than the server actually sent,
+        // progressively desyncing the rest of this bit-packed block (and everything after it in the
+        // same packet). Confirmed against the reference client (2004sp-client) and by observing
+        // "size mismatch in getnpcpos" errors with inconsistent pos/psize deltas that grew or shrank
+        // depending on how many new npcs appeared in a given NPC_INFO packet - this was the real root
+        // cause of a hard-to-bisect crash deep in scene/minimap rendering, far from this actual bug.
+        int index = gbit(buf, 14);
+        if (index == 16383) {
             break;
         }
         if (!c->npcs[index]) {
@@ -7092,6 +7360,7 @@ void getNpcPosNewVis(Client *c, Packet *buf, int size) {
         npc->pathing_entity.seqTurnAroundId = npc->type->walkanim_b;
         npc->pathing_entity.seqTurnLeftId = npc->type->walkanim_r;
         npc->pathing_entity.seqTurnRightId = npc->type->walkanim_l;
+        npc->pathing_entity.turnRate = npc->type->turnspeed;
         npc->pathing_entity.seqStandId = npc->type->readyanim;
         int dx = gbit(buf, 5);
         if (dx > 15) {
@@ -7275,8 +7544,19 @@ void updateVarp(Client *c, int id) {
 }
 
 void reset_interface_animation(int id) {
+    // called directly from IF_OPENCHAT (the packet that opens an NPC dialogue box, e.g. via
+    // Talk-to) with a completely unvalidated component id - confirmed real crash: rev254 can open
+    // a dialogue referencing an interface component Client3 hasn't instantiated, and this
+    // dereferenced it with zero bounds/NULL check at all, unlike every other _Component.instances[]
+    // access already guarded this session.
+    if (!component_valid(id)) {
+        return;
+    }
     Component *parent = _Component.instances[id];
     for (int i = 0; i < parent->childCount && parent->childId[i] != -1; i++) {
+        if (!component_valid(parent->childId[i])) {
+            continue;
+        }
         Component *child = _Component.instances[parent->childId[i]];
         if (child->type == 1) {
             reset_interface_animation(child->id);
@@ -7295,7 +7575,7 @@ void client_try_reconnect(Client *c) {
         drawStringCenter(c->font_plain12, 256, 143, "Connection lost", WHITE);
         drawStringCenter(c->font_plain12, 257, 159, "Please wait - attempting to reestablish", BLACK);
         drawStringCenter(c->font_plain12, 256, 158, "Please wait - attempting to reestablish", WHITE);
-        pixmap_draw(c->area_viewport, 8, 11);
+        pixmap_draw(c->area_viewport, 4, 4);
         c->flag_scene_tile_x = 0;
         ClientStream *stream = c->stream;
         c->ingame = false;
@@ -7478,7 +7758,26 @@ void client_login(Client *c, const char *username, const char *password, bool re
     if (!c->stream) {
         goto login_fail;
     }
-    clientstream_read_bytes(c->stream, c->in->data, 0, 8);
+
+    // rev254 adds a preliminary session-key exchange before the seed is sent (not present in rev225):
+    // client sends opcode 14 + a 1-byte loginServer id, server acks 8 zero bytes (discarded) + 1-byte
+    // status, THEN sends the real 8-byte seed. TODO: loginServer should be derived from the username
+    // hash for multi-world load balancing; hardcoded to 0 here since a single-world dev server ignores it.
+    c->out->pos = 0;
+    p1(c->out, 14);
+    p1(c->out, 0);
+    clientstream_write(c->stream, c->out->data, c->out->pos, 0);
+    if (clientstream_read_bytes(c->stream, c->in->data, 0, 8) == -1) {
+        goto login_fail;
+    }
+    int sessionStatus = clientstream_read_byte(c->stream);
+    if (sessionStatus != 0) {
+        goto login_fail;
+    }
+
+    if (clientstream_read_bytes(c->stream, c->in->data, 0, 8) == -1) {
+        goto login_fail;
+    }
     c->in->pos = 0;
 
     c->server_seed = g8(c->in);
@@ -7532,6 +7831,14 @@ void client_login(Client *c, const char *username, const char *password, bool re
         client_login(c, username, password, reconnect);
     } else if (reply == 2 || reply == 18) {
         c->rights = reply == 18;
+        if (reply == 2) {
+            // Success (2) sends 2 extra bytes not present after the legacy admin-success (18) reply:
+            // staffModLevel + mouseTrackingFlag. Without reading these, the next 2 stream bytes get
+            // misread as the start of the first in-game packet, desyncing everything after login.
+            // TODO: these are discarded for now - verify whether staffModLevel should feed c->rights.
+            clientstream_read_byte(c->stream);
+            clientstream_read_byte(c->stream);
+        }
         inputtracking_set_disabled(&_InputTracking);
 
         c->ingame = true;
@@ -7693,6 +8000,12 @@ void client_login(Client *c, const char *username, const char *password, bool re
     } else if (reply == 17) {
         c->login_message0 = "You are standing in a members-only area.";
         c->login_message1 = "To play on this world move to a free area first";
+    } else if (reply == 21) {
+        int seconds = clientstream_read_byte(c->stream);
+        c->login_message0 = "";
+        c->login_message1 = "Login limited, retrying...";
+        rs2_sleep(seconds * 1000);
+        client_login(c, username, password, reconnect);
     }
     return;
 login_fail:
@@ -7729,16 +8042,20 @@ void client_prepare_game_screen(Client *c) {
     c->image_title6 = NULL;
     c->image_title7 = NULL;
     c->image_title8 = NULL;
+    // sizes corrected to match the real rev254 fixed-mode (765x503) layout, confirmed against the
+    // reference client - Client3 was hardcoded to the larger "resizable" mode's panel sizes, which
+    // don't match the real sprites' actual dimensions (image_mapback alone is genuinely 172x156;
+    // pix8_draw()'ing it into a 168x160 buffer clipped/misaligned it, part of the minimap corruption).
     c->area_chatback = pixmap_new(479, 96);
-    c->area_mapback = pixmap_new(168, 160);
+    c->area_mapback = pixmap_new(172, 156);
     pix2d_clear();
     pix8_draw(c->image_mapback, 0, 0);
     c->area_sidebar = pixmap_new(190, 261);
     c->area_viewport = pixmap_new(512, 334);
     pix2d_clear();
-    c->area_backbase1 = pixmap_new(501, 61);
-    c->area_backbase2 = pixmap_new(288, 40);
-    c->area_backhmid1 = pixmap_new(269, 66);
+    c->area_backbase1 = pixmap_new(496, 50);
+    c->area_backbase2 = pixmap_new(269, 37);
+    c->area_backhmid1 = pixmap_new(249, 45);
     c->redraw_background = true;
 }
 
@@ -7817,40 +8134,38 @@ void client_draw(Client *c) {
 void client_draw_game(Client *c) {
     if (c->redraw_background) {
         c->redraw_background = false;
-        pixmap_draw(c->area_backleft1, 0, 11);
-        pixmap_draw(c->area_backleft2, 0, 375);
-        pixmap_draw(c->area_backright1, 729, 5);
-        pixmap_draw(c->area_backright2, 752, 231);
+        pixmap_draw(c->area_backleft1, 0, 4);
+        pixmap_draw(c->area_backleft2, 0, 357);
+        pixmap_draw(c->area_backright1, 722, 4);
+        pixmap_draw(c->area_backright2, 743, 205);
         pixmap_draw(c->area_backtop1, 0, 0);
-        pixmap_draw(c->area_backtop2, 561, 0);
-        pixmap_draw(c->area_backvmid1, 520, 11);
-        pixmap_draw(c->area_backvmid2, 520, 231);
-        pixmap_draw(c->area_backvmid3, 501, 375);
-        pixmap_draw(c->area_backhmid2, 0, 345);
+        pixmap_draw(c->area_backvmid1, 516, 4);
+        pixmap_draw(c->area_backvmid2, 516, 205);
+        pixmap_draw(c->area_backvmid3, 496, 357);
+        pixmap_draw(c->area_backhmid2, 0, 338);
         c->redraw_sidebar = true;
         c->redraw_chatback = true;
         c->redraw_sideicons = true;
         c->redraw_privacy_settings = true;
         if (c->scene_state != 2) {
-            pixmap_draw(c->area_viewport, 8, 11);
-            pixmap_draw(c->area_mapback, 561, 5);
+            pixmap_draw(c->area_viewport, 4, 4);
+            pixmap_draw(c->area_mapback, 550, 4);
         }
     }
 #ifdef GL11
     else {
-        pixmap_draw(c->area_backleft1, 0, 11);
-        pixmap_draw(c->area_backleft2, 0, 375);
-        pixmap_draw(c->area_backright1, 729, 5);
-        pixmap_draw(c->area_backright2, 752, 231);
+        pixmap_draw(c->area_backleft1, 0, 4);
+        pixmap_draw(c->area_backleft2, 0, 357);
+        pixmap_draw(c->area_backright1, 722, 4);
+        pixmap_draw(c->area_backright2, 743, 205);
         pixmap_draw(c->area_backtop1, 0, 0);
-        pixmap_draw(c->area_backtop2, 561, 0);
-        pixmap_draw(c->area_backvmid1, 520, 11);
-        pixmap_draw(c->area_backvmid2, 520, 231);
-        pixmap_draw(c->area_backvmid3, 501, 375);
-        pixmap_draw(c->area_backhmid2, 0, 345);
+        pixmap_draw(c->area_backvmid1, 516, 4);
+        pixmap_draw(c->area_backvmid2, 516, 205);
+        pixmap_draw(c->area_backvmid3, 496, 357);
+        pixmap_draw(c->area_backhmid2, 0, 338);
         if (c->scene_state != 2) {
-            pixmap_draw(c->area_viewport, 8, 11);
-            pixmap_draw(c->area_mapback, 561, 5);
+            pixmap_draw(c->area_viewport, 4, 4);
+            pixmap_draw(c->area_mapback, 550, 4);
         }
     }
 #endif
@@ -7884,14 +8199,14 @@ void client_draw_game(Client *c) {
     }
 #ifdef GL11
     else {
-        pixmap_draw(c->area_sidebar, 562, 231);
+        pixmap_draw(c->area_sidebar, 553, 205);
     }
 #endif
 
     if (c->chat_interface_id == -1) {
         c->chat_interface->scrollPosition = c->chat_scroll_height - c->chat_scroll_offset - 77;
-        if (c->shell->mouse_x > 453 && c->shell->mouse_x < 565 && c->shell->mouse_y > 350) {
-            client_handle_scroll_input(c, c->shell->mouse_x - 22, c->shell->mouse_y - 375, c->chat_scroll_height, 77, false, 463, 0, c->chat_interface);
+        if (c->shell->mouse_x > 448 && c->shell->mouse_x < 560 && c->shell->mouse_y > 332) {
+            client_handle_scroll_input(c, c->shell->mouse_x - 17, c->shell->mouse_y - 357, c->chat_scroll_height, 77, false, 463, 0, c->chat_interface);
         }
 
         int offset = c->chat_scroll_height - c->chat_interface->scrollPosition - 77;
@@ -7938,13 +8253,13 @@ void client_draw_game(Client *c) {
     }
 #ifdef GL11
     else {
-        pixmap_draw(c->area_chatback, 22, 375);
+        pixmap_draw(c->area_chatback, 17, 357);
     }
 #endif
 
     if (c->scene_state == 2) {
         client_draw_minimap(c);
-        pixmap_draw(c->area_mapback, 561, 5);
+        pixmap_draw(c->area_mapback, 550, 4);
     }
 
     if (c->flashing_tab != -1) {
@@ -7955,7 +8270,7 @@ void client_draw_game(Client *c) {
         if (c->flashing_tab != -1 && c->flashing_tab == c->selected_tab) {
             c->flashing_tab = -1;
             // TUTORIAL_CLICKSIDE
-            p1isaac(c->out, 175);
+            p1isaac(c->out, 201); // TUT_CLICKSIDE
             p1(c->out, c->selected_tab);
         }
 
@@ -7966,105 +8281,105 @@ void client_draw_game(Client *c) {
         if (c->sidebar_interface_id == -1) {
             if (c->tab_interface_id[c->selected_tab] != -1) {
                 if (c->selected_tab == 0) {
-                    pix8_draw(c->image_redstone1, 29, 30);
+                    pix8_draw(c->image_redstone1, 22, 10);
                 } else if (c->selected_tab == 1) {
-                    pix8_draw(c->image_redstone2, 59, 29);
+                    pix8_draw(c->image_redstone2, 54, 8);
                 } else if (c->selected_tab == 2) {
-                    pix8_draw(c->image_redstone2, 87, 29);
+                    pix8_draw(c->image_redstone2, 82, 8);
                 } else if (c->selected_tab == 3) {
-                    pix8_draw(c->image_redstone3, 115, 29);
+                    pix8_draw(c->image_redstone3, 110, 8);
                 } else if (c->selected_tab == 4) {
-                    pix8_draw(c->image_redstone2h, 156, 29);
+                    pix8_draw(c->image_redstone2h, 153, 8);
                 } else if (c->selected_tab == 5) {
-                    pix8_draw(c->image_redstone2h, 184, 29);
+                    pix8_draw(c->image_redstone2h, 181, 8);
                 } else if (c->selected_tab == 6) {
-                    pix8_draw(c->image_redstone1h, 212, 30);
+                    pix8_draw(c->image_redstone1h, 209, 9);
                 }
             }
 
             if (c->tab_interface_id[0] != -1 && (c->flashing_tab != 0 || _Client.loop_cycle % 20 < 10)) {
-                pix8_draw(c->image_sideicons[0], 35, 34);
+                pix8_draw(c->image_sideicons[0], 29, 13);
             }
 
             if (c->tab_interface_id[1] != -1 && (c->flashing_tab != 1 || _Client.loop_cycle % 20 < 10)) {
-                pix8_draw(c->image_sideicons[1], 59, 32);
+                pix8_draw(c->image_sideicons[1], 53, 11);
             }
 
             if (c->tab_interface_id[2] != -1 && (c->flashing_tab != 2 || _Client.loop_cycle % 20 < 10)) {
-                pix8_draw(c->image_sideicons[2], 86, 32);
+                pix8_draw(c->image_sideicons[2], 82, 11);
             }
 
             if (c->tab_interface_id[3] != -1 && (c->flashing_tab != 3 || _Client.loop_cycle % 20 < 10)) {
-                pix8_draw(c->image_sideicons[3], 121, 33);
+                pix8_draw(c->image_sideicons[3], 115, 12);
             }
 
             if (c->tab_interface_id[4] != -1 && (c->flashing_tab != 4 || _Client.loop_cycle % 20 < 10)) {
-                pix8_draw(c->image_sideicons[4], 157, 34);
+                pix8_draw(c->image_sideicons[4], 153, 13);
             }
 
             if (c->tab_interface_id[5] != -1 && (c->flashing_tab != 5 || _Client.loop_cycle % 20 < 10)) {
-                pix8_draw(c->image_sideicons[5], 185, 32);
+                pix8_draw(c->image_sideicons[5], 180, 11);
             }
 
             if (c->tab_interface_id[6] != -1 && (c->flashing_tab != 6 || _Client.loop_cycle % 20 < 10)) {
-                pix8_draw(c->image_sideicons[6], 212, 34);
+                pix8_draw(c->image_sideicons[6], 208, 13);
             }
         }
 
-        pixmap_draw(c->area_backhmid1, 520, 165);
+        pixmap_draw(c->area_backhmid1, 516, 160);
         pixmap_bind(c->area_backbase2);
         pix8_draw(c->image_backbase2, 0, 0);
 
         if (c->sidebar_interface_id == -1) {
             if (c->tab_interface_id[c->selected_tab] != -1) {
                 if (c->selected_tab == 7) {
-                    pix8_draw(c->image_redstone1v, 49, 0);
+                    pix8_draw(c->image_redstone1v, 42, 0);
                 } else if (c->selected_tab == 8) {
-                    pix8_draw(c->image_redstone2v, 81, 0);
+                    pix8_draw(c->image_redstone2v, 74, 0);
                 } else if (c->selected_tab == 9) {
-                    pix8_draw(c->image_redstone2v, 108, 0);
+                    pix8_draw(c->image_redstone2v, 102, 0);
                 } else if (c->selected_tab == 10) {
-                    pix8_draw(c->image_redstone3v, 136, 1);
+                    pix8_draw(c->image_redstone3v, 130, 1);
                 } else if (c->selected_tab == 11) {
-                    pix8_draw(c->image_redstone2hv, 178, 0);
+                    pix8_draw(c->image_redstone2hv, 173, 0);
                 } else if (c->selected_tab == 12) {
-                    pix8_draw(c->image_redstone2hv, 205, 0);
+                    pix8_draw(c->image_redstone2hv, 201, 0);
                 } else if (c->selected_tab == 13) {
-                    pix8_draw(c->image_redstone1hv, 233, 0);
+                    pix8_draw(c->image_redstone1hv, 229, 0);
                 }
             }
 
             if (c->tab_interface_id[8] != -1 && (c->flashing_tab != 8 || _Client.loop_cycle % 20 < 10)) {
-                pix8_draw(c->image_sideicons[7], 80, 2);
+                pix8_draw(c->image_sideicons[7], 74, 2);
             }
 
             if (c->tab_interface_id[9] != -1 && (c->flashing_tab != 9 || _Client.loop_cycle % 20 < 10)) {
-                pix8_draw(c->image_sideicons[8], 107, 3);
+                pix8_draw(c->image_sideicons[8], 102, 3);
             }
 
             if (c->tab_interface_id[10] != -1 && (c->flashing_tab != 10 || _Client.loop_cycle % 20 < 10)) {
-                pix8_draw(c->image_sideicons[9], 142, 4);
+                pix8_draw(c->image_sideicons[9], 137, 4);
             }
 
             if (c->tab_interface_id[11] != -1 && (c->flashing_tab != 11 || _Client.loop_cycle % 20 < 10)) {
-                pix8_draw(c->image_sideicons[10], 179, 2);
+                pix8_draw(c->image_sideicons[10], 174, 2);
             }
 
             if (c->tab_interface_id[12] != -1 && (c->flashing_tab != 12 || _Client.loop_cycle % 20 < 10)) {
-                pix8_draw(c->image_sideicons[11], 206, 2);
+                pix8_draw(c->image_sideicons[11], 201, 2);
             }
 
             if (c->tab_interface_id[13] != -1 && (c->flashing_tab != 13 || _Client.loop_cycle % 20 < 10)) {
-                pix8_draw(c->image_sideicons[12], 230, 2);
+                pix8_draw(c->image_sideicons[12], 226, 2);
             }
         }
-        pixmap_draw(c->area_backbase2, 501, 492);
+        pixmap_draw(c->area_backbase2, 496, 466);
         pixmap_bind(c->area_viewport);
     }
 #ifdef GL11
     else {
-        pixmap_draw(c->area_backhmid1, 520, 165);
-        pixmap_draw(c->area_backbase2, 501, 492);
+        pixmap_draw(c->area_backhmid1, 516, 160);
+        pixmap_draw(c->area_backbase2, 496, 466);
     }
 #endif
 
@@ -8074,49 +8389,49 @@ void client_draw_game(Client *c) {
         pixmap_bind(c->area_backbase1);
         pix8_draw(c->image_backbase1, 0, 0);
 
-        drawStringTaggableCenter(c->font_plain12, "Public chat", 57, 33, WHITE, true);
+        drawStringTaggableCenter(c->font_plain12, "Public chat", 55, 28, WHITE, true);
         if (c->public_chat_setting == 0) {
-            drawStringTaggableCenter(c->font_plain12, "On", 57, 46, GREEN, true);
+            drawStringTaggableCenter(c->font_plain12, "On", 55, 41, GREEN, true);
         }
         if (c->public_chat_setting == 1) {
-            drawStringTaggableCenter(c->font_plain12, "Friends", 57, 46, YELLOW, true);
+            drawStringTaggableCenter(c->font_plain12, "Friends", 55, 41, YELLOW, true);
         }
         if (c->public_chat_setting == 2) {
-            drawStringTaggableCenter(c->font_plain12, "Off", 57, 46, RED, true);
+            drawStringTaggableCenter(c->font_plain12, "Off", 55, 41, RED, true);
         }
         if (c->public_chat_setting == 3) {
-            drawStringTaggableCenter(c->font_plain12, "Hide", 57, 46, CYAN, true);
+            drawStringTaggableCenter(c->font_plain12, "Hide", 55, 41, CYAN, true);
         }
 
-        drawStringTaggableCenter(c->font_plain12, "Private chat", 186, 33, WHITE, true);
+        drawStringTaggableCenter(c->font_plain12, "Private chat", 184, 28, WHITE, true);
         if (c->private_chat_setting == 0) {
-            drawStringTaggableCenter(c->font_plain12, "On", 186, 46, GREEN, true);
+            drawStringTaggableCenter(c->font_plain12, "On", 184, 41, GREEN, true);
         }
         if (c->private_chat_setting == 1) {
-            drawStringTaggableCenter(c->font_plain12, "Friends", 186, 46, YELLOW, true);
+            drawStringTaggableCenter(c->font_plain12, "Friends", 184, 41, YELLOW, true);
         }
         if (c->private_chat_setting == 2) {
-            drawStringTaggableCenter(c->font_plain12, "Off", 186, 46, RED, true);
+            drawStringTaggableCenter(c->font_plain12, "Off", 184, 41, RED, true);
         }
 
-        drawStringTaggableCenter(c->font_plain12, "Trade/duel", 326, 33, WHITE, true);
+        drawStringTaggableCenter(c->font_plain12, "Trade/duel", 324, 28, WHITE, true);
         if (c->trade_chat_setting == 0) {
-            drawStringTaggableCenter(c->font_plain12, "On", 326, 46, GREEN, true);
+            drawStringTaggableCenter(c->font_plain12, "On", 324, 41, GREEN, true);
         }
         if (c->trade_chat_setting == 1) {
-            drawStringTaggableCenter(c->font_plain12, "Friends", 326, 46, YELLOW, true);
+            drawStringTaggableCenter(c->font_plain12, "Friends", 324, 41, YELLOW, true);
         }
         if (c->trade_chat_setting == 2) {
-            drawStringTaggableCenter(c->font_plain12, "Off", 326, 46, RED, true);
+            drawStringTaggableCenter(c->font_plain12, "Off", 324, 41, RED, true);
         }
 
-        drawStringTaggableCenter(c->font_plain12, "Report abuse", 462, 38, WHITE, true);
-        pixmap_draw(c->area_backbase1, 0, 471);
+        drawStringTaggableCenter(c->font_plain12, "Report abuse", 458, 33, WHITE, true);
+        pixmap_draw(c->area_backbase1, 0, 453);
         pixmap_bind(c->area_viewport);
     }
 #ifdef GL11
     else {
-        pixmap_draw(c->area_backbase1, 0, 471);
+        pixmap_draw(c->area_backbase1, 0, 453);
     }
 #endif
 
@@ -8159,8 +8474,17 @@ void client_handle_scroll_input(Client *c, int mouseX, int mouseY, int scrollabl
 
 bool client_update_interface_animation(Client *c, int id, int delta) {
     bool updated = false;
+    // id ultimately traces back to interface ids set from network packets (sidebar/chat/tab/viewport
+    // interface ids) that rev254 can point at components Client3 never instantiated - same class of
+    // bug as the IF_SET* handlers above, but reached later via stored state rather than a fresh read.
+    if (!component_valid(id)) {
+        return false;
+    }
     Component *parent = _Component.instances[id];
     for (int i = 0; i < parent->childCount && parent->childId[i] != -1; i++) {
+        if (!component_valid(parent->childId[i])) {
+            continue;
+        }
         Component *child = _Component.instances[parent->childId[i]];
         if (child->type == 1) {
             updated |= client_update_interface_animation(c, child->id, delta);
@@ -8172,6 +8496,9 @@ bool client_update_interface_animation(Client *c, int id, int delta) {
                 seqId = child->activeAnim;
             } else {
                 seqId = child->anim;
+            }
+            if (seqId < -1 || seqId >= _SeqType.count) {
+                seqId = -1;
             }
             if (seqId != -1) {
                 SeqType *type = _SeqType.instances[seqId];
@@ -8504,6 +8831,14 @@ static void draw2DEntityElements(Client *c) {
             if (c->projectX > -1) {
                 pix24_draw(c->image_headicons[2], c->projectX - 12, c->projectY - 28);
             }
+        } else {
+            NpcEntity *npc = (NpcEntity *)entity;
+            if (npc->type->headicon != -1) {
+                projectFromGround(c, entity, entity->height + 15);
+                if (c->projectX > -1) {
+                    pix24_draw(c->image_headicons[npc->type->headicon], c->projectX - 12, c->projectY - 30);
+                }
+            }
         }
 
         if (entity->chat[0] && (index >= c->player_count || c->public_chat_setting == 0 || c->public_chat_setting == 3 || (c->public_chat_setting == 1 && client_is_friend(c, ((PlayerEntity *)entity)->name)))) {
@@ -8548,11 +8883,25 @@ static void draw2DEntityElements(Client *c) {
             projectFromGround(c, entity, entity->height / 2);
 
             if (c->projectX > -1) {
-                pix24_draw(c->image_hitmarks[entity->damageType], c->projectX - 12, c->projectY - 12);
+                int splatX = entity->combatCycle2 > _Client.loop_cycle + 330 ? c->projectX - 24 : c->projectX - 12;
+                pix24_draw(c->image_hitmarks[entity->damageType], splatX, c->projectY - 12);
                 char *damage = valueof(entity->damage);
-                drawStringCenter(c->font_plain11, c->projectX, c->projectY + 4, damage, BLACK);
-                drawStringCenter(c->font_plain11, c->projectX - 1, c->projectY + 3, damage, WHITE);
+                drawStringCenter(c->font_plain11, splatX + 12, c->projectY + 4, damage, BLACK);
+                drawStringCenter(c->font_plain11, splatX + 11, c->projectY + 3, damage, WHITE);
                 free(damage);
+            }
+        }
+
+        if (entity->combatCycle2 > _Client.loop_cycle + 330) {
+            projectFromGround(c, entity, entity->height / 2);
+
+            if (c->projectX > -1) {
+                int splatX = entity->combatCycle > _Client.loop_cycle + 330 ? c->projectX + 24 : c->projectX - 12;
+                pix24_draw(c->image_hitmarks[entity->damageType2], splatX, c->projectY - 12);
+                char *damage2 = valueof(entity->damage2);
+                drawStringCenter(c->font_plain11, splatX + 12, c->projectY + 4, damage2, BLACK);
+                drawStringCenter(c->font_plain11, splatX + 11, c->projectY + 3, damage2, WHITE);
+                free(damage2);
             }
         }
     }
@@ -8842,7 +9191,7 @@ static void draw3DEntityElements(Client *c) {
 
     if (c->viewport_interface_id != -1) {
         client_update_interface_animation(c, c->viewport_interface_id, c->scene_delta);
-        client_draw_interface(c, _Component.instances[c->viewport_interface_id], 0, 0, 0);
+        client_draw_interface(c, component_get(c->viewport_interface_id), 0, 0, 0);
     }
 
     drawWildyLevel(c);
@@ -8920,7 +9269,7 @@ void client_draw_scene(Client *c) {
         if (_Client.cyclelogic2 > 1802) {
             _Client.cyclelogic2 = 0;
             // ANTICHEAT_CYCLELOGIC2
-            p1isaac(c->out, 146);
+            p1isaac(c->out, 225); // ANTICHEAT_CYCLELOGIC2
             p1(c->out, 0);
             int start = c->out->pos;
             p2(c->out, 29711);
@@ -8983,8 +9332,8 @@ void client_draw_scene(Client *c) {
     jitter = _Pix3D.cycle;
     _Model.check_hover = true;
     _Model.picked_count = 0;
-    _Model.mouse_x = c->shell->mouse_x - 8;
-    _Model.mouse_y = c->shell->mouse_y - 11;
+    _Model.mouse_x = c->shell->mouse_x - 4;
+    _Model.mouse_y = c->shell->mouse_y - 4;
     pix2d_clear();
 
     gl_start_drawscene();
@@ -9020,7 +9369,7 @@ void client_draw_scene(Client *c) {
         drawStringRight(c->font_plain11, 507, 213, buf, YELLOW, true);
     }
     pixmap_last = rs2_now();
-    pixmap_draw(c->area_viewport, 8, 11);
+    pixmap_draw(c->area_viewport, 4, 4);
     pixmap_now = rs2_now();
 
     c->cameraX = cameraX;
@@ -9398,7 +9747,9 @@ void client_draw_minimap(Client *c) {
     int anchorX = c->local_player->pathing_entity.x / 32 + 48;
     int anchorY = 464 - c->local_player->pathing_entity.z / 32;
 
-    pix24_draw_rotated_masked(c->image_minimap, 21, 9, 146, 151, c->minimap_mask_line_offsets, c->minimap_mask_line_lengths, anchorX, anchorY, angle, c->minimap_zoom + 256);
+    // (25, 5) matches the mask-building scan's own offset base (see client_load()) - the previous
+    // (21, 9) predates that fix and disagreed with it by (4,-4), part of the minimap corruption.
+    pix24_draw_rotated_masked(c->image_minimap, 25, 5, 146, 151, c->minimap_mask_line_offsets, c->minimap_mask_line_lengths, anchorX, anchorY, angle, c->minimap_zoom + 256);
     pix24_draw_rotated_masked(c->image_compass, 0, 0, 33, 33, c->compass_mask_line_offsets, c->compass_mask_line_lengths, 25, 25, c->orbit_camera_yaw, 256);
     for (int i = 0; i < c->activeMapFunctionCount; i++) {
         anchorX = c->activeMapFunctionX[i] * 4 + 2 - c->local_player->pathing_entity.x / 32;
@@ -9455,11 +9806,18 @@ void client_draw_minimap(Client *c) {
         client_draw_on_minimap(c, anchorY, c->image_mapflag, anchorX);
     }
 
-    pix2d_fill_rect(93, 82, WHITE, 3, 3);
+    pix2d_fill_rect(97, 78, WHITE, 3, 3);
     pixmap_bind(c->area_viewport);
 }
 
 void client_draw_on_minimap(Client *c, int dy, Pix24 *image, int dx) {
+    // same class of bug as pixmap_draw()'s NULL guard - a minimap icon (flag/dot/map-function sprite)
+    // can be missing from the real rev254 media archive, and this dereferenced image->crop_w
+    // unconditionally. Confirmed real crash: the map-flag icon is only drawn once flagSceneTileX is
+    // set (not on every tick), so this went unnoticed until well after login/scene rendering worked.
+    if (!image) {
+        return;
+    }
     int angle = c->orbit_camera_yaw + c->minimap_anticheat_angle & 0x7ff;
     int distance = dx * dx + dy * dy;
     if (distance > 6400) {
@@ -9500,7 +9858,7 @@ void client_draw_chatback(Client *c) {
         drawStringCenter(c->font_bold12, 239, 40, c->modal_message, BLACK);
         drawStringCenter(c->font_bold12, 239, 60, "Click to continue", DARKBLUE);
     } else if (c->chat_interface_id != -1) {
-        client_draw_interface(c, _Component.instances[c->chat_interface_id], 0, 0, 0);
+        client_draw_interface(c, component_get(c->chat_interface_id), 0, 0, 0);
     } else if (c->sticky_chat_interface_id == -1) {
         PixFont *font = c->font_plain12;
         if (_Custom.chat_era == 0) {
@@ -9611,12 +9969,12 @@ void client_draw_chatback(Client *c) {
 
         pix2d_hline(0, 77, BLACK, 479);
     } else {
-        client_draw_interface(c, _Component.instances[c->sticky_chat_interface_id], 0, 0, 0);
+        client_draw_interface(c, component_get(c->sticky_chat_interface_id), 0, 0, 0);
     }
     if (c->menu_visible && c->menu_area == 2) {
         client_draw_menu(c);
     }
-    pixmap_draw(c->area_chatback, 22, 375);
+    pixmap_draw(c->area_chatback, 17, 357);
     pixmap_bind(c->area_viewport);
     _Pix3D.line_offset = c->area_viewport_offsets;
 }
@@ -9666,14 +10024,14 @@ void client_draw_sidebar(Client *c) {
     _Pix3D.line_offset = c->area_sidebar_offsets;
     pix8_draw(c->image_invback, 0, 0);
     if (c->sidebar_interface_id != -1) {
-        client_draw_interface(c, _Component.instances[c->sidebar_interface_id], 0, 0, 0);
+        client_draw_interface(c, component_get(c->sidebar_interface_id), 0, 0, 0);
     } else if (c->tab_interface_id[c->selected_tab] != -1) {
-        client_draw_interface(c, _Component.instances[c->tab_interface_id[c->selected_tab]], 0, 0, 0);
+        client_draw_interface(c, component_get(c->tab_interface_id[c->selected_tab]), 0, 0, 0);
     }
     if (c->menu_visible && c->menu_area == 1) {
         client_draw_menu(c);
     }
-    pixmap_draw(c->area_sidebar, 562, 231);
+    pixmap_draw(c->area_sidebar, 553, 205);
     pixmap_bind(c->area_viewport);
     _Pix3D.line_offset = c->area_viewport_offsets;
 }
@@ -9910,6 +10268,9 @@ static char *getIntString(int value) {
 }
 
 static void client_draw_interface(Client *c, Component *com, int x, int y, int scrollY) {
+    if (!com) {
+        return;
+    }
     if (com->type != 0 || !com->childId || (com->hide && c->viewportHoveredInterfaceIndex != com->id && c->sidebarHoveredInterfaceIndex != com->id && c->chatHoveredInterfaceIndex != com->id)) {
         return;
     }
@@ -10178,6 +10539,12 @@ static void client_draw_interface(Client *c, Component *com, int x, int y, int s
             } else {
                 seqId = child->anim;
             }
+            // child->anim/activeAnim can come from either a live IF_SETANIM packet or the local
+            // interface archive's own decode (component_unpack) - guard here too as a second layer,
+            // since _SeqType.instances[seqId] below is otherwise indexed with zero bounds checking.
+            if (seqId < -1 || seqId >= _SeqType.count) {
+                seqId = -1;
+            }
 
             Model *model;
             bool _free = false;
@@ -10247,16 +10614,16 @@ void client_draw_menu(Client *c) {
     int mouseX = c->shell->mouse_x;
     int mouseY = c->shell->mouse_y;
     if (c->menu_area == 0) {
-        mouseX -= 8;
-        mouseY -= 11;
+        mouseX -= 4;
+        mouseY -= 4;
     }
     if (c->menu_area == 1) {
-        mouseX -= 562;
-        mouseY -= 231;
+        mouseX -= 553;
+        mouseY -= 205;
     }
     if (c->menu_area == 2) {
-        mouseX -= 22;
-        mouseY -= 375;
+        mouseX -= 17;
+        mouseY -= 357;
     }
 
     for (int i = 0; i < c->menu_size; i++) {
@@ -10271,7 +10638,7 @@ void client_draw_menu(Client *c) {
 
 void client_draw_error(Client *c) {
     platform_set_color(BLACK);
-    platform_fill_rect(0, 0, 789, 532);
+    platform_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
     gameshell_set_framerate(c->shell, 1);
 
     if (c->error_loading) {
@@ -10409,23 +10776,23 @@ void client_draw_title_screen(Client *c) {
         drawStringTaggableCenter(c->font_bold12, "Cancel", x, y + 5, WHITE, true);
     }
 
-    pixmap_draw(c->image_title4, 214, 186);
+    pixmap_draw(c->image_title4, 202, 171);
 #ifdef GL11
     c->redraw_background = true;
 
     c->image_title0->dirty = true;
     c->image_title1->dirty = true;
     pixmap_draw(c->image_title0, 0, 0);
-    pixmap_draw(c->image_title1, 661, 0);
+    pixmap_draw(c->image_title1, 637, 0);
 #endif
     if (c->redraw_background) {
         c->redraw_background = false;
         pixmap_draw(c->image_title2, 128, 0);
-        pixmap_draw(c->image_title3, 214, 386);
+        pixmap_draw(c->image_title3, 202, 371);
         pixmap_draw(c->image_title5, 0, 265);
-        pixmap_draw(c->image_title6, 574, 265);
-        pixmap_draw(c->image_title7, 128, 186);
-        pixmap_draw(c->image_title8, 574, 186);
+        pixmap_draw(c->image_title6, 562, 265);
+        pixmap_draw(c->image_title7, 128, 171);
+        pixmap_draw(c->image_title8, 562, 171);
     }
 
     client_run_flames(c); // NOTE: random placement of run_flames
@@ -10446,6 +10813,7 @@ void client_unload(Client *c) {
     npctype_free_global();
     seqtype_free_global();
     varptype_free_global();
+    varbittype_free_global();
     playerentity_free_global();
     spotanimtype_free_global();
     idktype_free_global();
@@ -10681,7 +11049,6 @@ void client_free(Client *c) {
     pixmap_free(c->area_backright1);
     pixmap_free(c->area_backright2);
     pixmap_free(c->area_backtop1);
-    pixmap_free(c->area_backtop2);
     pixmap_free(c->area_backvmid1);
     pixmap_free(c->area_backvmid2);
     pixmap_free(c->area_backvmid3);
@@ -10976,31 +11343,36 @@ void client_load_title(Client *c) {
         c->area_backhmid1 = NULL;
     }
 
+    // sizes/positions corrected to the real rev254 fixed-mode (765x503) title-screen tiling grid -
+    // Client3's values were calibrated for the wrong 789x532 layout (see client_load_title_background
+    // and client_draw_title_screen for the corresponding blit/draw position fixes). The mirror pass's
+    // split point alone (394 -> 382) explains the black vertical seam: title.dat is 383px wide, so
+    // 382+383=765 tiles exactly, while 394 left an 11px uncovered gap down the middle.
     c->image_title0 = pixmap_new(128, 265);
     pix2d_clear();
 
     c->image_title1 = pixmap_new(128, 265);
     pix2d_clear();
 
-    c->image_title2 = pixmap_new(533, 186);
+    c->image_title2 = pixmap_new(509, 171);
     pix2d_clear();
 
-    c->image_title3 = pixmap_new(360, 146);
+    c->image_title3 = pixmap_new(360, 132);
     pix2d_clear();
 
     c->image_title4 = pixmap_new(360, 200);
     pix2d_clear();
 
-    c->image_title5 = pixmap_new(214, 267);
+    c->image_title5 = pixmap_new(202, 238);
     pix2d_clear();
 
-    c->image_title6 = pixmap_new(215, 267);
+    c->image_title6 = pixmap_new(203, 238);
     pix2d_clear();
 
-    c->image_title7 = pixmap_new(86, 79);
+    c->image_title7 = pixmap_new(74, 94);
     pix2d_clear();
 
-    c->image_title8 = pixmap_new(87, 79);
+    c->image_title8 = pixmap_new(75, 94);
     pix2d_clear();
 
     if (c->archive_title) {
@@ -11027,26 +11399,26 @@ void client_draw_progress(Client *c, const char *message, int progress) {
         pix2d_fill_rect(x / 2 - 150, midY + 2, PROGRESS_RED, progress * 3, 30);
         pix2d_fill_rect(x / 2 - 150 + progress * 3, midY + 2, BLACK, 300 - progress * 3, 30);
         drawStringCenter(c->font_bold12, x / 2, y / 2 + 5 - offsetY, message, WHITE);
-        pixmap_draw(c->image_title4, 214, 186);
+        pixmap_draw(c->image_title4, 202, 171);
 #ifdef GL11
         c->redraw_background = true;
         if (c->flame_active) {
             pixmap_draw(c->image_title0, 0, 0);
-            pixmap_draw(c->image_title1, 661, 0);
+            pixmap_draw(c->image_title1, 637, 0);
         }
 #endif
         if (c->redraw_background) {
             c->redraw_background = false;
             if (!c->flame_active) {
                 pixmap_draw(c->image_title0, 0, 0);
-                pixmap_draw(c->image_title1, 661, 0);
+                pixmap_draw(c->image_title1, 637, 0);
             }
             pixmap_draw(c->image_title2, 128, 0);
-            pixmap_draw(c->image_title3, 214, 386);
+            pixmap_draw(c->image_title3, 202, 371);
             pixmap_draw(c->image_title5, 0, 265);
-            pixmap_draw(c->image_title6, 574, 265);
-            pixmap_draw(c->image_title7, 128, 186);
-            pixmap_draw(c->image_title8, 574, 186);
+            pixmap_draw(c->image_title6, 562, 265);
+            pixmap_draw(c->image_title7, 128, 171);
+            pixmap_draw(c->image_title8, 562, 171);
         }
 
         platform_update_surface();

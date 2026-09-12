@@ -54,6 +54,9 @@ Packet *packet_new(int8_t *src, int length) {
 }
 
 void packet_free(Packet *packet) {
+    if (!packet) {
+        return;
+    }
     free(packet->data);
     free(packet);
 }

@@ -19,3 +19,4 @@ typedef struct {
 
 void animframe_free_global(void);
 void animframe_unpack(Jagfile *models);
+void animframe_unpack_ondemand(void);

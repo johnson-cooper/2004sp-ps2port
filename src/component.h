@@ -98,6 +98,8 @@ typedef struct {
 
     int width;
     int height;
+    int trans; // rev254 adds this byte between height and overLayer - was missing entirely,
+               // desyncing every component's decode by 1 byte (see component_unpack)
     int x;
     int y;
     int **scripts;
@@ -115,6 +117,7 @@ typedef struct {
     bool draggable;
     bool interactable;
     bool usable;
+    bool objReplace;
     int marginX;
     int marginY;
     Pix24 **invSlotSprite;
@@ -130,6 +133,7 @@ typedef struct {
     int colour;
     int activeColour;
     int overColour;
+    int activeOverColour;
     Pix24 *graphic;
     Pix24 *activeGraphic;
     Model *model;

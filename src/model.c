@@ -9,6 +9,7 @@
 #include "defines.h"
 #include "jagfile.h"
 #include "model.h"
+#include "ondemand.h"
 #include "pix2d.h"
 #include "pix3d.h"
 #include "platform.h"
@@ -322,7 +323,257 @@ void model_unpack(Jagfile *models) {
     // }
 }
 
+// rev254 delivers each model as its own self-contained buffer (via ondemand.zip, see ondemand.c)
+// instead of the old monolithic models.jag scheme model_unpack()/model_from_id() below still
+// supports. The per-vertex/per-face gsmart/order-flag encoding is byte-for-byte identical between
+// the two formats (confirmed against the reference client) - only the container changed: instead of
+// a combined index table shared by every model, this buffer carries its own 18-byte trailer with
+// the counts/flags/lengths needed to compute every section's offset via a simple prefix sum.
+static Model *model_from_ondemand_data(int8_t *buf, int size, bool use_allocator) {
+    Model *model = rs2_calloc(use_allocator, 1, sizeof(Model));
+    if (size < 18) {
+        rs2_error("Error model: ondemand payload too small (%d bytes)\n", size);
+        return model;
+    }
+
+    Packet trailer = {0};
+    trailer.data = buf;
+    trailer.pos = size - 18;
+
+    int vertex_count = g2(&trailer);
+    int face_count = g2(&trailer);
+    int textured_face_count = g1(&trailer);
+    int has_render_type = g1(&trailer);
+    int priority = g1(&trailer);
+    int has_alpha = g1(&trailer);
+    int has_face_labels = g1(&trailer);
+    int has_vertex_labels = g1(&trailer);
+    int data_length_x = g2(&trailer);
+    int data_length_y = g2(&trailer);
+    int data_length_z = g2(&trailer);
+    int data_length_face_index = g2(&trailer);
+
+    int pos = 0;
+    int vertex_order_offset = pos;
+    pos += vertex_count;
+    int face_index_order_offset = pos;
+    pos += face_count;
+
+    int face_priority_offset;
+    if (priority == 255) {
+        face_priority_offset = pos;
+        pos += face_count;
+    } else {
+        face_priority_offset = -priority - 1;
+    }
+
+    int face_label_offset = -1;
+    if (has_face_labels == 1) {
+        face_label_offset = pos;
+        pos += face_count;
+    }
+
+    int face_render_type_offset = -1;
+    if (has_render_type == 1) {
+        face_render_type_offset = pos;
+        pos += face_count;
+    }
+
+    int vertex_label_offset = -1;
+    if (has_vertex_labels == 1) {
+        vertex_label_offset = pos;
+        pos += vertex_count;
+    }
+
+    int face_alpha_offset = -1;
+    if (has_alpha == 1) {
+        face_alpha_offset = pos;
+        pos += face_count;
+    }
+
+    int face_index_offset = pos;
+    pos += data_length_face_index;
+    int face_colour_offset = pos;
+    pos += face_count * 2;
+    int face_texture_axis_offset = pos;
+    pos += textured_face_count * 6;
+    int vertex_x_offset = pos;
+    pos += data_length_x;
+    int vertex_y_offset = pos;
+    pos += data_length_y;
+    int vertex_z_offset = pos;
+    pos += data_length_z;
+
+    model->vertex_count = vertex_count;
+    model->face_count = face_count;
+    model->textured_face_count = textured_face_count;
+    model->vertices_x = rs2_calloc(use_allocator, vertex_count, sizeof(int));
+    model->vertices_y = rs2_calloc(use_allocator, vertex_count, sizeof(int));
+    model->vertices_z = rs2_calloc(use_allocator, vertex_count, sizeof(int));
+    model->face_indices_a = rs2_calloc(use_allocator, face_count, sizeof(int));
+    model->face_indices_b = rs2_calloc(use_allocator, face_count, sizeof(int));
+    model->face_indices_c = rs2_calloc(use_allocator, face_count, sizeof(int));
+    model->textured_p_coordinate = rs2_calloc(use_allocator, textured_face_count, sizeof(int));
+    model->textured_m_coordinate = rs2_calloc(use_allocator, textured_face_count, sizeof(int));
+    model->textured_n_coordinate = rs2_calloc(use_allocator, textured_face_count, sizeof(int));
+    if (vertex_label_offset >= 0) {
+        model->vertex_labels = rs2_calloc(use_allocator, vertex_count, sizeof(int));
+    }
+    if (face_render_type_offset >= 0) {
+        model->face_infos = rs2_calloc(use_allocator, face_count, sizeof(int));
+    }
+    if (face_priority_offset >= 0) {
+        model->face_priorities = rs2_calloc(use_allocator, face_count, sizeof(int));
+    } else {
+        model->model_priority = -face_priority_offset - 1;
+    }
+    if (face_alpha_offset >= 0) {
+        model->face_alphas = rs2_calloc(use_allocator, face_count, sizeof(int));
+    }
+    if (face_label_offset >= 0) {
+        model->face_labels = rs2_calloc(use_allocator, face_count, sizeof(int));
+    }
+    model->face_colors = rs2_calloc(use_allocator, face_count, sizeof(int));
+
+    Packet order = {0};
+    order.data = buf;
+    order.pos = vertex_order_offset;
+    Packet px = {0};
+    px.data = buf;
+    px.pos = vertex_x_offset;
+    Packet py = {0};
+    py.data = buf;
+    py.pos = vertex_y_offset;
+    Packet pz = {0};
+    pz.data = buf;
+    pz.pos = vertex_z_offset;
+    Packet plabel = {0};
+    plabel.data = buf;
+    plabel.pos = vertex_label_offset;
+
+    int dx = 0;
+    int dy = 0;
+    int dz = 0;
+    for (int v = 0; v < vertex_count; v++) {
+        const int flags = g1(&order);
+        int a = 0;
+        if ((flags & 0x1) != 0) {
+            a = gsmart(&px);
+        }
+        int b = 0;
+        if ((flags & 0x2) != 0) {
+            b = gsmart(&py);
+        }
+        int c = 0;
+        if ((flags & 0x4) != 0) {
+            c = gsmart(&pz);
+        }
+        model->vertices_x[v] = dx + a;
+        model->vertices_y[v] = dy + b;
+        model->vertices_z[v] = dz + c;
+        dx = model->vertices_x[v];
+        dy = model->vertices_y[v];
+        dz = model->vertices_z[v];
+        if (model->vertex_labels) {
+            model->vertex_labels[v] = g1(&plabel);
+        }
+    }
+
+    Packet fcolor = {0};
+    fcolor.data = buf;
+    fcolor.pos = face_colour_offset;
+    Packet frender = {0};
+    frender.data = buf;
+    frender.pos = face_render_type_offset;
+    Packet fprio = {0};
+    fprio.data = buf;
+    fprio.pos = face_priority_offset;
+    Packet falpha = {0};
+    falpha.data = buf;
+    falpha.pos = face_alpha_offset;
+    Packet flabel = {0};
+    flabel.data = buf;
+    flabel.pos = face_label_offset;
+    for (int f = 0; f < face_count; f++) {
+        model->face_colors[f] = g2(&fcolor);
+        if (model->face_infos) {
+            model->face_infos[f] = g1(&frender);
+        }
+        if (model->face_priorities) {
+            model->face_priorities[f] = g1(&fprio);
+        }
+        if (model->face_alphas) {
+            model->face_alphas[f] = g1(&falpha);
+        }
+        if (model->face_labels) {
+            model->face_labels[f] = g1(&flabel);
+        }
+    }
+
+    Packet findex = {0};
+    findex.data = buf;
+    findex.pos = face_index_offset;
+    Packet forder = {0};
+    forder.data = buf;
+    forder.pos = face_index_order_offset;
+    int a = 0;
+    int b = 0;
+    int c = 0;
+    int last = 0;
+    for (int f = 0; f < face_count; f++) {
+        const int orientation = g1(&forder);
+        if (orientation == 1) {
+            a = gsmart(&findex) + last;
+            b = gsmart(&findex) + a;
+            c = gsmart(&findex) + b;
+            last = c;
+        }
+        if (orientation == 2) {
+            b = c;
+            c = gsmart(&findex) + last;
+            last = c;
+        }
+        if (orientation == 3) {
+            a = c;
+            c = gsmart(&findex) + last;
+            last = c;
+        }
+        if (orientation == 4) {
+            int tmp = a;
+            a = b;
+            b = tmp;
+            c = gsmart(&findex) + last;
+            last = c;
+        }
+        model->face_indices_a[f] = a;
+        model->face_indices_b[f] = b;
+        model->face_indices_c[f] = c;
+    }
+
+    Packet axis = {0};
+    axis.data = buf;
+    axis.pos = face_texture_axis_offset;
+    for (int f = 0; f < textured_face_count; f++) {
+        model->textured_p_coordinate[f] = g2(&axis);
+        model->textured_m_coordinate[f] = g2(&axis);
+        model->textured_n_coordinate[f] = g2(&axis);
+    }
+
+    return model;
+}
+
 Model *model_from_id(int id, bool use_allocator) {
+    if (ondemand_is_loaded()) {
+        int size = 0;
+        int8_t *data = ondemand_get(0, id, &size);
+        if (data) {
+            Model *model = model_from_ondemand_data(data, size, use_allocator);
+            free(data);
+            return model;
+        }
+        rs2_error("Error model:%d not found in ondemand.zip!\n", id);
+    }
+
     Model *model = rs2_calloc(use_allocator, 1, sizeof(Model));
     if (_Model.metadata) {
         Metadata *meta = _Model.metadata[id];

@@ -22,13 +22,26 @@ void jagfile_free(Jagfile *jagfile) {
     free(jagfile);
 }
 
+bool jagfile_has(Jagfile *jagfile, const char *name) {
+    return jagfile_read(jagfile, name) != -1;
+}
+
 Packet *jagfile_to_packet(Jagfile *jagfile, const char *name) {
     const int id = jagfile_read(jagfile, name);
+    if (id == -1) {
+        return NULL;
+    }
     return packet_new(jagfile_read_index(jagfile, id), jagfile->file_unpacked_size[id]);
 }
 
 uint8_t *jagfile_to_bytes(Jagfile *jagfile, const char* name, int *length) {
     const int id = jagfile_read(jagfile, name);
+    if (id == -1) {
+        if (length) {
+            *length = 0;
+        }
+        return NULL;
+    }
     if (length) {
         *length = jagfile->file_unpacked_size[id];
     }

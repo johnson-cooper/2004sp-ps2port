@@ -15,6 +15,9 @@ typedef struct {
     int righthand;   // = -1;
     int lefthand;    // = -1;
     int replaycount; // = 99;
+    int preanim_move;  // = -1; derived from walkmerge if never set
+    int postanim_move; // = -1; derived from walkmerge if never set
+    int duplicatebehaviour; // TODO: not yet consumed by animation-restart logic, see revision-254 audit
 } SeqType;
 
 typedef struct {

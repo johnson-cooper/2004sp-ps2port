@@ -44,6 +44,11 @@ typedef struct {
     int *countco;
     int certlink;
     int certtemplate;
+    int resizex;
+    int resizey;
+    int resizez;
+    int8_t ambient;
+    int contrast; // stored pre-multiplied by 5, matches rev254 wire decode
 
     int recol_count;
 } ObjType;

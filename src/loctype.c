@@ -59,9 +59,15 @@ LocType *loctype_get(int id) {
 
     _LocType.cachePos = (_LocType.cachePos + 1) % 10;
     LocType *loc = _LocType.cache[_LocType.cachePos];
-    _LocType.dat->pos = _LocType.offsets[id];
     loc->index = id;
     loctype_reset(loc);
+    if (id < 0 || id >= _LocType.count) {
+        // see npctype_get()/objtype_get() for the same fix - a rev254 server can reference loc type
+        // ids beyond what's in Client3's loaded loc.idx, and offsets[] is only _LocType.count entries.
+        rs2_error("loctype_get: loc type id %d out of range (max %d), using defaults\n", id, _LocType.count - 1);
+        return loc;
+    }
+    _LocType.dat->pos = _LocType.offsets[id];
     loctype_decode(loc, _LocType.dat);
     return loc;
 }
@@ -111,6 +117,8 @@ void loctype_reset(LocType *loc) {
     loc->offsety = 0;
     loc->offsetz = 0;
     loc->forcedecor = false;
+    loc->breakroutefinding = false;
+    loc->raiseobject = -1; // sentinel: derived from blockwalk after decode if never explicitly set
 }
 
 static void loctype_decode(LocType *loc, Packet *dat) {
@@ -131,6 +139,16 @@ static void loctype_decode(LocType *loc, Packet *dat) {
             for (int i = 0; i < count; i++) {
                 loc->models[i] = g2(dat);
                 loc->shapes[i] = g1(dat);
+            }
+        } else if (code == 5) {
+            int count = g1(dat);
+            loc->shapes_and_models_count = count;
+            loc->models = calloc(count, sizeof(int));
+            loc->shapes = calloc(count, sizeof(int)); // rev254: no per-entry shape byte on the wire; TODO: verify CENTREPIECE_STRAIGHT default against real data
+
+            for (int i = 0; i < count; i++) {
+                loc->models[i] = g2(dat);
+                loc->shapes[i] = CENTREPIECE_STRAIGHT;
             }
         } else if (code == 2) {
             loc->name = gjstr(dat);
@@ -213,8 +231,17 @@ static void loctype_decode(LocType *loc, Packet *dat) {
             loc->offsetz = g2b(dat);
         } else if (code == 73) {
             loc->forcedecor = true;
+        } else if (code == 74) {
+            loc->breakroutefinding = true;
+        } else if (code == 75) {
+            loc->raiseobject = g1(dat);
         } else {
+            // see objtype_decode()/npctype_decode() for the same fix - an opcode this decoder
+            // doesn't recognise (rev254 loc.dat can contain some) would otherwise desync dat->pos,
+            // and g1/g2/g1b do no bounds checking, so that desync can read arbitrarily far past the
+            // buffer and crash much later, far from this site. Stop decoding this loc instead.
             rs2_error("Error unrecognised loc config code: %d\n", code);
+            return;
         }
     }
 
@@ -228,6 +255,15 @@ static void loctype_decode(LocType *loc, Packet *dat) {
         if (loc->op) {
             loc->active = true;
         }
+    }
+
+    if (loc->breakroutefinding) {
+        loc->blockwalk = false;
+        loc->blockrange = false;
+    }
+
+    if (loc->raiseobject == -1) {
+        loc->raiseobject = loc->blockwalk ? 1 : 0;
     }
 }
 

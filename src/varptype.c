@@ -75,6 +75,8 @@ static void varptype_decode(VarpType *varp, int id, Packet *dat) {
             varp->code8 = true;
         } else if (code == 10) {
             varp->code10 = gjstr(dat);
+        } else if (code == 11) {
+            // bare marker, no payload (server-side only semantics in rev254)
         } else {
             rs2_error("Error unrecognised varp config code: %d\n", code);
         }

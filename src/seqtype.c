@@ -18,6 +18,9 @@ static SeqType *seqtype_new(void) {
     seq->righthand = -1;
     seq->lefthand = -1;
     seq->replaycount = 99;
+    seq->preanim_move = -1;
+    seq->postanim_move = -1;
+    seq->duplicatebehaviour = 0;
     return seq;
 }
 
@@ -73,7 +76,7 @@ static void seqtype_decode(SeqType *seq, Packet *dat) {
                 }
 
                 seq->delay[i] = g2(dat);
-                if (seq->delay[i] == 0) {
+                if (seq->delay[i] == 0 && seq->frames[i] >= 0 && seq->frames[i] < _AnimFrame.count && _AnimFrame.instances[seq->frames[i]]) {
                     seq->delay[i] = _AnimFrame.instances[seq->frames[i]]->delay;
                 }
 
@@ -104,6 +107,12 @@ static void seqtype_decode(SeqType *seq, Packet *dat) {
             seq->lefthand = g2(dat);
         } else if (code == 8) {
             seq->replaycount = g1(dat);
+        } else if (code == 9) {
+            seq->preanim_move = g1(dat);
+        } else if (code == 10) {
+            seq->postanim_move = g1(dat);
+        } else if (code == 11) {
+            seq->duplicatebehaviour = g1(dat);
         } else {
             rs2_error("Error unrecognised seq config code: %d\n", code);
         }
@@ -120,5 +129,13 @@ static void seqtype_decode(SeqType *seq, Packet *dat) {
 
         seq->delay = calloc(1, sizeof(int));
         seq->delay[0] = -1;
+    }
+
+    if (seq->preanim_move == -1) {
+        seq->preanim_move = seq->walkmerge ? 2 : 0; // MERGE : DELAYMOVE
+    }
+
+    if (seq->postanim_move == -1) {
+        seq->postanim_move = seq->walkmerge ? 2 : 0; // MERGE : DELAYMOVE
     }
 }

@@ -1760,7 +1760,14 @@ static void textureRaster(int xA, int xB, int *dst, int offset, int *texels, int
 }
 
 void textureTriangle(int xA, int xB, int xC, int yA, int yB, int yC, int shadeA, int shadeB, int shadeC, int originX, int originY, int originZ, int txB, int txC, int tyB, int tyC, int tzB, int tzC, int texture) {
+    if (texture < 0 || texture >= _Pix3D.textureCount) {
+        rs2_error("textureTriangle: texture id %d out of range (max %d)\n", texture, _Pix3D.textureCount - 1);
+        return;
+    }
     int *texels = pix3d_get_texels(texture);
+    if (!texels) {
+        return;
+    }
     _Pix3D.opaque = !_Pix3D.textureHasTransparency[texture];
 
     int verticalX = originX - txB;

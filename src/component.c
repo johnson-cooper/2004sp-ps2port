@@ -92,6 +92,7 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
         com->clientCode = g2(dat);
         com->width = g2(dat);
         com->height = g2(dat);
+        com->trans = g1(dat);
         com->overLayer = g1(dat);
         if (com->overLayer == 0) {
             com->overLayer = -1;
@@ -128,7 +129,7 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
             com->scroll = g2(dat);
             com->hide = g1(dat) == 1;
 
-            com->childCount = g1(dat);
+            com->childCount = g2(dat);
             com->childId = calloc(com->childCount, sizeof(int));
             com->childX = calloc(com->childCount, sizeof(int));
             com->childY = calloc(com->childCount, sizeof(int));
@@ -152,6 +153,7 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
             com->draggable = g1(dat) == 1;
             com->interactable = g1(dat) == 1;
             com->usable = g1(dat) == 1;
+            com->objReplace = g1(dat) == 1;
             com->marginX = g1(dat);
             com->marginY = g1(dat);
 
@@ -166,8 +168,9 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
 
                     char *sprite = gjstr(dat);
                     size_t len = strlen(sprite);
-                    if (media && len > 0) {
-                        int sprite_index = (int)(strrchr(sprite, ',') - sprite);
+                    char *comma = strrchr(sprite, ',');
+                    if (media && len > 0 && comma) {
+                        int sprite_index = (int)(comma - sprite);
                         char *sprite_name = substring(sprite, 0, sprite_index);
                         char *sprite_id = substring(sprite, sprite_index + 1, len);
                         com->invSlotSprite[i] = component_get_image(media, sprite_name, atoi(sprite_id));
@@ -196,7 +199,7 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
         if (com->type == TYPE_TEXT || com->type == TYPE_UNUSED) {
             com->center = g1(dat) == 1;
             int fontId = g1(dat);
-            if (fonts) {
+            if (fonts && fontId >= 0 && fontId < 4) {
                 com->font = fonts[fontId];
             }
             com->shadowed = g1(dat) == 1;
@@ -216,13 +219,15 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
         if (com->type == TYPE_RECT || com->type == TYPE_TEXT) {
             com->activeColour = g4(dat);
             com->overColour = g4(dat);
+            com->activeOverColour = g4(dat);
         }
 
         if (com->type == TYPE_GRAPHIC) {
             char *sprite = gjstr(dat);
             size_t len = strlen(sprite);
-            if (media && len > 0) {
-                int sprite_index = (int)(strrchr(sprite, ',') - sprite);
+            char *comma = strrchr(sprite, ',');
+            if (media && len > 0 && comma) {
+                int sprite_index = (int)(comma - sprite);
                 char *sprite_name = substring(sprite, 0, sprite_index);
                 char *sprite_id = substring(sprite, sprite_index + 1, len);
                 com->graphic = component_get_image(media, sprite_name, atoi(sprite_id));
@@ -233,8 +238,9 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
 
             sprite = gjstr(dat);
             len = strlen(sprite);
-            if (media && len > 0) {
-                int sprite_index = (int)(strrchr(sprite, ',') - sprite);
+            comma = strrchr(sprite, ',');
+            if (media && len > 0 && comma) {
+                int sprite_index = (int)(comma - sprite);
                 char *sprite_name = substring(sprite, 0, sprite_index);
                 char *sprite_id = substring(sprite, sprite_index + 1, len);
                 com->activeGraphic = component_get_image(media, sprite_name, atoi(sprite_id));
@@ -280,7 +286,7 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
 
             com->center = g1(dat) == 1;
             int fontId = g1(dat);
-            if (fonts) {
+            if (fonts && fontId >= 0 && fontId < 4) {
                 com->font = fonts[fontId];
             }
             com->shadowed = g1(dat) == 1;
@@ -339,7 +345,9 @@ Pix24 *component_get_image(Jagfile *media, char *sprite, int spriteId) {
 
     // try {
     image = pix24_from_archive(media, sprite, spriteId);
-    lrucache_put(_Component.imageCache, uid, &image->link);
+    if (image) {
+        lrucache_put(_Component.imageCache, uid, &image->link);
+    }
     // } catch (Exception ignored) {
     // 	return null;
     // }

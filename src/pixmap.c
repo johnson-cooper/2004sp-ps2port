@@ -29,6 +29,9 @@ PixMap *pixmap_new(int width, int height) {
 }
 
 void pixmap_free(PixMap *pixmap) {
+    if (!pixmap) {
+        return;
+    }
 #ifdef GL11
     free(pixmap->gl_pixels);
     glDeleteTextures(1, &pixmap->gl_texture);
@@ -70,6 +73,9 @@ static inline void push_point(uint32_t rgb, int sx, int sy) {
 #endif
 
 void pixmap_draw(PixMap *pixmap, int x, int y) {
+    if (!pixmap) {
+        return;
+    }
 #ifdef GL11
 #ifdef __vita__
     x += SCREEN_CENTER_XOFF;

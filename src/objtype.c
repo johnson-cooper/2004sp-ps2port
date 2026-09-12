@@ -74,9 +74,15 @@ ObjType *objtype_get(int id) {
 
     _ObjType.cachePos = (_ObjType.cachePos + 1) % 10;
     ObjType *obj = _ObjType.cache[_ObjType.cachePos];
-    _ObjType.dat->pos = _ObjType.offsets[id];
     obj->index = id;
     objtype_reset(obj);
+    if (id < 0 || id >= _ObjType.count) {
+        // see npctype_get() for the same fix - a rev254 server can reference obj type ids beyond
+        // what's in Client3's loaded obj.idx, and offsets[] is only _ObjType.count entries.
+        rs2_error("objtype_get: obj type id %d out of range (max %d), using defaults\n", id, _ObjType.count - 1);
+        return obj;
+    }
+    _ObjType.dat->pos = _ObjType.offsets[id];
     objtype_decode(obj, _ObjType.dat);
 
     if (obj->certtemplate != -1) {
@@ -408,6 +414,11 @@ void objtype_reset(ObjType *obj) {
     obj->countco = NULL;
     obj->certlink = -1;
     obj->certtemplate = -1;
+    obj->resizex = 128;
+    obj->resizey = 128;
+    obj->resizez = 128;
+    obj->ambient = 0;
+    obj->contrast = 0;
 }
 
 static void objtype_decode(ObjType *obj, Packet *dat) {
@@ -517,8 +528,25 @@ static void objtype_decode(ObjType *obj, Packet *dat) {
 
             obj->countobj[code - 100] = g2(dat);
             obj->countco[code - 100] = g2(dat);
+        } else if (code == 110) {
+            obj->resizex = g2(dat);
+        } else if (code == 111) {
+            obj->resizey = g2(dat);
+        } else if (code == 112) {
+            obj->resizez = g2(dat);
+        } else if (code == 113) {
+            obj->ambient = g1b(dat);
+        } else if (code == 114) {
+            obj->contrast = g1b(dat) * 5;
         } else {
+            // rev254's obj.dat can contain opcodes this decoder doesn't know about. Continuing the
+            // loop here would misinterpret whatever bytes follow as further opcodes/lengths with no
+            // way to know how far to skip, desyncing dat->pos - since g1/g2/g1b do no bounds checking
+            // at all, that desync can walk pos arbitrarily far past the buffer and crash much later,
+            // far from this site (this was a real, hard-to-bisect crash). Stop decoding this obj
+            // instead of guessing; its remaining fields keep their defaults.
             rs2_error("Error unrecognised obj config code: %d\n", code);
+            return;
         }
     }
 }
@@ -576,7 +604,11 @@ Model *objtype_get_interfacemodel(ObjType *obj, int count, bool use_allocator) {
         }
     }
 
-    model_calculate_normals(model, 64, 768, -50, -10, -50, true, use_allocator);
+    if (obj->resizex != 128 || obj->resizey != 128 || obj->resizez != 128) {
+        model_scale(model, obj->resizex, obj->resizey, obj->resizez);
+    }
+
+    model_calculate_normals(model, obj->ambient + 64, obj->contrast + 768, -50, -10, -50, true, use_allocator);
     model->pick_aabb = true;
     lrucache_put(_ObjType.modelCache, obj->index, &model->link);
     return model;

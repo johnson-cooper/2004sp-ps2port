@@ -274,6 +274,7 @@ void rs2_log(const char *format, ...) {
 #else
     vprintf(format, args);
 #endif
+    fflush(stdout);
 
     va_end(args);
 }

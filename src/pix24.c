@@ -34,6 +34,9 @@ Pix24 *pix24_new(int width, int height, bool use_allocator) {
 }
 
 void pix24_free(Pix24 *pix24) {
+    if (!pix24) {
+        return;
+    }
     free(pix24->pixels);
     free(pix24);
 }
@@ -61,6 +64,13 @@ Pix24 *pix24_from_archive(Jagfile *jag, const char *name, int index) {
 
     Packet *dat = jagfile_to_packet(jag, filename);
     Packet *idx = jagfile_to_packet(jag, "index.dat");
+    if (!dat || !idx) {
+        rs2_error("DEBUG pix24_from_archive: missing sprite %s (index %d)\n", filename, index);
+        packet_free(dat);
+        packet_free(idx);
+        free(filename);
+        return NULL;
+    }
 
     idx->pos = g2(dat);
     Pix24 *pix24 = calloc(1, sizeof(Pix24));
@@ -224,6 +234,9 @@ void pix24_copy_pixels(int w, int h, int *src, int srcOff, int srcStep, int *dst
 }
 
 void pix24_draw(Pix24 *pix24, int x, int y) {
+    if (!pix24) {
+        return;
+    }
     x += pix24->crop_x;
     y += pix24->crop_y;
 
@@ -476,6 +489,9 @@ void pix24_copy_pixels_alpha(int w, int h, int *src, int srcOff, int srcStep, in
 }
 
 void pix24_draw_rotated_masked(Pix24 *pix24, int x, int y, int w, int h, int *lineStart, int *lineWidth, int anchorX, int anchorY, int theta, int zoom) {
+    if (!pix24) {
+        return;
+    }
     // try {
     int centerX = -w / 2;
     int centerY = -h / 2;
@@ -510,6 +526,9 @@ void pix24_draw_rotated_masked(Pix24 *pix24, int x, int y, int w, int h, int *li
 }
 
 void pix24_draw_masked(Pix24 *pix24, int x, int y, Pix8 *mask) {
+    if (!pix24) {
+        return;
+    }
     x += pix24->crop_x;
     y += pix24->crop_y;
 
