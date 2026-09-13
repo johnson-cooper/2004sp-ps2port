@@ -24,3 +24,4 @@ targets:
       - patches
       - pad
       - m
+    embed_irx: [dev9, netman, smap]

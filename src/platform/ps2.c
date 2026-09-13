@@ -3,6 +3,7 @@
 // mapview/playground) collides with a struct field literally named `client` in PS2SDK's
 // sifrpc-common.h - undef it here, this file has no legitimate use of that macro itself.
 #undef client
+#include <kernel.h>
 #include <loadfile.h>
 #include <malloc.h>
 #include <sifrpc.h>
@@ -21,8 +22,6 @@
 
 #include <gsKit.h>
 
-#include "ps2_net_modules.h"
-
 #include "../client.h"
 #include "../custom.h"
 #include "../defines.h"
@@ -38,23 +37,66 @@ extern Custom _Custom;
 static GSGLOBAL *gsGlobal;
 static GSTEXTURE screenTexture;
 
+extern unsigned char dev9_irx[];
+extern unsigned int size_dev9_irx;
+
+extern unsigned char netman_irx[];
+extern unsigned int size_netman_irx;
+
+extern unsigned char smap_irx[];
+extern unsigned int size_smap_irx;
+
 // SCREEN_WIDTH/HEIGHT (765x503, defines.h) isn't 64-pixel-aligned, and PS2 GS VRAM textures are
 // hardware-tiled with a row stride that must be. Two direct attempts to force the unaligned size
 // through anyway failed: reprogramming the DISPLAY1 scanout register had zero visible effect
 // (confirmed live via PCSX2 memory inspection), and manually setting screenTexture.TBW made the
 // corruption far worse (confirmed via screenshot) - real evidence that fighting gsKit's own
-// alignment assumptions blind isn't the way. defines.h already has an established, working
-// pattern for exactly this problem on other constrained/no-compositor consoles (Dreamcast, Wii,
-// original Xbox/NXDK): render into a smaller, aligned physical framebuffer (SCREEN_FB_WIDTH x
-// SCREEN_FB_HEIGHT, 640x480 - 640 is a clean multiple of 64) and pan/clip the game's full logical
-// canvas (SCREEN_WIDTH x SCREEN_HEIGHT) into it, the same as xbox.c/dreamcast.c already do. PS2
-// now opts into that same branch in defines.h instead of inventing its own approach.
-static int screen_offset_x = (SCREEN_FB_WIDTH - SCREEN_WIDTH) / 2;
-static int screen_offset_y = (SCREEN_FB_HEIGHT - SCREEN_HEIGHT) / 2;
+// alignment assumptions blind isn't the way.
+//
+// First fix here rendered into a smaller SCREEN_FB_WIDTH x SCREEN_FB_HEIGHT (640x480, 64-aligned)
+// physical framebuffer and cropped the game's full 765x503 canvas into it - the same pattern
+// xbox.c/dreamcast.c use. That's a real fix for the alignment problem, but it means only ~84% of
+// the canvas is ever visible (125px cut off horizontally, 23px vertically), which reads as
+// "zoomed in" since nothing is actually made smaller, just less of it is shown.
+//
+// This instead keeps a full-resolution SOURCE texture - CPU-side rendering is untouched, still the
+// full 765x503 logical canvas, just padded up to SCREEN_SRC_WIDTH (768, the next 64-aligned value)
+// so the GS tiling requirement above is still satisfied; the padding columns are simply never drawn
+// to. platform_update_surface()'s existing gsKit_prim_sprite_texture_3d call already takes
+// independent source (u/v) and destination (x/y) rectangles for its textured quad - sampling the
+// real 765x503 region as source but a 640x480 destination lets the GS hardware scale the whole
+// canvas down for free as part of a draw call that already happens every frame, at zero added
+// per-pixel CPU cost (unlike resampling every platform_blit_surface() call individually, which is
+// called many times per frame for arbitrary small rects - see platform.c's draw_rect/fill_rect).
+#define SCREEN_SRC_WIDTH 768
+
+// Filling the full 640x480 destination with a 765x503 source independently per axis (640/765 for
+// width, 480/503 for height) is a non-uniform stretch - the two ratios aren't equal, so circles
+// become slightly elliptical and the whole picture reads as subtly "off"/zoomed wrong even though
+// nothing is cropped. Scaling both axes by the same (smaller) ratio instead keeps things
+// proportional; width is the more restrictive axis here (765/640 > 503/480), so scaling to exactly
+// fill the width leaves the scaled height short of 480 - centered with a thin letterbox rather than
+// stretched to fill it.
+#define SCREEN_DST_WIDTH SCREEN_FB_WIDTH
+#define SCREEN_DST_HEIGHT (SCREEN_HEIGHT * SCREEN_FB_WIDTH / SCREEN_WIDTH)
+#define SCREEN_DST_X 0
+#define SCREEN_DST_Y ((SCREEN_FB_HEIGHT - SCREEN_DST_HEIGHT) / 2)
 
 // SIO2MAN/PADMAN ship in the console's own boot ROM - no IRX to bundle for basic digital/analog input.
 static char padDmaBuf[256] __attribute__((aligned(64)));
 static struct padButtonStatus padData;
+
+static void SleepCb(s32 alarmId, u16 time, void *common)
+{
+	iWakeupThread(*(int *)(common));
+}
+
+static void SleepMsApprox()
+{
+	int tid = GetThreadId();
+	SetAlarm(1000 * 16, &SleepCb, &tid);
+	SleepThread();
+}
 
 bool platform_init(void) {
     // 5th real network attempt. The 4th (ps2ip+netman+smap[NETMAN mode] loaded via
@@ -82,8 +124,12 @@ bool platform_init(void) {
     //    (just a single SifInitRpc(0), matching every attempt so far). Moved to the very start of
     //    platform_init(), before SIO2MAN/PADMAN, since a reset this late would wipe them out.
     //
-    // dev9_irx/netman_irx/smap_irx are now all embedded byte arrays in ps2_net_modules.h
-    // (regenerate via the same extraction script if these packages ever change).
+    // dev9_irx/netman_irx/smap_irx are now embedded via ps2build's own native embed_irx: feature
+    // (see ps2.yaml) instead of the hand-rolled ps2_net_modules.h header used before - matches
+    // httpechotest's exact mechanism (BIN2C-generated, external non-const linkage) rather than a
+    // manually-generated static const array, on the chance the two differed in some way that
+    // mattered (not confirmed which, if either, was the actual fix - see SleepMsApprox() above,
+    // a second real change applied in the same round).
     SifInitRpc(0);
     while (!SifIopReset("", 0)) {
     }
@@ -104,9 +150,9 @@ bool platform_init(void) {
     sbv_patch_enable_lmb();
 
     int dev9_modres = -1, netman_modres = -1, smap_modres = -1;
-    int dev9_ret = SifExecModuleBuffer((void *)dev9_irx, dev9_irx_size, 0, NULL, &dev9_modres);
-    int netman_ret = SifExecModuleBuffer((void *)netman_irx, netman_irx_size, 0, NULL, &netman_modres);
-    int smap_ret = SifExecModuleBuffer((void *)smap_irx, smap_irx_size, 0, NULL, &smap_modres);
+    int dev9_ret = SifExecModuleBuffer((void *)dev9_irx, size_dev9_irx, 0, NULL, &dev9_modres);
+    int netman_ret = SifExecModuleBuffer((void *)netman_irx, size_netman_irx, 0, NULL, &netman_modres);
+    int smap_ret = SifExecModuleBuffer((void *)smap_irx, size_smap_irx, 0, NULL, &smap_modres);
     rs2_log("net: dev9 ret=%d modres=%d netman ret=%d modres=%d smap ret=%d modres=%d\n", dev9_ret,
              dev9_modres, netman_ret, netman_modres, smap_ret, smap_modres);
 
@@ -127,7 +173,7 @@ bool platform_init(void) {
         if (link_state == NETMAN_NETIF_ETH_LINK_STATE_UP) {
             break;
         }
-        rs2_sleep(100);
+        SleepMsApprox();
     }
     rs2_log("net: final link_state=%d\n", link_state);
 
@@ -157,7 +203,7 @@ bool platform_init(void) {
         if (current_info.dhcp_status == DHCP_STATE_BOUND) {
             break;
         }
-        rs2_sleep(100);
+        SleepMsApprox();
     }
     rs2_log("net: dhcp_status=%d ip=0x%08x\n", current_info.dhcp_status,
              (unsigned int)current_info.ipaddr.s_addr);
@@ -173,11 +219,12 @@ bool platform_init(void) {
     dmaKit_chan_init(DMA_CHANNEL_GIF);
 
     gsGlobal = gsKit_init_global();
-    // Use the aligned physical framebuffer size (640x480, see the screen_offset_x/y comment
-    // above), NOT Client3's full 765x503 logical canvas - gsKit_init_global()'s own default
-    // Width/Height (based on the console's detected video standard) also didn't match what
-    // platform_update_surface() draws into, producing a black screen despite no draw errors, so
-    // this still needs to be set explicitly either way.
+    // This is the physical output framebuffer (640x480, aligned - see the comment above
+    // platform_init()), separate from screenTexture's full 765x503 logical canvas - gsKit scales
+    // between the two when drawing the sprite in platform_update_surface(). gsKit_init_global()'s
+    // own default Width/Height (based on the console's detected video standard) also didn't match
+    // what platform_update_surface() draws into, producing a black screen despite no draw errors,
+    // so this still needs to be set explicitly either way.
     gsGlobal->Width = SCREEN_FB_WIDTH;
     gsGlobal->Height = SCREEN_FB_HEIGHT;
     gsGlobal->PSM = GS_PSM_CT24;
@@ -213,14 +260,19 @@ void platform_new(GameShell *shell) {
     // TODO lowmem/audio bring-up (ps2snd/audsrv) - video/input/networking come first per the
     // project's phasing, matches how sdl2.c also skips audio init entirely under _Client.lowmem.
     (void)shell;
-    // Sized to the aligned physical framebuffer (640x480), not shell->screen_width/height
-    // (765x503) - see the screen_offset_x/y comment above platform_init().
-    screenTexture.Width = SCREEN_FB_WIDTH;
-    screenTexture.Height = SCREEN_FB_HEIGHT;
+    // Full logical canvas height (SCREEN_HEIGHT, 503 - no alignment requirement), padded width
+    // (SCREEN_SRC_WIDTH, 768 - see the comment above platform_init()) - holds the whole 765x503
+    // canvas rather than a 640x480 crop of it; platform_update_surface() scales it down to the
+    // physical 640x480 output when drawing it as a textured sprite.
+    screenTexture.Width = SCREEN_SRC_WIDTH;
+    screenTexture.Height = SCREEN_HEIGHT;
     // CT16 halves this texture's VRAM cost vs CT32 (2 bytes/pixel instead of 4) - needed to fit
     // alongside the double-buffered framebuffer in GS's 4MB VRAM (see platform_init()'s note).
     screenTexture.PSM = GS_PSM_CT16;
-    screenTexture.Filter = GS_FILTER_NEAREST;
+    // LINEAR instead of NEAREST now that this texture is genuinely scaled (768x503 source down to
+    // 640x480 destination, a non-integer ratio) rather than drawn 1:1 - NEAREST would alias/look
+    // blocky under real scaling.
+    screenTexture.Filter = GS_FILTER_LINEAR;
     // Delayed=1 ("delay upload to VRAM") isn't documented beyond its header comment (gsKit ships
     // prebuilt, no source to check its exact semantics against) and we already explicitly call
     // gsKit_texture_upload() ourselves every frame - 0 removes any ambiguity about the two
@@ -243,15 +295,19 @@ void platform_free(void) {
 }
 
 void platform_update_surface(void) {
-    // gsGlobal->Width/Height and screenTexture.Width/Height are now both SCREEN_FB_WIDTH/HEIGHT
-    // (640x480) - a fully consistent, 1:1, alignment-safe pipeline with no scaling or magnification
-    // involved. Each of the two double-buffered surfaces still needs its own margin cleared before
-    // it's first displayed, not just whichever was active at startup, hence the per-frame clear.
+    // Each of the two double-buffered surfaces still needs its own margin cleared before it's
+    // first displayed, not just whichever was active at startup, hence the per-frame clear.
     gsKit_clear(gsGlobal, GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x00, 0x00));
     gsKit_texture_upload(gsGlobal, &screenTexture);
+    // Source rect is the real SCREEN_WIDTH x SCREEN_HEIGHT (765x503) canvas, NOT
+    // screenTexture.Width/Height (768x503 - includes the alignment padding columns, which would
+    // otherwise get sampled into the scaled output as a thin sliver of garbage/black on the right
+    // edge). Destination rect (SCREEN_DST_*, see above) is a uniformly-scaled, letterboxed
+    // sub-rectangle of gsGlobal->Width/Height (640x480), not the full thing - aspect-correct
+    // instead of stretched.
     gsKit_prim_sprite_texture_3d(gsGlobal, &screenTexture,
-                                  0, 0, 0, 0, 0,
-                                  gsGlobal->Width, gsGlobal->Height, 0, screenTexture.Width, screenTexture.Height,
+                                  SCREEN_DST_X, SCREEN_DST_Y, 0, 0, 0,
+                                  SCREEN_DST_X + SCREEN_DST_WIDTH, SCREEN_DST_Y + SCREEN_DST_HEIGHT, 0, SCREEN_WIDTH, SCREEN_HEIGHT,
                                   GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00));
     gsKit_queue_exec(gsGlobal);
     gsKit_sync_flip(gsGlobal);
@@ -264,26 +320,27 @@ void platform_blit_surface(Surface *surface, int x, int y) {
     // (see the CT32 note this replaced for why channel order matters here) and set opaque.
     uint16_t *dst = (uint16_t *)screenTexture.Mem;
     uint32_t *src = (uint32_t *)surface->pixels;
-    // x/y arrive in the game's full logical canvas (SCREEN_WIDTH x SCREEN_HEIGHT, 765x503) but
-    // screenTexture is only the smaller aligned physical framebuffer (SCREEN_FB_WIDTH x
-    // SCREEN_FB_HEIGHT, 640x480, see the screen_offset_x/y comment above platform_init()) - offset
-    // and clip like xbox.c/dreamcast.c already do for the same reason.
+    // x/y arrive in the game's full logical canvas (SCREEN_WIDTH x SCREEN_HEIGHT, 765x503), which
+    // is now also what screenTexture holds (see the comment above platform_init()) - no offset
+    // needed, just clip to the real canvas bounds (screenTexture.Width itself is padded wider, to
+    // SCREEN_SRC_WIDTH, purely for GS tiling alignment - nothing should actually draw into that
+    // padding).
     for (int row = 0; row < surface->h; row++) {
-        int screen_y = y + row + screen_offset_y;
+        int screen_y = y + row;
         if (screen_y < 0) {
             continue;
         }
-        if (screen_y >= SCREEN_FB_HEIGHT) {
+        if (screen_y >= SCREEN_HEIGHT) {
             break;
         }
         uint16_t *dst_row = &dst[screen_y * screenTexture.Width];
         uint32_t *src_row = &src[row * surface->w];
         for (int col = 0; col < surface->w; col++) {
-            int screen_x = x + col + screen_offset_x;
+            int screen_x = x + col;
             if (screen_x < 0) {
                 continue;
             }
-            if (screen_x >= SCREEN_FB_WIDTH) {
+            if (screen_x >= SCREEN_WIDTH) {
                 break;
             }
             uint32_t argb = src_row[col];

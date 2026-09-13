@@ -64,6 +64,19 @@ void component_free_global(void) {
             // if (_Component.instances[i]->activeGraphic) {
             //     pix24_free(_Component.instances[i]->activeGraphic);
             // }
+#ifdef __PS2__
+            // unlike model/graphic above, these are plain metadata strings never touched by
+            // packets, so freeing them here is safe
+            free(_Component.instances[i]->graphicSpriteName);
+            free(_Component.instances[i]->activeGraphicSpriteName);
+            if (_Component.instances[i]->invSlotSpriteName) {
+                for (int j = 0; j < 20; j++) {
+                    free(_Component.instances[i]->invSlotSpriteName[j]);
+                }
+                free(_Component.instances[i]->invSlotSpriteName);
+            }
+            free(_Component.instances[i]->invSlotSpriteId);
+#endif
         }
         free(_Component.instances[i]);
     }
@@ -73,6 +86,11 @@ void component_free_global(void) {
 void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
     _Component.imageCache = lrucache_new(50000);
     _Component.modelCache = lrucache_new(50000);
+#ifdef __PS2__
+    // kept resident (see component.h) so component_ensure_graphic() can still decode from it after
+    // this function returns and the caller frees its own local `media` reference
+    _Component.media = media;
+#endif
 
     Packet *dat = jagfile_to_packet(jag, "data");
     int layer = -1;
@@ -95,6 +113,13 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
         Component *com = _Component.instances[id] = calloc(1, sizeof(Component));
         com->id = id;
         com->layer = layer;
+#ifdef __PS2__
+        // calloc zeroes these to 0, but 0 is a valid real model id - must set the "none" sentinel
+        // explicitly so component_ensure_model() doesn't try to decode a bogus id 0 for every
+        // non-TYPE_MODEL component
+        com->modelId = -1;
+        com->activeModelId = -1;
+#endif
         com->type = g1(dat);
         com->buttonType = g1(dat);
         com->clientCode = g2(dat);
@@ -168,6 +193,10 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
             com->invSlotOffsetX = calloc(20, sizeof(int));
             com->invSlotOffsetY = calloc(20, sizeof(int));
             com->invSlotSprite = calloc(20, sizeof(Pix24 *));
+#ifdef __PS2__
+            com->invSlotSpriteName = calloc(20, sizeof(char *));
+            com->invSlotSpriteId = calloc(20, sizeof(int));
+#endif
 
             for (int i = 0; i < 20; i++) {
                 if (g1(dat) == 1) {
@@ -181,9 +210,15 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
                         int sprite_index = (int)(comma - sprite);
                         char *sprite_name = substring(sprite, 0, sprite_index);
                         char *sprite_id = substring(sprite, sprite_index + 1, len);
+#ifdef __PS2__
+                        com->invSlotSpriteName[i] = sprite_name;
+                        com->invSlotSpriteId[i] = atoi(sprite_id);
+                        free(sprite_id);
+#else
                         com->invSlotSprite[i] = component_get_image(media, sprite_name, atoi(sprite_id));
                         free(sprite_name);
                         free(sprite_id);
+#endif
                     }
                     free(sprite);
                 }
@@ -240,9 +275,15 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
                 int sprite_index = (int)(comma - sprite);
                 char *sprite_name = substring(sprite, 0, sprite_index);
                 char *sprite_id = substring(sprite, sprite_index + 1, len);
+#ifdef __PS2__
+                com->graphicSpriteName = sprite_name;
+                com->graphicSpriteId = atoi(sprite_id);
+                free(sprite_id);
+#else
                 com->graphic = component_get_image(media, sprite_name, atoi(sprite_id));
                 free(sprite_name);
                 free(sprite_id);
+#endif
             }
             free(sprite);
 
@@ -253,9 +294,15 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
                 int sprite_index = (int)(comma - sprite);
                 char *sprite_name = substring(sprite, 0, sprite_index);
                 char *sprite_id = substring(sprite, sprite_index + 1, len);
+#ifdef __PS2__
+                com->activeGraphicSpriteName = sprite_name;
+                com->activeGraphicSpriteId = atoi(sprite_id);
+                free(sprite_id);
+#else
                 com->activeGraphic = component_get_image(media, sprite_name, atoi(sprite_id));
                 free(sprite_name);
                 free(sprite_id);
+#endif
             }
             free(sprite);
         }
@@ -263,12 +310,20 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
         if (com->type == TYPE_MODEL) {
             int tmp = g1(dat);
             if (tmp != 0) {
+#ifdef __PS2__
+                com->modelId = ((tmp - 1) << 8) + g1(dat);
+#else
                 com->model = component_get_model(((tmp - 1) << 8) + g1(dat));
+#endif
             }
 
             tmp = g1(dat);
             if (tmp != 0) {
+#ifdef __PS2__
+                com->activeModelId = ((tmp - 1) << 8) + g1(dat);
+#else
                 com->activeModel = component_get_model(((tmp - 1) << 8) + g1(dat));
+#endif
             }
 
             tmp = g1(dat);
@@ -344,8 +399,13 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
     }
 
     packet_free(dat);
+#ifndef __PS2__
+    // on PS2 these stay alive for the rest of the session - component_get_image()/
+    // component_get_model() are the lazy decode cache now (see component_ensure_graphic()/
+    // component_ensure_model()), not just a transient dedup structure for this unpack pass
     lrucache_free(_Component.imageCache);
     lrucache_free(_Component.modelCache);
+#endif
 }
 
 Pix24 *component_get_image(Jagfile *media, char *sprite, int spriteId) {
@@ -393,7 +453,36 @@ Model *component_get_model(int id) {
     return m;
 }
 
+#ifdef __PS2__
+void component_ensure_graphic(Component *com) {
+    if (!com->graphic && com->graphicSpriteName) {
+        com->graphic = component_get_image(_Component.media, com->graphicSpriteName, com->graphicSpriteId);
+    }
+    if (!com->activeGraphic && com->activeGraphicSpriteName) {
+        com->activeGraphic = component_get_image(_Component.media, com->activeGraphicSpriteName, com->activeGraphicSpriteId);
+    }
+}
+
+void component_ensure_model(Component *com) {
+    if (!com->model && com->modelId != -1) {
+        com->model = component_get_model(com->modelId);
+    }
+    if (!com->activeModel && com->activeModelId != -1) {
+        com->activeModel = component_get_model(com->activeModelId);
+    }
+}
+
+void component_ensure_invslot_sprite(Component *com, int slot) {
+    if (!com->invSlotSprite[slot] && com->invSlotSpriteName[slot]) {
+        com->invSlotSprite[slot] = component_get_image(_Component.media, com->invSlotSpriteName[slot], com->invSlotSpriteId[slot]);
+    }
+}
+#endif
+
 Model *component_get_model2(Component *com, int primaryFrame, int secondaryFrame, bool active, bool *_free) {
+#ifdef __PS2__
+    component_ensure_model(com);
+#endif
     Model *m = com->model;
     if (active) {
         m = com->activeModel;

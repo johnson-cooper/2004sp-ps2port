@@ -142,6 +142,25 @@ typedef struct {
     Pix24 *activeGraphic;
     Model *model;
     Model *activeModel;
+#ifdef __PS2__
+    // lazy decode: component_unpack() stores raw sprite/model ids here instead of eagerly calling
+    // component_get_image()/component_get_model() for every interface component at login - most
+    // interfaces (bank, quest journal, minigame screens, etc.) are never opened in a given session,
+    // and PS2's 32MB can't afford holding all of them decoded for the whole session regardless.
+    // graphic/activeGraphic/model/activeModel above are populated on first real use instead, via
+    // component_ensure_graphic()/component_ensure_model().
+    char *graphicSpriteName;
+    int graphicSpriteId;
+    char *activeGraphicSpriteName;
+    int activeGraphicSpriteId;
+    // heap-allocated (like invSlotSprite itself), not a fixed [20] inline array - only TYPE_INV
+    // components need these, and a fixed array would cost every one of the ~8462 real components
+    // regardless of type (see the text/option comment above for the same reasoning)
+    char **invSlotSpriteName;
+    int *invSlotSpriteId;
+    int modelId; // -1 = none (0 is a valid real model id, so can't double as the sentinel)
+    int activeModelId;
+#endif
     int anim;
     int activeAnim;
     int zoom;
@@ -164,6 +183,9 @@ typedef struct {
     Component **instances;
     LruCache *imageCache;
     LruCache *modelCache;
+#ifdef __PS2__
+    Jagfile *media; // kept resident (not freed after component_unpack) for lazy graphic decode
+#endif
 } ComponentData;
 
 void component_free_global(void);
@@ -171,3 +193,8 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts);
 Pix24 *component_get_image(Jagfile *media, char *sprite, int spriteId);
 Model *component_get_model(int id);
 Model *component_get_model2(Component *com, int primaryFrame, int secondaryFrame, bool active, bool *_free);
+#ifdef __PS2__
+void component_ensure_graphic(Component *com);
+void component_ensure_model(Component *com);
+void component_ensure_invslot_sprite(Component *com, int slot);
+#endif

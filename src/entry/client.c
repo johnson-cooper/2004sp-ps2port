@@ -594,11 +594,14 @@ void client_load(Client *c) {
     jagfile_free(config);
 #endif
     jagfile_free(inter);
-    jagfile_free(media);
 #ifndef __PS2__
+    jagfile_free(media);
     jagfile_free(models);
     jagfile_free(textures);
 #endif
+    // media is kept alive on PS2 (see _Component.media in component.c/.h) - component_unpack()
+    // deferred decoding most interface graphics, and they're only decoded from media on first
+    // real use, potentially long after this point
     jagfile_free(wordenc);
 #ifndef __PS2__
     jagfile_free(sounds);
@@ -615,10 +618,29 @@ void client_load(Client *c) {
 #elif defined(__PS2__)
     // component_unpack() alone was leaving only a few hundred KB free by the time this runs (even
     // after reclaiming inter/media/wordenc just above) - the dreamcast/nds 8MB size still isn't
-    // realistic here. Logging real free memory right at this call site since this is a genuine
-    // guess pending real data, unlike every other PS2 sizing decision so far this session.
+    // realistic here. 1MB was tried first as a guess and real usage overflowed it by only ~1.2KB
+    // while building the very first scene after login (this allocator is reset once per scene
+    // rebuild - see bump_allocator_reset() in client_clear_caches() - so it's a per-load budget,
+    // not cumulative). Doubling to 2MB was tried next and made things WORSE: mallinfo() reports
+    // well under 1MB truly free at this point (PS2 has only 32MB total EE RAM and ~27.6MB was
+    // already resident here), so the extra 1MB apparently pushed something else (stack or a later
+    // buffer) past the real physical ceiling - instead of the clean "Allocator full" error, this
+    // corrupted something hard enough to produce a BIOS-level "# Restart." (real HW/memory reset)
+    // followed by "DMAC(5) Handler does not exist." and a hang. Going with a small margin over the
+    // actual observed overflow instead - 1MB + 128KB, i.e. ~100x the ~1.2KB shortfall - rather than
+    // another full MB we don't have room for.
+    // Turns out the real requirement isn't fixed: 1MB+128KB (1,179,648) overflowed by 4 bytes, then
+    // 1MB+192KB (1,245,184) overflowed by 12, then 1MB+512KB (1,572,864) overflowed by 40 - all
+    // clean "Allocator full" errors. Tried reasoning our way to 2MB next (baseline `used` math
+    // suggested it should fit with room to spare) and got the corrupting "# Restart." /
+    // "DMAC(5) Handler does not exist." failure mode again - twice now at exactly 2MB. Whatever the
+    // real cause, it's evidently not just cumulative heap pressure (the math said this should've
+    // been safe) - something about a single allocation request that size specifically breaks
+    // something. Backing off to a small, proven increment from the last value that gave a clean
+    // (if insufficient) overflow instead of trying to reason our way to a bigger jump again:
+    // 1MB+512KB (1,572,864, overflowed by 40 bytes) + another 128KB.
     rs2_log("MEM before bump allocator: used=%d free=%d\n", mallinfo().uordblks, mallinfo().fordblks);
-    if (!bump_allocator_init(1 << 20)) {
+    if (!bump_allocator_init((1 << 20) + (640 << 10))) {
 #else
     if (!(_Client.lowmem ? bump_allocator_init(16 << 20) : bump_allocator_init(32 << 20))) {
 #endif
@@ -5639,6 +5661,9 @@ bool client_read(Client *c) {
             return true;
         }
         Component *inter = _Component.instances[com];
+#ifdef __PS2__
+        component_ensure_model(inter);
+#endif
         Model *model = inter->model;
         if (model) {
             model_recolor(model, src, dst);
@@ -10203,6 +10228,9 @@ void client_update_interface_content(Client *c, Component *component) {
             component->model = model;
         }
     } else if (clientCode == 324) {
+#ifdef __PS2__
+        component_ensure_graphic(component);
+#endif
         if (!c->genderButtonImage0) {
             c->genderButtonImage0 = component->graphic;
             c->genderButtonImage1 = component->activeGraphic;
@@ -10213,6 +10241,9 @@ void client_update_interface_content(Client *c, Component *component) {
             component->graphic = c->genderButtonImage0;
         }
     } else if (clientCode == 325) {
+#ifdef __PS2__
+        component_ensure_graphic(component);
+#endif
         if (!c->genderButtonImage0) {
             c->genderButtonImage0 = component->graphic;
             c->genderButtonImage1 = component->activeGraphic;
@@ -10464,6 +10495,9 @@ static void client_draw_interface(Client *c, Component *com, int x, int y, int s
                             }
                         }
                     } else if (child->invSlotSprite && slot < 20) {
+#ifdef __PS2__
+                        component_ensure_invslot_sprite(child, slot);
+#endif
                         Pix24 *image = child->invSlotSprite[slot];
 
                         if (image) {
@@ -10602,6 +10636,9 @@ static void client_draw_interface(Client *c, Component *com, int x, int y, int s
                 }
             }
         } else if (child->type == 5) {
+#ifdef __PS2__
+            component_ensure_graphic(child);
+#endif
             Pix24 *image;
             if (client_execute_interface_script(c, child)) {
                 image = child->activeGraphic;
