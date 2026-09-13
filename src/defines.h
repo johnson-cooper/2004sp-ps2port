@@ -7,7 +7,7 @@
 #endif
 
 // used for avoiding overdraw, scaling touch, and width is sometimes used for aligned access in vram too
-#if defined(__WII__) || defined(_arch_dreamcast) || defined(NXDK)
+#if defined(__WII__) || defined(_arch_dreamcast) || defined(NXDK) || defined(__PS2__)
 #define SCREEN_FB_WIDTH 640
 #define SCREEN_FB_HEIGHT 480
 #elif defined(__vita__)
@@ -56,7 +56,7 @@
 #define USE_FLOATS
 #endif
 
-#if defined(_arch_dreamcast) || defined(__NDS__)
+#if defined(_arch_dreamcast) || defined(__NDS__) || defined(__PS2__)
 // NOTE: more extreme lowmem mode, making the game fully explorable on 32 MB
 // -2 MB RAM, may cause some models to be invisible
 #define MODEL_MAX_DEPTH 600

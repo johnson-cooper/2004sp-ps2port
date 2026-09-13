@@ -76,6 +76,12 @@ static void seqtype_decode(SeqType *seq, Packet *dat) {
                 }
 
                 seq->delay[i] = g2(dat);
+                // Deliberately a raw array check, not animframe_get(id) - this runs for every
+                // seqtype at boot, right after animframe_unpack_ondemand(), so routing it through
+                // the lazy loader would force-decode nearly every animation frame immediately and
+                // defeat the whole point of making them lazy (see animframe.c's PS2 OOM note).
+                // Only picks up the real delay for frames some earlier lookup already cached;
+                // otherwise falls through to the "delay == 0 -> 1" default below, same as always.
                 if (seq->delay[i] == 0 && seq->frames[i] >= 0 && seq->frames[i] < _AnimFrame.count && _AnimFrame.instances[seq->frames[i]]) {
                     seq->delay[i] = _AnimFrame.instances[seq->frames[i]]->delay;
                 }

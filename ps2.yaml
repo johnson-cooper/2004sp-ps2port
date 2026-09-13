@@ -1,0 +1,26 @@
+project: client
+
+targets:
+  - name: client
+    type: ee
+    sources:
+      - src/*.c
+      - src/entry/*.c
+      - src/platform/*.c
+      - src/thirdparty/*.c
+      - src/datastruct/*.c
+      - src/sound/*.c
+      - src/wordenc/*.c
+    defines:
+      - client
+      - __PS2__
+      - WITH_RSA_LIBTOM
+      - PS2IP_DNS
+    libs:
+      - gskit
+      - dmakit
+      - ps2ip
+      - netman
+      - patches
+      - pad
+      - m

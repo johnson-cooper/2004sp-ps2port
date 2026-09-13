@@ -1,4 +1,7 @@
 #include <stdlib.h>
+#ifdef __PS2__
+#include <malloc.h>
+#endif
 
 #include "animframe.h"
 #include "ondemand.h"
@@ -7,6 +10,10 @@
 
 extern AnimBaseData _AnimBase;
 AnimFrameData _AnimFrame = {0};
+
+// Maps a frame id to the ondemand.zip raw index holding it - see animframe_unpack_ondemand()'s
+// PS2 lazy-loading note below for why this exists.
+static int *_frame_file_index = NULL;
 
 void animframe_free_global(void) {
     for (int i = 0; i < _AnimFrame.count; i++) {
@@ -19,6 +26,8 @@ void animframe_free_global(void) {
         }
     }
     free(_AnimFrame.instances);
+    free(_frame_file_index);
+    _frame_file_index = NULL;
 }
 
 void animframe_unpack(Jagfile *models) {
@@ -120,59 +129,29 @@ void animframe_unpack(Jagfile *models) {
 // table - there is no per-frame baseId field anymore), and there's no single global frame-count
 // header field to size _AnimFrame.instances[] up front, so a first pass finds the max frame id
 // across every anim-category file before allocating it.
-void animframe_unpack_ondemand(void) {
-    int file_count = ondemand_file_count();
+//
+// PS2 note: this used to eagerly decode every one of the ~8929 real anim-frame files at boot and
+// keep every frame's groups/x/y/z transform arrays resident forever - confirmed via mallinfo() to
+// be the direct cause of an out-of-memory crash on PS2's fixed 32MB (heap was down to ~3KB free
+// before this even started; every subsequent decode failed). Frames are now decoded lazily, one
+// batch-file at a time, the first time any of its ids is actually requested via animframe_get() -
+// _frame_file_index[] (built cheaply below, same one-inflate-per-file cost the counting pass below
+// already pays) maps a frame id to which ondemand.zip raw index holds it.
 
-    int max_id = -1;
-    for (int i = 0; i < file_count; i++) {
-        int archive;
-        int file_id;
-        if (!ondemand_get_entry_info(i, &archive, &file_id) || archive != 1) {
-            continue;
-        }
-        int size = 0;
-        int8_t *data = ondemand_get_by_index(i, &size);
-        if (!data) {
-            continue;
-        }
-        Packet head = {0};
-        head.data = data;
-        int total = g2(&head);
-        for (int f = 0; f < total; f++) {
-            int id = g2(&head);
-            if (id > max_id) {
-                max_id = id;
-            }
-            g1(&head); // groupCount - not needed in this counting pass
-        }
+static void decode_anim_file(int i) {
+    int size = 0;
+    int8_t *data = ondemand_get_by_index(i, &size);
+    if (!data || size < 8) {
         free(data);
-    }
-
-    if (max_id < 0) {
-        rs2_error("animframe_unpack_ondemand: no anim frames found in ondemand.zip\n");
         return;
     }
 
-    _AnimFrame.count = max_id + 1;
-    _AnimFrame.instances = calloc(_AnimFrame.count, sizeof(AnimFrame *));
     int *labels = calloc(500, sizeof(int));
     int *x = calloc(500, sizeof(int));
     int *y = calloc(500, sizeof(int));
     int *z = calloc(500, sizeof(int));
 
-    for (int i = 0; i < file_count; i++) {
-        int archive;
-        int file_id;
-        if (!ondemand_get_entry_info(i, &archive, &file_id) || archive != 1) {
-            continue;
-        }
-        int size = 0;
-        int8_t *data = ondemand_get_by_index(i, &size);
-        if (!data || size < 8) {
-            free(data);
-            continue;
-        }
-
+    {
         Packet trailer = {0};
         trailer.data = data;
         trailer.pos = size - 8;
@@ -294,4 +273,88 @@ void animframe_unpack_ondemand(void) {
     free(x);
     free(y);
     free(z);
+}
+
+void animframe_unpack_ondemand(void) {
+    int file_count = ondemand_file_count();
+
+    int max_id = -1;
+    for (int i = 0; i < file_count; i++) {
+        int archive;
+        int file_id;
+        if (!ondemand_get_entry_info(i, &archive, &file_id) || archive != 1) {
+            continue;
+        }
+#ifdef __PS2__
+        if (i % 500 == 0) {
+            rs2_log("MEM animframe pass1 i=%d: used=%d free=%d\n", i, mallinfo().uordblks, mallinfo().fordblks);
+        }
+#endif
+        int size = 0;
+        int8_t *data = ondemand_get_by_index(i, &size);
+        if (!data) {
+            continue;
+        }
+        Packet head = {0};
+        head.data = data;
+        int total = g2(&head);
+        for (int f = 0; f < total; f++) {
+            int id = g2(&head);
+            if (id > max_id) {
+                max_id = id;
+            }
+            g1(&head); // groupCount - not needed in this counting pass
+        }
+        free(data);
+    }
+
+    if (max_id < 0) {
+        rs2_error("animframe_unpack_ondemand: no anim frames found in ondemand.zip\n");
+        return;
+    }
+
+    _AnimFrame.count = max_id + 1;
+    _AnimFrame.instances = calloc(_AnimFrame.count, sizeof(AnimFrame *));
+    _frame_file_index = malloc(_AnimFrame.count * sizeof(int));
+    for (int i = 0; i < _AnimFrame.count; i++) {
+        _frame_file_index[i] = -1;
+    }
+
+    // Second pass only reads each file's cheap head-section id list (same cost as the counting
+    // pass above) to record which raw ondemand.zip index holds each id - the expensive per-file
+    // transform decode (decode_anim_file above) is deferred to animframe_get() on first access.
+    for (int i = 0; i < file_count; i++) {
+        int archive;
+        int file_id;
+        if (!ondemand_get_entry_info(i, &archive, &file_id) || archive != 1) {
+            continue;
+        }
+        int size = 0;
+        int8_t *data = ondemand_get_by_index(i, &size);
+        if (!data) {
+            continue;
+        }
+        Packet head = {0};
+        head.data = data;
+        int total = g2(&head);
+        for (int f = 0; f < total; f++) {
+            int id = g2(&head);
+            _frame_file_index[id] = i;
+            g1(&head); // groupCount
+        }
+        free(data);
+    }
+#ifdef __PS2__
+    rs2_log("MEM after building animframe index: used=%d free=%d\n", mallinfo().uordblks, mallinfo().fordblks);
+#endif
+}
+
+AnimFrame *animframe_get(int id) {
+    if (id < 0 || id >= _AnimFrame.count) {
+        return NULL;
+    }
+    if (!_AnimFrame.instances[id] && _frame_file_index && _frame_file_index[id] >= 0) {
+        decode_anim_file(_frame_file_index[id]);
+    }
+    return _AnimFrame.instances[id];
 }

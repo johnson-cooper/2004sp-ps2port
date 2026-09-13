@@ -1,6 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __PS2__
+#include <malloc.h>
+#endif
 
 #include "component.h"
 #include "datastruct/jstring.h"
@@ -83,6 +86,11 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
             layer = g2(dat);
             id = g2(dat);
         }
+#ifdef __PS2__
+        if (id % 500 == 0) {
+            rs2_log("MEM component_unpack id=%d: used=%d free=%d\n", id, mallinfo().uordblks, mallinfo().fordblks);
+        }
+#endif
 
         Component *com = _Component.instances[id] = calloc(1, sizeof(Component));
         com->id = id;
@@ -207,6 +215,7 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
 
         if (com->type == TYPE_TEXT) {
             char *text = gjstr(dat);
+            com->text = malloc(DOUBLE_STR);
             strncpy(com->text, text, DOUBLE_STR - 1);
             com->text[DOUBLE_STR - 1] = '\0';
             free(text);
@@ -315,6 +324,7 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
 
         if (com->buttonType == BUTTON_OK || com->buttonType == BUTTON_TOGGLE || com->buttonType == BUTTON_SELECT || com->buttonType == BUTTON_CONTINUE) {
             char *option = gjstr(dat);
+            com->option = malloc(HALF_STR);
             strncpy(com->option, option, HALF_STR - 1);
             com->option[HALF_STR - 1] = '\0';
 
@@ -354,6 +364,14 @@ Pix24 *component_get_image(Jagfile *media, char *sprite, int spriteId) {
     // 	return null;
     // }
 
+#ifdef __PS2__
+    static int decode_count = 0;
+    decode_count++;
+    if (decode_count % 50 == 0) {
+        rs2_log("MEM component_get_image decode #%d (%s,%d): used=%d free=%d\n", decode_count, sprite, spriteId, mallinfo().uordblks, mallinfo().fordblks);
+    }
+#endif
+
     return image;
 }
 
@@ -365,6 +383,13 @@ Model *component_get_model(int id) {
 
     m = model_from_id(id, false);
     lrucache_put(_Component.modelCache, id, &m->link);
+#ifdef __PS2__
+    static int model_decode_count = 0;
+    model_decode_count++;
+    if (model_decode_count % 20 == 0) {
+        rs2_log("MEM component_get_model decode #%d (id=%d): used=%d free=%d\n", model_decode_count, id, mallinfo().uordblks, mallinfo().fordblks);
+    }
+#endif
     return m;
 }
 

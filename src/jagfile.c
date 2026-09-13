@@ -14,6 +14,9 @@ Jagfile *jagfile_new(int8_t *src, int length) {
 }
 
 void jagfile_free(Jagfile *jagfile) {
+    if (!jagfile) {
+        return;
+    }
     free(jagfile->data);
     free(jagfile->file_hash);
     free(jagfile->file_unpacked_size);

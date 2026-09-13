@@ -128,7 +128,11 @@ typedef struct {
     bool center;
     bool shadowed;
     PixFont *font;
-    char text[DOUBLE_STR]; // arbitrary length, had to double it to stop overflow
+    // allocated lazily (DOUBLE_STR bytes, only for components that actually use it - TYPE_TEXT at
+    // decode time, or client_update_interface_content()'s runtime text updates) rather than a fixed
+    // inline array every one of ~8462 real components paid for regardless of type - real memory
+    // pressure on PS2's 32MB, confirmed via mallinfo().
+    char *text;
     char *activeText;
     int colour;
     int activeColour;
@@ -146,7 +150,9 @@ typedef struct {
     char *actionVerb;
     char *action;
     int actionTarget;
-    char option[HALF_STR]; // arbitrary length, longest option is 30 in this rev
+    // allocated lazily (HALF_STR bytes) same reasoning as text above - only BUTTON_OK/TOGGLE/
+    // SELECT/CONTINUE components ever have a real option string.
+    char *option;
 
     int childCount;
     int comparatorCount;

@@ -37,6 +37,18 @@ static void onclose(void *userdata) {
 #elif defined(NXDK)
 #include <lwip/netdb.h>
 #include <nxdk/net.h>
+#elif defined(__PS2__)
+// Back to ps2ip + netman + smap[NETMAN mode] (this SDK's own real-hardware-intended architecture,
+// and confirmed to be the officially-documented one - it exactly matches ps2sdk's own real sample,
+// ee/network/tcpip/samples/tcpip_dhcp/ps2ip.c) after the "classic" ps2ips+smap-ps2ip+ps2ip-nm
+// stack tried instead got a real, disassembly-confirmed hang (ps2ip_init() stuck retrying
+// SifBindRpc() against PS2IP_IRX forever - see ps2.c's platform_init() for the live-debugging
+// writeup). The real fix found by reading ps2sdk's own official sample: it loads DEV9/NETMAN/SMAP
+// via SifExecModuleBuffer() (an embedded memory buffer) rather than SifLoadModule() (a file path)
+// - see ps2.c's platform_init() and ps2_net_modules.h. <lwip/netdb.h>/<lwip/sockets.h> give real,
+// fully-defined POSIX-named types via ps2ip's own LIBCGLUE_SYS_SOCKET_ALIASES aliasing.
+#include <lwip/netdb.h>
+#include <lwip/sockets.h>
 #elif defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -91,6 +103,17 @@ KOS_INIT_FLAGS(INIT_DEFAULT | INIT_NET);
 #define recv net_recv
 #define ioctl net_ioctl
 #define select net_select
+#endif
+
+#ifdef __PS2__
+// ps2ip's own lwipopts.h deliberately leaves LWIP_POSIX_SOCKETS_IO_NAMES at 0
+// so read/write/close keep their real (file/iomanx) meaning project-wide;
+// alias them to the lwip_-prefixed names locally, just for this file's
+// socket-only usage. gethostbyname doesn't need its own alias here -
+// <lwip/netdb.h> already provides one (LWIP_DNS/LWIP_SOCKET are both on),
+// and redefining it too just produces a harmless but noisy warning.
+#define close lwip_close
+#define write lwip_write
 #endif
 
 extern ClientData _Client;
@@ -539,7 +562,7 @@ int clientstream_write(ClientStream *stream, const int8_t *src, int len, int off
 
 // TODO test this when adding new platforms due to localhost not showing welcome screen by default
 const char *dnslookup(const char *hostname) {
-#if defined(_arch_dreamcast) || defined(NXDK) || defined(__NDS__) || defined(__WII__) || defined(__wasm)
+#if defined(_arch_dreamcast) || defined(NXDK) || defined(__NDS__) || defined(__WII__) || defined(__wasm) || defined(__PS2__)
     return platform_strdup(hostname);
 #elif defined(MODERN_POSIX)
     struct sockaddr_in client_addr = {0};

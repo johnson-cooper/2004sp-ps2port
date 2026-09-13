@@ -1901,7 +1901,7 @@ void model_create_label_references(Model *m, bool use_allocator) {
 
 void model_apply_transform(Model *m, int id) {
     if (m->label_vertices && id != -1) {
-        AnimFrame *frame = _AnimFrame.instances[id];
+        AnimFrame *frame = animframe_get(id);
         AnimBase *base = frame->base;
 
         _Model.base_x = 0;
@@ -1923,8 +1923,8 @@ void model_apply_transforms(Model *m, int id, int id2, int *walkmerge) {
     if (!walkmerge || id2 == -1) {
         model_apply_transform(m, id);
     } else {
-        AnimFrame *frame = _AnimFrame.instances[id];
-        AnimFrame *frame2 = _AnimFrame.instances[id2];
+        AnimFrame *frame = animframe_get(id);
+        AnimFrame *frame2 = animframe_get(id2);
         AnimBase *base = frame->base;
 
         _Model.base_x = 0;

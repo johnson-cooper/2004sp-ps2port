@@ -3,7 +3,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#if defined(_arch_dreamcast) || defined(__NDS__)
+#if defined(_arch_dreamcast) || defined(__NDS__) || defined(__PS2__)
 #include <malloc.h>
 #endif
 
@@ -251,10 +251,25 @@ void client_load(Client *c) {
     Jagfile *media = load_archive(c, "media", c->archive_checksum[4], "2d graphics", 30);
     Jagfile *models = load_archive(c, "models", c->archive_checksum[5], "3d graphics", 40);
     Jagfile *textures = load_archive(c, "textures", c->archive_checksum[6], "textures", 60);
+#ifdef __PS2__
+    // wordenc isn't touched until wordfilter_unpack() much later (after interfaces are unpacked) -
+    // deferring its load until right before that call frees its resident memory for the entire
+    // textures/models/animframes/interfaces phase, exactly where PS2's 32MB budget is tightest
+    // (confirmed via mallinfo() - component_unpack() was the last blocker before this). Loaded (and
+    // checked for failure) at its actual use site below instead.
+    Jagfile *wordenc = NULL;
+    // sounds is never touched at all when lowmem=1 (the only reader, wave_unpack, is behind
+    // `if (!_Client.lowmem)` below) - on PS2's tight 32MB budget, loading and holding it resident
+    // for the whole rest of client_load() anyway was pure waste. _Client.lowmem is already set from
+    // config.ini by the time client_load() runs (main() sets it before boot), so it's safe to check
+    // here at load time instead of only at free time.
+    Jagfile *sounds = _Client.lowmem ? NULL : load_archive(c, "sounds", c->archive_checksum[8], "sound effects", 70);
+    if (!config || !inter || !media || !models || !textures || (!_Client.lowmem && !sounds)) {
+#else
     Jagfile *wordenc = load_archive(c, "wordenc", c->archive_checksum[7], "chat system", 65);
     Jagfile *sounds = load_archive(c, "sounds", c->archive_checksum[8], "sound effects", 70);
-
     if (!config || !inter || !media || !models || !textures || !wordenc || !sounds) {
+#endif
         c->error_loading = true;
         return;
     }
@@ -418,21 +433,45 @@ void client_load(Client *c) {
         }
     }
 
+#ifdef __PS2__
+    rs2_log("MEM before textures: used=%d free=%d\n", mallinfo().uordblks, mallinfo().fordblks);
+#endif
     client_draw_progress(c, "Unpacking textures", 80);
     pix3d_unpack_textures(textures);
     pix3d_set_brightness(0.8);
     pix3d_init_pool(PIX3D_POOL_COUNT);
-
+#ifdef __PS2__
+    // textures/models are each only needed for their own unpack call below, unlike config/media/
+    // wordenc which get re-read throughout client_load() - holding all 7 archives resident until
+    // the batched jagfile_free() calls at the end of this function left no headroom for the
+    // memory-hungry ondemand.zip animation-frame scan on PS2's fixed 32MB. Free textures/models as
+    // soon as their last use is done instead of waiting.
+    jagfile_free(textures);
+    rs2_log("MEM before models: used=%d free=%d\n", mallinfo().uordblks, mallinfo().fordblks);
+#endif
     client_draw_progress(c, "Unpacking models", 83);
     model_unpack(models);
+#ifdef __PS2__
+    rs2_log("MEM before animframes: used=%d free=%d\n", mallinfo().uordblks, mallinfo().fordblks);
+#endif
     if (ondemand_is_loaded()) {
         // rev254 delivers anim frames (and their embedded base skeletons) via ondemand.zip -
         // see animframe_unpack_ondemand() for why mixing rev225 animation data with correctly
         // decoded rev254 model geometry produced visibly stretched/twisted limbs.
+#ifdef __PS2__
+        jagfile_free(models);
+        rs2_log("MEM after freeing models: used=%d free=%d\n", mallinfo().uordblks, mallinfo().fordblks);
+#endif
         animframe_unpack_ondemand();
+#ifdef __PS2__
+        rs2_log("MEM after animframes: used=%d free=%d\n", mallinfo().uordblks, mallinfo().fordblks);
+#endif
     } else {
         animbase_unpack(models);
         animframe_unpack(models);
+#ifdef __PS2__
+        jagfile_free(models);
+#endif
     }
 
     client_draw_progress(c, "Unpacking config", 86);
@@ -445,6 +484,13 @@ void client_load(Client *c) {
     spotanimtype_unpack(config);
     varptype_unpack(config);
     varbittype_unpack(config);
+#ifdef __PS2__
+    // same reasoning as the earlier textures/models early-frees: config's real last use is the
+    // xxx_unpack(config) run above, and sounds is never read at all when lowmem=1 (wave_unpack is
+    // skipped below) - both were otherwise sitting resident, unused, right through the interface
+    // phase until the batched jagfile_free() calls at the end of this function.
+    jagfile_free(config);
+#endif
 
     _ObjType.membersWorld = _Client.members;
     if (!_Client.lowmem) {
@@ -453,10 +499,16 @@ void client_load(Client *c) {
         wave_unpack(sound_dat);
         packet_free(sound_dat);
     }
-
+#ifdef __PS2__
+    jagfile_free(sounds);
+    rs2_log("MEM before interfaces: used=%d free=%d\n", mallinfo().uordblks, mallinfo().fordblks);
+#endif
     client_draw_progress(c, "Unpacking interfaces", 92);
     PixFont *fonts[] = {c->font_plain11, c->font_plain12, c->font_bold12, c->font_quill8};
     component_unpack(inter, media, fonts);
+#ifdef __PS2__
+    rs2_log("MEM after interfaces: used=%d free=%d\n", mallinfo().uordblks, mallinfo().fordblks);
+#endif
 
     client_draw_progress(c, "Preparing game engine", 97);
     // rev254's real "mapback" sprite is 172x156 - these scan bounds (and the offset subtracted per
@@ -515,6 +567,16 @@ void client_load(Client *c) {
 
     world3d_init(512, 334, 500, 800, distance);
     free(distance);
+#ifdef __PS2__
+    // 65 was its original progress-bar percentage back when it loaded upfront alongside the other
+    // archives - now that it loads here instead (well past "Unpacking interfaces" at 92), use a
+    // later value so the progress bar doesn't visibly jump backward.
+    wordenc = load_archive(c, "wordenc", c->archive_checksum[7], "chat system", 93);
+    if (!wordenc) {
+        c->error_loading = true;
+        return;
+    }
+#endif
     wordfilter_unpack(wordenc);
 
     pix24_free(backleft1);
@@ -527,13 +589,20 @@ void client_load(Client *c) {
     pix24_free(backvmid3);
     pix24_free(backhmid2);
 
+#ifndef __PS2__
+    // already freed earlier on PS2, right after their last use - see the memory-pressure notes above
     jagfile_free(config);
+#endif
     jagfile_free(inter);
     jagfile_free(media);
+#ifndef __PS2__
     jagfile_free(models);
     jagfile_free(textures);
+#endif
     jagfile_free(wordenc);
+#ifndef __PS2__
     jagfile_free(sounds);
+#endif
     // } catch (Exception ex) {
     // 	ex.printStackTrace();
     // 	this.errorLoading = true;
@@ -543,6 +612,13 @@ void client_load(Client *c) {
 #if defined(_arch_dreamcast) || defined(__NDS__)
     malloc_stats();
     if (!bump_allocator_init(8 << 20)) {
+#elif defined(__PS2__)
+    // component_unpack() alone was leaving only a few hundred KB free by the time this runs (even
+    // after reclaiming inter/media/wordenc just above) - the dreamcast/nds 8MB size still isn't
+    // realistic here. Logging real free memory right at this call site since this is a genuine
+    // guess pending real data, unlike every other PS2 sizing decision so far this session.
+    rs2_log("MEM before bump allocator: used=%d free=%d\n", mallinfo().uordblks, mallinfo().fordblks);
+    if (!bump_allocator_init(1 << 20)) {
 #else
     if (!(_Client.lowmem ? bump_allocator_init(16 << 20) : bump_allocator_init(32 << 20))) {
 #endif
@@ -555,7 +631,9 @@ void client_load(Client *c) {
     }
 
 // TODO temp: wait for wiiu and switch touch input fixes, melonds 32mb emulation
-#if defined(__WIIU__) || defined(__SWITCH__) || defined(__NDS__)
+// PS2 has no keyboard/text-input path at all yet (platform_poll_events only drives a pad-based
+// virtual mouse) - auto-login is the only way to reach the game past the title screen for now.
+#if defined(__WIIU__) || defined(__SWITCH__) || defined(__NDS__) || defined(__PS2__)
     client_login(c, c->username, c->password, false);
 #endif
 
@@ -5970,6 +6048,9 @@ bool client_read(Client *c) {
             c->packet_type = -1;
             return true;
         }
+        if (!_Component.instances[com]->text) {
+            _Component.instances[com]->text = malloc(DOUBLE_STR);
+        }
         strncpy(_Component.instances[com]->text, text, DOUBLE_STR - 1);
         _Component.instances[com]->text[DOUBLE_STR - 1] = '\0';
         free(text);
@@ -10038,6 +10119,14 @@ void client_draw_sidebar(Client *c) {
 }
 
 void client_update_interface_content(Client *c, Component *component) {
+    // Every branch below writes component->text directly (strcpy/sprintf/strcat) - now that it's
+    // allocated lazily rather than a fixed inline array, guarantee it exists once here instead of
+    // touching every one of those call sites individually.
+    if (!component->text) {
+        component->text = malloc(DOUBLE_STR);
+        component->text[0] = '\0';
+    }
+
     int clientCode = component->clientCode;
 
     if (clientCode >= 1 && clientCode <= 100) {
