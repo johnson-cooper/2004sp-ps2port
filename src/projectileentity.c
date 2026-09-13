@@ -60,8 +60,8 @@ void projectileentity_update(ProjectileEntity *entity, int delta) {
     if (entity->spotanim->seq) {
         entity->seqCycle += delta;
 
-        while (entity->seqCycle > entity->spotanim->seq->delay[entity->seqFrame]) {
-            entity->seqCycle -= entity->spotanim->seq->delay[entity->seqFrame] + 1;
+        while (entity->seqCycle > seqtype_get_duration(entity->spotanim->seq, entity->seqFrame)) {
+            entity->seqCycle -= seqtype_get_duration(entity->spotanim->seq, entity->seqFrame) + 1;
             entity->seqFrame++;
             if (entity->seqFrame >= entity->spotanim->seq->frameCount) {
                 entity->seqFrame = 0;

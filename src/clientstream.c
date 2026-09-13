@@ -9,6 +9,32 @@
 #include "clientstream.h"
 #include "platform.h"
 
+#ifdef __PS2__
+static int64_t _net_wait_ms = 0;
+int64_t clientstream_net_wait_ms(void) {
+    return _net_wait_ms;
+}
+void clientstream_net_wait_reset(void) {
+    _net_wait_ms = 0;
+}
+
+// Separate from _net_wait_ms (clientstream_read_bytes()'s retry-loop-only): this measures every
+// single clientstream_available() call's recv() cost, whether or not it had to wait for data - the
+// per-tick "packets" cost turned out NOT to be in packet content (getNpcPos/getPlayer both showed
+// ~0ms), which points at framing overhead instead. client_read() calls clientstream_available() 2-3
+// times per packet (1-byte type peek, size peek, body-length check) that clientstream_read_bytes's
+// own instrumentation never sees, since none of them go through its retry loop when data's already
+// there - if a single recv() syscall itself carries real emulation overhead under PCSX2's DEV9/SMAP/
+// netman stack regardless of whether it blocks, this is where that would actually show up.
+static int64_t _net_call_ms = 0;
+int64_t clientstream_net_call_ms(void) {
+    return _net_call_ms;
+}
+void clientstream_net_call_reset(void) {
+    _net_call_ms = 0;
+}
+#endif
+
 #if defined(__wasm) && !defined(__EMSCRIPTEN__)
 #include <js/glue.h>
 #include <js/websocket.h>
@@ -114,6 +140,79 @@ KOS_INIT_FLAGS(INIT_DEFAULT | INIT_NET);
 // and redefining it too just produces a harmless but noisy warning.
 #define close lwip_close
 #define write lwip_write
+
+// FOUND THE BUG: the nonblocking-setup code below this point (clientstream_opensocket) guards the
+// fcntl() path with `#if defined(__PSP__) || defined(__vita__) || defined(__ps2sdk__) ||
+// defined(_arch_dreamcast)` - __PS2__ was never in that list, and __ps2sdk__ is not a macro this
+// toolchain defines (confirmed: ps2.yaml's `defines:` is only client/__PS2__/WITH_RSA_LIBTOM/
+// PS2IP_DNS - grepped, nothing else defines it either). So PS2 fell into the `#else` branch's
+// `ioctl(fd, FIONBIO, &set)`.
+//
+// That call was silently inert. Confirmed directly from this SDK's real lwip/sockets.h: unlike
+// close/read/write (manually aliased above precisely because LWIP_POSIX_SOCKETS_IO_NAMES=0 leaves
+// them unaliased), `ioctl` and `fcntl` are their own separate case - sockets.h only aliases them to
+// lwip_ioctl/lwip_fcntl when LWIP_POSIX_SOCKETS_IO_NAMES is set, and clientstream.c never added a
+// manual fallback alias for them the way it did for close/write. With the plain `ioctl` token left
+// unaliased, it resolved to the EE toolchain's own generic libc ioctl() - a completely different
+// function, operating on IOP file-descriptor semantics that don't apply to an lwIP socket fd at
+// all - so the call did nothing to the real lwIP socket state. This socket has been genuinely
+// BLOCKING for this project's entire networking history: recv() legitimately waits for the next
+// chunk of data to physically arrive, which perfectly explains the 8-16 SECOND "stalls" measured
+// earlier this session (SMAP's own "10BaseT Half Duplex Mode without Flow Control" - a slow link
+// with nothing to prevent the server from just continuing to send while we fall behind - means
+// waiting several real seconds between chunks is exactly what a genuinely blocking recv() would do
+// on this link, not a mysterious per-syscall overhead).
+//
+// First real attempt here used lwip_fcntl(fd, F_SETFL, flags|O_NONBLOCK) directly (a real declared
+// function, sockets.h: `int lwip_fcntl(int s, int cmd, int val);`) - and it failed empirically on a
+// real boot: `lwip_fcntl(F_GETFL)` succeeded (fd=0 is a valid lwIP socket - lwIP keeps its own
+// internal socket table separate from any POSIX fd namespace, so index 0 being the first/only open
+// socket is completely normal, not a bug), but the very next call, `lwip_fcntl(F_SETFL, ...)` on
+// that SAME fd, failed with errno=88 (ENOTSOCK - "socket operation on non-socket"), which aborted
+// the connection outright per the "don't silently ignore failure" handling below. A GETFL that
+// succeeds immediately followed by a SETFL on the identical fd failing ENOTSOCK isn't a real
+// missing-socket condition - it points at a genuine bug/limitation specific to this prebuilt
+// lwIP's F_SETFL code path, not at anything wrong with the socket or with our fd handling.
+//
+// Real fix: sockets.h has its own comment directly on the ioctl declaration - "lwip_ioctl only
+// supports FIONREAD and FIONBIO, for now" - i.e. FIONBIO is explicitly documented as a real,
+// supported command in this exact build, unlike the fcntl path just shown to be broken. Use
+// lwip_ioctl(fd, FIONBIO, &set) - a different real declared function (sockets.h: `int
+// lwip_ioctl(int s, long cmd, void *argp);`) - as the authoritative way to set nonblocking mode,
+// with lwip_fcntl(F_GETFL) kept only as a secondary informational cross-check (logged either way,
+// never treated as fatal by itself - F_GETFL alone was never the part that broke).
+static bool ps2net_set_nonblocking(int fd) {
+    unsigned long set = 1;
+    int ioctl_ret = lwip_ioctl(fd, FIONBIO, &set);
+    if (ioctl_ret < 0) {
+        rs2_error("PS2NET fd=%d lwip_ioctl(FIONBIO) failed: %d errno=%d\n", fd, ioctl_ret, errno);
+        return false;
+    }
+    int verify = lwip_fcntl(fd, F_GETFL, 0);
+    bool is_nonblocking = verify >= 0 && (verify & O_NONBLOCK) != 0;
+    rs2_log("PS2NET fd=%d ioctl(FIONBIO)=ok flags=0x%x O_NONBLOCK=%s\n", fd, verify < 0 ? 0 : verify, is_nonblocking ? "YES(fcntl-confirmed)" : "unconfirmed-by-fcntl");
+    // Success is ioctl(FIONBIO) itself succeeding (already confirmed above), not the fcntl()
+    // cross-check agreeing with it - F_SETFL was already shown to be unreliable on this exact fd,
+    // so F_GETFL disagreeing here is more evidence of that same fcntl-path bug, not proof FIONBIO
+    // failed. Logged either way so a real, persistent "unconfirmed" result stays visible.
+    return true;
+}
+
+// Zero-timeout readiness poll - a poll, never a wait, per the explicit requirement this exists to
+// satisfy. Returns >0 if fd is readable, 0 if not (yet), <0 on a genuine select() error.
+static int ps2net_poll_readable(int fd) {
+    fd_set readfds;
+    struct timeval tv = {0, 0};
+    FD_ZERO(&readfds);
+    FD_SET(fd, &readfds);
+    return lwip_select(fd + 1, &readfds, NULL, NULL, &tv);
+}
+
+// Only log an individual call's timing when it's actually abnormal - the periodic PS2 PERF
+// aggregate (gameshell.c) already covers steady-state, this is for catching real stalls without
+// spamming every frame. 5ms is generous headroom over what a correctly-nonblocking poll+recv should
+// ever cost (sub-millisecond), while still catching anything that isn't behaving as expected.
+#define PS2NET_STALL_THRESHOLD_MS 5
 #endif
 
 extern ClientData _Client;
@@ -355,13 +454,23 @@ ClientStream *clientstream_opensocket(int port) {
 #ifndef __NDS__
     setsockopt(stream->socket, IPPROTO_TCP, TCP_NODELAY, (const char *)&set, sizeof(set));
 #endif
-#if !defined(__3DS__) && !defined(__WIIU__)
+#if !defined(__3DS__) && !defined(__WIIU__) && !defined(__PS2__)
     struct timeval socket_timeout = {30, 0};
     setsockopt(stream->socket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&socket_timeout, sizeof(socket_timeout));
     setsockopt(stream->socket, SOL_SOCKET, SO_SNDTIMEO, (const char *)&socket_timeout, sizeof(socket_timeout));
 #endif
 
-#if defined(__PSP__) || defined(__vita__) || defined(__ps2sdk__) || defined(_arch_dreamcast)
+#ifdef __PS2__
+    // Own dedicated branch rather than trying to get __ps2sdk__ (never defined by this toolchain -
+    // see the long comment above ps2net_set_nonblocking()) added to the condition below. Once this
+    // is confirmed genuinely nonblocking (logged, not assumed), SO_RCVTIMEO/SO_SNDTIMEO above are
+    // moot for recv()'s own behavior - they only bound how long a *blocking* call waits - so PS2 is
+    // excluded from setting them at all rather than leaving a dead 30s value nothing reads.
+    if (!ps2net_set_nonblocking(stream->socket)) {
+        clientstream_close(stream);
+        return NULL;
+    }
+#elif defined(__PSP__) || defined(__vita__) || defined(__ps2sdk__) || defined(_arch_dreamcast)
     int flags = fcntl(stream->socket, F_GETFL, 0);
     if (flags == -1) {
         rs2_error("fcntl F_GETFL failed\n");
@@ -468,11 +577,79 @@ int clientstream_available(ClientStream *stream, int len) {
         return 1;
     }
 
+#ifdef __PS2__
+    // 2026-09-13: root-caused. This socket was never actually nonblocking (see the long comment at
+    // ps2net_set_nonblocking() above) - every recv() here was a real blocking call, and the
+    // measured 8-16 SECOND "stalls" were genuine waits for the next chunk of data to physically
+    // arrive over a slow half-duplex link with no flow control. Now that the socket is verified
+    // nonblocking, the correct shape is: poll with a zero-timeout select() first (never a wait),
+    // only recv() if actually readable, and pass MSG_DONTWAIT on the recv() itself too - belt and
+    // suspenders, so a spurious wakeup can never turn into a block either.
+    int64_t select_t0 = rs2_now();
+    int ready = ps2net_poll_readable(stream->socket);
+    int64_t select_ms = rs2_now() - select_t0;
+
+    if (ready <= 0) {
+        if (ready < 0) {
+            rs2_error("PS2NET select() error on fd=%d: errno=%d (%s)\n", stream->socket, errno, strerror(errno));
+        } else if (select_ms > PS2NET_STALL_THRESHOLD_MS) {
+            // select() itself isn't supposed to be capable of this (timeout is {0,0}) - if it ever
+            // shows up here, the stall is BELOW our socket API, not in anything this file controls.
+            rs2_log("PS2NET STALL select=%dms recv=skipped ready=%d\n", (int)select_ms, ready);
+        }
+        return 0;
+    }
+
+    // Opportunistically drain as much backlog as fits in the buffer's remaining tail space in one
+    // call, not just the few bytes this particular check needs - harmless now that recv() is
+    // confirmed nonblocking (still returns immediately either way), and saves a round trip for
+    // whichever caller needs the next chunk.
+    int want = (int)sizeof(stream->buf) - stream->bufPos - stream->bufLen;
+    if (want < len - stream->bufLen) {
+        want = len - stream->bufLen;
+    }
+    errno = 0;
+    int64_t recv_t0 = rs2_now();
+    int bytes = recv(stream->socket, (char *)stream->buf + stream->bufPos + stream->bufLen, want, MSG_DONTWAIT);
+    int64_t recv_ms = rs2_now() - recv_t0;
+    int recv_errno = errno;
+    _net_call_ms += select_ms + recv_ms;
+
+    if (select_ms > PS2NET_STALL_THRESHOLD_MS || recv_ms > PS2NET_STALL_THRESHOLD_MS) {
+        // FIONREAD via lwip_ioctl() directly (same reason as everywhere else in this file - the
+        // bare `ioctl` token isn't aliased on this SDK) - temporary diagnostic only, kept inside
+        // the already-rare stall-log path rather than made a permanent per-call cost. Tells us
+        // whether lwIP's own accounting agrees with what select()/recv() just reported, e.g.
+        // distinguishing "select said ready, FIONREAD agrees, recv is just slow" (fault is below
+        // our API) from "select said ready but FIONREAD says 0" (a real accounting mismatch).
+        unsigned long fionread_avail = 0;
+        int fionread_ret = lwip_ioctl(stream->socket, FIONREAD, &fionread_avail);
+        rs2_log("PS2NET STALL select=%dms recv=%dms ready=%d bytes=%d errno=%d fionread=%lu(ret=%d)\n",
+                 (int)select_ms, (int)recv_ms, ready, bytes, bytes < 0 ? recv_errno : 0,
+                 fionread_ret == 0 ? fionread_avail : 0, fionread_ret);
+    }
+
+    if (bytes < 0) {
+        // select() just said readable, so EAGAIN/EWOULDBLOCK here means the data raced away (or a
+        // spurious wakeup) - normal for a nonblocking socket, not a failure. Anything else (reset,
+        // aborted, invalid socket state, ...) is a real fault and must not be silently swallowed as
+        // "0 bytes, try again" the way it was before - that hid genuine connection failures behind
+        // an infinite-looking retry.
+        if (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK) {
+            bytes = 0;
+        } else {
+            rs2_error("PS2NET recv() error on fd=%d: errno=%d (%s)\n", stream->socket, recv_errno, strerror(recv_errno));
+            stream->closed = true;
+            return 0;
+        }
+    }
+#else
     int bytes = recv(stream->socket, (char *)stream->buf + stream->bufPos + stream->bufLen, len - stream->bufLen, 0);
 
     if (bytes < 0) {
         bytes = 0;
     }
+#endif
 
     stream->bufLen += bytes;
 
@@ -524,26 +701,54 @@ int clientstream_read_bytes(ClientStream *stream, int8_t *dst, int off, int len)
     }
 
     int read_duration = 0;
+#ifdef __PS2__
+    int64_t wait_t0 = rs2_now();
+#endif
 
     while (len > 0) {
+#ifdef __PS2__
+        // clientstream_available() (called just before this by every real caller) already polled
+        // and pulled whatever was ready into stream->buf, so bufLen normally already covers `len`
+        // and this loop's own recv() is rarely reached at all - but stay correct if it ever is:
+        // MSG_DONTWAIT to match the now-genuinely-nonblocking socket, and EAGAIN/EWOULDBLOCK must
+        // mean "nothing new yet, keep polling" rather than getting misread as a real fault.
+        errno = 0;
+        int bytes = recv(stream->socket, (char *)dst + off, len, MSG_DONTWAIT);
+        if (bytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            rs2_error("PS2NET recv() error on fd=%d: errno=%d (%s)\n", stream->socket, errno, strerror(errno));
+            clientstream_close(stream);
+            _net_wait_ms += rs2_now() - wait_t0;
+            return -1;
+        }
+#else
         int bytes = recv(stream->socket, (char *)dst + off, len, 0);
+#endif
         if (bytes > 0) {
             off += bytes;
             len -= bytes;
         } else if (bytes == 0) {
             stream->closed = true;
+#ifdef __PS2__
+            _net_wait_ms += rs2_now() - wait_t0;
+#endif
             return -1;
         } else {
             read_duration += 1;
 
             if (read_duration >= 5000) {
                 clientstream_close(stream);
+#ifdef __PS2__
+                _net_wait_ms += rs2_now() - wait_t0;
+#endif
                 return -1;
             } else {
                 rs2_sleep(1);
             }
         }
     }
+#ifdef __PS2__
+    _net_wait_ms += rs2_now() - wait_t0;
+#endif
 
     return 0;
 }

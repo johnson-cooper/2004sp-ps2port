@@ -10,6 +10,13 @@
 // two independent compression layers to unwrap before reaching the raw data the rest of Client3
 // already knows how to decode (see model_from_id()'s on-demand path in model.c).
 bool ondemand_load(int8_t *zip_data, int zip_size);
+// Opens ondemand.zip directly off disk (stdio fopen/fseek/fread under the hood, via miniz's own
+// mz_zip_reader_init_file) instead of reading the whole ~6MB file into a permanently-resident
+// heap buffer. Only the zip's central directory (entry names/offsets, tens of KB, not the entry
+// payloads) stays resident - individual model/anim/map entries are read from disk on demand, the
+// same moment they'd have been decompressed out of the in-memory buffer anyway. See PS2 call site
+// in entry/client.c for why this matters on a fixed-32MB target specifically.
+bool ondemand_load_file(const char *path);
 bool ondemand_is_loaded(void);
 
 // Returns a malloc'd buffer of the fully-decompressed entry for the given archive/id, or NULL if

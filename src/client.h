@@ -231,6 +231,36 @@ struct Client {
     char chatback_input[CHATBACK_LENGTH + 1];
     int camera_moved_write;
 
+    // Controller input (PS2 and any other keyboard-less/gamepad-only platform) - populated by
+    // platform_poll_events() in src/platform/ps2.c, consumed once per tick by
+    // handleControllerTabInput()/handleControllerButtonInput() in entry/client.c. Kept
+    // platform-agnostic (no #ifdef __PS2__ here or in the consuming logic) since these fields are
+    // harmlessly always-zero/false on every platform that never sets them.
+    int controller_tab_step;          // -1/0/+1, one-shot: consumed and reset to 0 by handleControllerTabInput()
+    bool controller_inventory_pressed; // one-shot: Square, jump to inventory tab
+    bool controller_snap_camera_pressed; // one-shot: Select, face camera with the player
+    bool controller_start_pressed;    // one-shot: Start, open chat keyboard / submit active keyboard
+    bool controller_back_pressed;     // one-shot: Triangle, close topmost modal/menu (or backspace if keyboard open)
+    int controller_zoom_bias;         // signed, from L2/R2 hold: negative=zoom out, positive=zoom in
+    int controller_dpad_x;            // -1/0/+1, one-shot: D-pad, consumed by the virtual keyboard's grid navigation only
+    int controller_dpad_y;
+    bool controller_keyboard_confirm_pressed; // one-shot: Cross, but ONLY while the virtual keyboard
+                                               // is visible (see ps2.c) - kept separate from the
+                                               // normal mouse_click_button path so a keyboard commit
+                                               // can never also register as a click on whatever UI
+                                               // happens to sit underneath the overlay.
+
+    // On-screen virtual keyboard (see gameshell.h's has_keyboard) - the only way a controller-only
+    // player can enter text. State lives here (not a separate file) since every operation needs
+    // direct access to c->username/password/chat_typed/social_input/chatback_input and calls into
+    // key_pressed()/client_login() - the same coupling shape as every other UI panel already in
+    // this file (client_draw_sidebar, client_draw_chatback, etc).
+    bool virtual_keyboard_visible;
+    int virtual_keyboard_target; // 0=username, 1=password, 2=chat, 3=social, 4=chatback
+    int virtual_keyboard_cursor_row;
+    int virtual_keyboard_cursor_col;
+    bool virtual_keyboard_shift;
+
     // TODO snakecase/check if all inited below
     int menu_action[500];
     int menuParamA[500];
@@ -500,6 +530,16 @@ void showContextMenu(Client *c);
 void updateMergeLocs(Client *c);
 void updateEntityChats(Client *c);
 void updatePlayers(Client *c);
+#ifdef __PS2__
+int64_t client_tick_packets_ms(void);
+int64_t client_tick_players_ms(void);
+int64_t client_tick_npcs_ms(void);
+int64_t client_tick_chats_ms(void);
+int64_t client_tick_mergelocs_ms(void);
+int64_t client_tick_getnpcpos_ms(void);
+int64_t client_tick_getplayer_ms(void);
+void client_tick_phase_reset(void);
+#endif
 void handleViewportOptions(Client *c);
 bool handleInterfaceAction(Client *c, Component *com);
 void handleChatMouseInput(Client *c, int mouseX, int mouseY);

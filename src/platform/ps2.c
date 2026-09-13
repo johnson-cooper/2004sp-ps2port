@@ -22,6 +22,9 @@
 
 #include <gsKit.h>
 
+#include <stdarg.h>
+#include <stdio.h>
+
 #include "../client.h"
 #include "../custom.h"
 #include "../defines.h"
@@ -34,17 +37,24 @@ extern ClientData _Client;
 extern InputTracking _InputTracking;
 extern Custom _Custom;
 
+// Root-caused a real-hardware-only crash to this: `errno` on this toolchain isn't the usual
+// reentrant `#define errno (*__errno())` macro (confirmed - every .c file in this project compiles
+// to an actual unresolved `errno` symbol reference, not a call through __errno()) - it resolves to
+// a WEAK `int errno;` provided by the prebuilt ps2ip/lwIP library. That library's own errno lives
+// immediately after another of its internal globals (tcp_port, a 2-byte value) with zero padding
+// between them, so errno lands 2 bytes off a 4-byte boundary - not something anything in this
+// project controls, since libps2ip.a is a prebuilt binary. This makes EVERY heap allocation
+// (newlib's malloc -> _sbrk_r, which unconditionally clears errno first) an unaligned 4-byte store,
+// which real MIPS hardware faults on (confirmed via EPC/BadVAddr from a real crash, decoded with
+// addr2line+nm against this exact build) but PCSX2's emulation silently tolerates - explaining why
+// this was invisible through this entire project's PCSX2-only testing until the first real-hardware
+// boot. A plain, strong definition here is properly aligned (normal .bss placement, no adjacent
+// odd-sized neighbor) and - being strong, not weak - the linker prefers it over ps2ip's copy for
+// every reference in the program, sidestepping the bad layout entirely without touching ps2ip.
+int errno;
+
 static GSGLOBAL *gsGlobal;
 static GSTEXTURE screenTexture;
-
-extern unsigned char dev9_irx[];
-extern unsigned int size_dev9_irx;
-
-extern unsigned char netman_irx[];
-extern unsigned int size_netman_irx;
-
-extern unsigned char smap_irx[];
-extern unsigned int size_smap_irx;
 
 // SCREEN_WIDTH/HEIGHT (765x503, defines.h) isn't 64-pixel-aligned, and PS2 GS VRAM textures are
 // hardware-tiled with a row stride that must be. Two direct attempts to force the unaligned size
@@ -98,7 +108,152 @@ static void SleepMsApprox()
 	SleepThread();
 }
 
+// Auto-detects whether the game's own asset tree (the same rom/cache/client/... layout already
+// shipped under build/bin/rom/) lives on a mounted USB mass-storage device (real hardware, or a
+// proper USB-stick boot) rather than being served through PCSX2's host: dev-only shortcut - see
+// platform_init()'s own path comment: every other cache/asset path in this codebase is a plain
+// relative path with no device prefix, which PCSX2 transparently redirects to the PC's real
+// build/bin folder, but that redirect simply doesn't exist on real hardware.
+//
+// Tries both device names actually seen in this project's own real-hardware testing: "mass0:"
+// (the BDM-based stack's numbered convention - platform_init() below loads this exact stack, and a
+// real boot log confirmed PCSX2's own USB-boot chain mounts a drive this way before handing off to
+// this ELF) and plain "mass:" as a fallback, in case a given loader/boot path ever exposes it
+// unnumbered instead. Checking both costs nothing once one succeeds.
+const char *ps2_cache_prefix(void) {
+    static bool checked = false;
+    static const char *prefix = "";
+    if (!checked) {
+        checked = true;
+        static const char *const candidates[] = {"mass0:/", "mass:/"};
+        // platform_init() now calls this immediately after loading USB, before network
+        // setup - the drive has had essentially no settling time yet at that point, unlike when
+        // this was only ever reached lazily much later in boot (after 30s+ of network setup had
+        // already elapsed in the background). A short fixed delay before the very first attempt,
+        // matching a real, working reference project's own approach to this exact timing problem
+        // (OptiJuegos/ReleasePlusPlus's Ps2UsbMass::initialize(), DelayThread(500*1000) before its
+        // first availability check), costs far less than even one avoidable retry pass if a
+        // not-yet-ready device makes each individual fopen() attempt itself slow rather than fast.
+        SleepMsApprox();
+        SleepMsApprox();
+        SleepMsApprox();
+        SleepMsApprox();
+        SleepMsApprox();
+        // A real boot log measured ~1s between the USB driver coming up and the drive actually
+        // being mounted - retry for a few seconds to comfortably cover that, still bounded so a
+        // PCSX2 dev/testing boot with no mass-storage device attached doesn't hang, just pays a
+        // one-time few-second tax on this specific probe.
+        for (int i = 0; i < 50 && !prefix[0]; i++) {
+            for (size_t c = 0; c < sizeof(candidates) / sizeof(candidates[0]); c++) {
+                char path[64];
+                snprintf(path, sizeof(path), "%srom/cache/client/crc", candidates[c]);
+                FILE *probe = fopen(path, "rb");
+                if (probe) {
+                    fclose(probe);
+                    prefix = candidates[c];
+                    break;
+                }
+            }
+            if (!prefix[0]) {
+                SleepMsApprox();
+            }
+        }
+        rs2_log("usb: mass storage %s - cache/asset paths using %s\n", prefix[0] ? "found" : "not found",
+                 prefix[0] ? prefix : "relative (host: under PCSX2)");
+    }
+    return prefix;
+}
+
+// See platform.c's rs2_log()/rs2_error() - a hang or crash reached via uLaunchELF/a real USB boot
+// has no live console at all (unlike PCSX2, or ps2link when its own link survives), so this is the
+// only way to get a postmortem trace back off real hardware afterward: plug the drive into a PC and
+// read the file. Tries mass0: first (a real USB-stick/uLaunchELF boot), falling back to a plain
+// relative path (works fine under PCSX2's host: shortcut, landing in build/bin/boot.log) - and
+// permanently disables itself the first time NEITHER works, so a session with no writable device at
+// all doesn't retry a failing fopen() on every single log line for the rest of the run.
+//
+// Explicit "w" (create/truncate) on the FIRST successful write to a given path, "a" (append)
+// afterward - not "a" from the start. A real hardware test came back with no boot.log anywhere on
+// the drive despite many earlier rs2_log() calls that must have run (title screen rendered, login
+// succeeded) - "a" is defined by the C standard to create a missing file, but that's exactly the
+// kind of guarantee a minimal embedded FAT driver (bdmfs_fatfs here) is plausible to not fully
+// honor for a file that doesn't exist yet. This sidesteps relying on that specific guarantee.
+void ps2_log_to_file(const char *format, va_list args) {
+    static int mode = -1; // -1 = not yet determined, 0 = mass0:, 1 = relative, 2 = disabled
+    static bool created[2] = {false, false};
+    if (mode == 2) {
+        return;
+    }
+    const char *paths[2] = {"mass0:/boot.log", "boot.log"};
+    int start = mode >= 0 ? mode : 0;
+    for (int i = start; i < 2; i++) {
+        FILE *file = fopen(paths[i], created[i] ? "a" : "w");
+        if (file) {
+            created[i] = true;
+            mode = i;
+            vfprintf(file, format, args);
+            fflush(file);
+            fclose(file);
+            return;
+        }
+    }
+    mode = 2;
+}
+
+// A real-hardware boot spends a long time in platform_init() below before client_load() ever gets
+// a chance to draw its own "Connecting to fileserver"/"Unpacking ..." progress bar (client_draw_
+// progress(), entry/client.c) - GS/dmaKit setup previously happened at the very END of
+// platform_init(), after every network/USB/pad wait, so the screen was black (no GS output bound
+// at all yet) for the whole thing. Real hardware measured this at a couple of minutes total (real
+// EE/IOP silicon is much slower than PCSX2 emulating it, especially for the cache/ondemand.zip
+// decompression client_load() does afterward) - not something this project can make fundamentally
+// faster, so at minimum it shouldn't look like a hang. Moved GS/dmaKit init to the very top of
+// platform_init() (it has no dependency on anything below it - pure EE-side GS/DMA setup, untouched
+// by the IOP reset) so this can draw a plain, font-less percentage bar (raw gsKit_prim_sprite
+// rectangles - no PixFont/PixMap/cache dependency, none of which exist yet this early) at each
+// major boot milestone.
+// Exposed (not static) and reused beyond platform_init() itself - see model.c's model_unpack(),
+// which has no PixFont/Client available to use the normal client_draw_progress() mechanism but
+// still needs *some* way to show it's actively progressing through a real, potentially very slow
+// (real EE silicon, not PCSX2's dynarec) CPU-bound loop over every model in the game, rather than
+// looking indistinguishable from a genuine hang. No longer clears the screen itself (previously
+// redundant during platform_init(), which already clears once before the first call) specifically
+// so a reuse mid-client_load() doesn't wipe out the game's own already-drawn loading background.
+void ps2_boot_progress(int percent) {
+    int bar_w = 300, bar_h = 20;
+    int x = (SCREEN_FB_WIDTH - bar_w) / 2;
+    int y = (SCREEN_FB_HEIGHT - bar_h) / 2;
+    gsKit_prim_sprite(gsGlobal, x, y, x + bar_w, y + bar_h, 1, GS_SETREG_RGBAQ(0x60, 0x60, 0x60, 0x80, 0x00));
+    int fill_w = (bar_w - 4) * percent / 100;
+    if (fill_w > 0) {
+        gsKit_prim_sprite(gsGlobal, x + 2, y + 2, x + 2 + fill_w, y + bar_h - 2, 2, GS_SETREG_RGBAQ(0xff, 0xff, 0xff, 0x80, 0x00));
+    }
+    gsKit_queue_exec(gsGlobal);
+    gsKit_sync_flip(gsGlobal);
+}
+
 bool platform_init(void) {
+    dmaKit_init(D_CTRL_RELE_OFF, D_CTRL_MFD_OFF, D_CTRL_STS_UNSPEC, D_CTRL_STD_OFF, D_CTRL_RCYC_8, 1 << DMA_CHANNEL_GIF);
+    dmaKit_chan_init(DMA_CHANNEL_GIF);
+
+    gsGlobal = gsKit_init_global();
+    // This is the physical output framebuffer (640x480, aligned - see the comment above
+    // platform_new()), separate from screenTexture's full 765x503 logical canvas - gsKit scales
+    // between the two when drawing the sprite in platform_update_surface(). gsKit_init_global()'s
+    // own default Width/Height (based on the console's detected video standard) also didn't match
+    // what platform_update_surface() draws into, producing a black screen despite no draw errors,
+    // so this still needs to be set explicitly either way.
+    gsGlobal->Width = SCREEN_FB_WIDTH;
+    gsGlobal->Height = SCREEN_FB_HEIGHT;
+    gsGlobal->PSM = GS_PSM_CT24;
+    gsGlobal->DoubleBuffering = GS_SETTING_ON;
+    gsGlobal->ZBuffering = GS_SETTING_OFF;
+    gsGlobal->PrimAlphaEnable = GS_SETTING_OFF;
+
+    gsKit_init_screen(gsGlobal);
+    gsKit_clear(gsGlobal, GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x00, 0x00));
+    ps2_boot_progress(0);
+
     // 5th real network attempt. The 4th (ps2ip+netman+smap[NETMAN mode] loaded via
     // SifExecModuleBuffer, matching ps2sdk's own official sample) got real, confirmed progress -
     // netman AND smap's own _start() both returned success (modres=0) for the first time ever,
@@ -124,12 +279,20 @@ bool platform_init(void) {
     //    (just a single SifInitRpc(0), matching every attempt so far). Moved to the very start of
     //    platform_init(), before SIO2MAN/PADMAN, since a reset this late would wipe them out.
     //
-    // dev9_irx/netman_irx/smap_irx are now embedded via ps2build's own native embed_irx: feature
-    // (see ps2.yaml) instead of the hand-rolled ps2_net_modules.h header used before - matches
-    // httpechotest's exact mechanism (BIN2C-generated, external non-const linkage) rather than a
-    // manually-generated static const array, on the chance the two differed in some way that
-    // mattered (not confirmed which, if either, was the actual fix - see SleepMsApprox() above,
-    // a second real change applied in the same round).
+    // dev9/netman/smap are embedded (see ps2.yaml's embed_irx) again, back in their original
+    // position right after this reset, with USB deferred until AFTER DHCP completes below. Two
+    // separate attempts at interleaving USB with network bring-up - loading USB first so dev9/
+    // netman/smap could be file-loaded instead of embedded (once with usbhdfsd, then again after
+    // reverting to the BDM stack) - BOTH produced a new real-hardware-only stall mid-network-bring-
+    // up that this original, fully-sequential ordering never hit, on two otherwise-unrelated USB
+    // driver stacks. That is itself evidence: it's not something specific to either driver, it is
+    // "USB activity anywhere near network bring-up" - the exact same class of problem this project's
+    // own precedent just below already found once (SIO2MAN/PADMAN moved to AFTER network bring-up
+    // due to IOP resource/thread contention with SMAP's worker threads), just a different pair of
+    // modules. Given a boot-time stall is a worse failure than the ~39KB EE-memory cost the
+    // file-loading attempt was trying to avoid, this reverts to the proven-stable full sequence:
+    // network completely up first, USB loaded only once that's done, matching how this project's
+    // very first working real-hardware boot was structured before any of this reordering began.
     SifInitRpc(0);
     while (!SifIopReset("", 0)) {
     }
@@ -148,16 +311,33 @@ bool platform_init(void) {
     SifLoadFileInit();
     SifInitIopHeap();
     sbv_patch_enable_lmb();
+    ps2_boot_progress(5);
 
-    int dev9_modres = -1, netman_modres = -1, smap_modres = -1;
-    int dev9_ret = SifExecModuleBuffer((void *)dev9_irx, size_dev9_irx, 0, NULL, &dev9_modres);
-    int netman_ret = SifExecModuleBuffer((void *)netman_irx, size_netman_irx, 0, NULL, &netman_modres);
-    int smap_ret = SifExecModuleBuffer((void *)smap_irx, size_smap_irx, 0, NULL, &smap_modres);
-    rs2_log("net: dev9 ret=%d modres=%d netman ret=%d modres=%d smap ret=%d modres=%d\n", dev9_ret,
-             dev9_modres, netman_ret, netman_modres, smap_ret, smap_modres);
+    extern unsigned char dev9_embed_irx[];
+    extern unsigned int size_dev9_embed_irx;
+    extern unsigned char netman_embed_irx[];
+    extern unsigned int size_netman_embed_irx;
+    extern unsigned char smap_embed_irx[];
+    extern unsigned int size_smap_embed_irx;
+
+    int dev9_modres = -1;
+    int dev9_ret = SifExecModuleBuffer(dev9_embed_irx, size_dev9_embed_irx, 0, NULL, &dev9_modres);
+    rs2_log("net: dev9 ret=%d modres=%d\n", dev9_ret, dev9_modres);
+    ps2_boot_progress(15);
+
+    int netman_modres = -1;
+    int netman_ret = SifExecModuleBuffer(netman_embed_irx, size_netman_embed_irx, 0, NULL, &netman_modres);
+    rs2_log("net: netman ret=%d modres=%d\n", netman_ret, netman_modres);
+    ps2_boot_progress(25);
+
+    int smap_modres = -1;
+    int smap_ret = SifExecModuleBuffer(smap_embed_irx, size_smap_embed_irx, 0, NULL, &smap_modres);
+    rs2_log("net: smap ret=%d modres=%d\n", smap_ret, smap_modres);
+    ps2_boot_progress(35);
 
     int netman_init_ret = NetManInit();
     rs2_log("net: NetManInit=%d\n", netman_init_ret);
+    ps2_boot_progress(40);
 
     // Wait for link BEFORE calling ps2ipInit()/ps2ip_setconfig() at all - matching the working
     // reference project's exact real order (httpechotest/main.cpp, same PCSX2/ps2build setup,
@@ -169,6 +349,10 @@ bool platform_init(void) {
         link_state = NetManIoctl(NETMAN_NETIF_IOCTL_GET_LINK_STATUS, NULL, 0, NULL, 0);
         if (i % 20 == 0) {
             rs2_log("net: [%d ms] link_state=%d\n", i * 100, link_state);
+            // Nudges the bar within its 40-50 range across the up-to-100 iterations of this loop -
+            // distinguishes "stuck immediately, iteration 0" from "grinding slowly through many
+            // iterations before eventually timing out", which a single before/after marker can't.
+            ps2_boot_progress(40 + i / 10);
         }
         if (link_state == NETMAN_NETIF_ETH_LINK_STATE_UP) {
             break;
@@ -176,6 +360,7 @@ bool platform_init(void) {
         SleepMsApprox();
     }
     rs2_log("net: final link_state=%d\n", link_state);
+    ps2_boot_progress(50);
 
     struct ip4_addr zero_ip = {0}, zero_mask = {0}, zero_gw = {0};
     int ps2ip_init_ret = ps2ipInit(&zero_ip, &zero_mask, &zero_gw);
@@ -199,6 +384,9 @@ bool platform_init(void) {
         if (i % 20 == 0) {
             rs2_log("net: [%d ms] dhcp_status=%d ip=0x%08x\n", i * 100,
                      current_info.dhcp_status, (unsigned int)current_info.ipaddr.s_addr);
+            // Nudges the bar within its 55-75 range across the up-to-200 iterations of this loop -
+            // same reasoning as the link-wait loop's nudge above.
+            ps2_boot_progress(55 + i / 10);
         }
         if (current_info.dhcp_status == DHCP_STATE_BOUND) {
             break;
@@ -207,51 +395,87 @@ bool platform_init(void) {
     }
     rs2_log("net: dhcp_status=%d ip=0x%08x\n", current_info.dhcp_status,
              (unsigned int)current_info.ipaddr.s_addr);
+    ps2_boot_progress(75);
+
+    // USB mass storage - only loaded now, once networking is fully up, after two separate attempts
+    // at loading it earlier (to let dev9/netman/smap above be file-loaded instead of embedded)
+    // caused a new real-hardware-only stall mid-network-bring-up on two different USB driver
+    // stacks (see this function's own comment above SifInitRpc() for the full account).
+    //
+    // BDM-based (usbd+iomanX+bdm+bdmfs_fatfs+usbmass_bd, ~97KB across 5 modules), not the lighter
+    // usbhdfsd (a single, simple FAT driver) this project briefly switched to: usbhdfsd traded that
+    // memory cost away but turned out to have a real reliability problem under sustained I/O on
+    // real hardware instead, confirmed via TWO independent real-hardware hangs in different code
+    // paths - one opening ~830 separate small map files one at a time, the other seeking through
+    // ~8929 entries inside a SINGLE already-combined ondemand.zip archive. The second case rules out
+    // "too many separate files" as the explanation (that archive was never many files), pointing at
+    // usbhdfsd's own sustained-I/O handling specifically - BDM is what this project's own boot
+    // loader already uses successfully to read client.elf itself, and what a separate, more mature
+    // PS2 homebrew project (OptiJuegos/ReleasePlusPlus) uses in its own shipped real-hardware builds.
+    //
+    // Load order follows that same reference project's own sequencing: iomanX/bdm/bdmfs_fatfs load
+    // first so the *receiving* side (filesystem-over-block-device) is ready, THEN usbd/usbmass_bd
+    // load last, triggering the actual connect/mount once something is already listening for it.
+    extern unsigned char iomanx_embed_irx[];
+    extern unsigned int size_iomanx_embed_irx;
+    extern unsigned char bdm_embed_irx[];
+    extern unsigned int size_bdm_embed_irx;
+    extern unsigned char bdmfs_fatfs_embed_irx[];
+    extern unsigned int size_bdmfs_fatfs_embed_irx;
+    extern unsigned char usbd_embed_irx[];
+    extern unsigned int size_usbd_embed_irx;
+    extern unsigned char usbmass_bd_embed_irx[];
+    extern unsigned int size_usbmass_bd_embed_irx;
+
+    int iomanx_modres = -1;
+    int iomanx_ret = SifExecModuleBuffer(iomanx_embed_irx, size_iomanx_embed_irx, 0, NULL, &iomanx_modres);
+    rs2_log("usb: iomanX ret=%d/%d\n", iomanx_ret, iomanx_modres);
+    ps2_boot_progress(78);
+
+    int bdm_modres = -1;
+    int bdm_ret = SifExecModuleBuffer(bdm_embed_irx, size_bdm_embed_irx, 0, NULL, &bdm_modres);
+    rs2_log("usb: bdm ret=%d/%d\n", bdm_ret, bdm_modres);
+    ps2_boot_progress(80);
+
+    int bdmfs_fatfs_modres = -1;
+    int bdmfs_fatfs_ret = SifExecModuleBuffer(bdmfs_fatfs_embed_irx, size_bdmfs_fatfs_embed_irx, 0, NULL, &bdmfs_fatfs_modres);
+    rs2_log("usb: bdmfs_fatfs ret=%d/%d\n", bdmfs_fatfs_ret, bdmfs_fatfs_modres);
+    ps2_boot_progress(83);
+
+    int usbd_modres = -1;
+    int usbd_ret = SifExecModuleBuffer(usbd_embed_irx, size_usbd_embed_irx, 0, NULL, &usbd_modres);
+    rs2_log("usb: usbd ret=%d/%d\n", usbd_ret, usbd_modres);
+    ps2_boot_progress(86);
+
+    int usbmass_bd_modres = -1;
+    int usbmass_bd_ret = SifExecModuleBuffer(usbmass_bd_embed_irx, size_usbmass_bd_embed_irx, 0, NULL, &usbmass_bd_modres);
+    rs2_log("usb: usbmass_bd ret=%d/%d\n", usbmass_bd_ret, usbmass_bd_modres);
+    ps2_boot_progress(88);
 
     SifLoadModule("rom0:SIO2MAN", 0, NULL);
     SifLoadModule("rom0:PADMAN", 0, NULL);
     padInit(0);
     padPortOpen(0, 0, padDmaBuf);
 
+    // Force DualShock2 analog mode, locked so the player can't toggle it back off with the
+    // physical Analog button. Without this the pad boots in digital mode (confirmed via a real
+    // PCSX2 log showing "AL: Off") - digital buttons still work, but the analog stick axes are
+    // never actually centered/driven, which is what made the right-stick camera read a
+    // permanently off-center value and spin continuously in one direction. Bounded wait (not an
+    // infinite loop) so a real disconnected-controller boot can't hang here - if it times out,
+    // padSetMainMode is still called (harmless no-op on a pad that was never present) and
+    // platform_poll_events() already tolerates a pad that never reaches PAD_STATE_STABLE.
+    for (int i = 0; i < 100; i++) {
+        int state = padGetState(0, 0);
+        if (state == PAD_STATE_STABLE || state == PAD_STATE_FINDCTP1) {
+            break;
+        }
+        SleepMsApprox();
+    }
+    padSetMainMode(0, 0, PAD_MMODE_DUALSHOCK, PAD_MMODE_LOCK);
+    ps2_boot_progress(90);
+
     StartTimerSystemTime();
-
-    dmaKit_init(D_CTRL_RELE_OFF, D_CTRL_MFD_OFF, D_CTRL_STS_UNSPEC, D_CTRL_STD_OFF, D_CTRL_RCYC_8, 1 << DMA_CHANNEL_GIF);
-    dmaKit_chan_init(DMA_CHANNEL_GIF);
-
-    gsGlobal = gsKit_init_global();
-    // This is the physical output framebuffer (640x480, aligned - see the comment above
-    // platform_init()), separate from screenTexture's full 765x503 logical canvas - gsKit scales
-    // between the two when drawing the sprite in platform_update_surface(). gsKit_init_global()'s
-    // own default Width/Height (based on the console's detected video standard) also didn't match
-    // what platform_update_surface() draws into, producing a black screen despite no draw errors,
-    // so this still needs to be set explicitly either way.
-    gsGlobal->Width = SCREEN_FB_WIDTH;
-    gsGlobal->Height = SCREEN_FB_HEIGHT;
-    gsGlobal->PSM = GS_PSM_CT24;
-    // GS only has 4MB of VRAM - a double-buffered framebuffer plus the separate CT32 upload
-    // texture platform_new() allocates below didn't fit ("ERROR: Not enough VRAM for this
-    // allocation!") when both were sized to the (now-abandoned) full 765x503 canvas, and the
-    // resulting failed gsKit_vram_alloc() (silently unchecked) aliased the texture onto the
-    // framebuffer's own VRAM, producing a sheared/torn display. Tried disabling DoubleBuffering to
-    // make room, but that produced a fully black screen instead (most likely gsKit_sync_flip()'s
-    // presentation logic assumes double buffering - gsKit ships prebuilt with no source available
-    // to confirm). Reverted to the standard double-buffered config and shrank the upload texture's
-    // own format instead (see platform_new()'s GS_PSM_CT16 below) - now doubly unnecessary to
-    // revisit since both buffers are also smaller (640x480 instead of 765x503).
-    gsGlobal->DoubleBuffering = GS_SETTING_ON;
-    gsGlobal->ZBuffering = GS_SETTING_OFF;
-    // Once the VRAM allocation above actually succeeded (no more aliasing onto the framebuffer),
-    // the screen went fully black instead of showing the sprite - in both single- and double-
-    // buffered configs, so buffering mode wasn't the real cause after all. PS2 GS has a
-    // well-documented quirk where a texture's alpha (including CT16's 1-bit alpha/mask field) needs
-    // explicit TEXA register expansion to read as opaque - without it, alpha-blended primitives can
-    // render fully transparent. This full-screen background blit never needed blending in the first
-    // place (nothing is ever drawn behind it), so disabling it entirely sidesteps the ambiguity
-    // rather than trying to get TEXA expansion exactly right blind.
-    gsGlobal->PrimAlphaEnable = GS_SETTING_OFF;
-
-    gsKit_init_screen(gsGlobal);
-    gsKit_clear(gsGlobal, GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x00, 0x00));
 
     return true;
 }
@@ -259,7 +483,9 @@ bool platform_init(void) {
 void platform_new(GameShell *shell) {
     // TODO lowmem/audio bring-up (ps2snd/audsrv) - video/input/networking come first per the
     // project's phasing, matches how sdl2.c also skips audio init entirely under _Client.lowmem.
-    (void)shell;
+    // No physical keyboard exists on PS2 - this drives entry/client.c's on-screen virtual keyboard
+    // to auto-open at text-entry focus points instead (see client.h's virtual_keyboard_* fields).
+    shell->has_keyboard = false;
     // Full logical canvas height (SCREEN_HEIGHT, 503 - no alignment requirement), padded width
     // (SCREEN_SRC_WIDTH, 768 - see the comment above platform_init()) - holds the whole 765x503
     // canvas rather than a 640x480 crop of it; platform_update_surface() scales it down to the
@@ -279,6 +505,13 @@ void platform_new(GameShell *shell) {
     // interacting.
     screenTexture.Delayed = 0;
     screenTexture.Mem = memalign(128, gsKit_texture_size(screenTexture.Width, screenTexture.Height, screenTexture.PSM));
+    if (!screenTexture.Mem) {
+        // Same reasoning as the VRAM check below: unchecked, the memset right after this would be a
+        // NULL-pointer write - a real hardware fault with no handler installed, which just freezes
+        // the display rather than crashing loudly, i.e. indistinguishable from a hang. Fail loudly
+        // instead.
+        rs2_error("platform_new: memalign failed for the screen texture (%dx%d) - out of EE RAM\n", screenTexture.Width, screenTexture.Height);
+    }
     screenTexture.Vram = gsKit_vram_alloc(gsGlobal, gsKit_texture_size(screenTexture.Width, screenTexture.Height, screenTexture.PSM), GSKIT_ALLOC_USERBUFFER);
     if (screenTexture.Vram == GSKIT_ALLOC_ERROR) {
         // Unchecked, this silently aliases the texture onto VRAM address 0 - typically the live
@@ -286,7 +519,9 @@ void platform_new(GameShell *shell) {
         // failing loudly. Fail loudly instead.
         rs2_error("platform_new: gsKit_vram_alloc failed for the screen texture (%dx%d) - out of GS VRAM\n", screenTexture.Width, screenTexture.Height);
     }
-    memset(screenTexture.Mem, 0, gsKit_texture_size(screenTexture.Width, screenTexture.Height, screenTexture.PSM));
+    if (screenTexture.Mem) {
+        memset(screenTexture.Mem, 0, gsKit_texture_size(screenTexture.Width, screenTexture.Height, screenTexture.PSM));
+    }
 }
 
 void platform_free(void) {
@@ -352,6 +587,41 @@ void platform_blit_surface(Surface *surface, int x, int y) {
     }
 }
 
+// Software-cursor "restore-under" support - platform_blit_surface() above permanently overwrites
+// screenTexture.Mem (there's no per-frame clear and no alpha), so any small overlay that moves
+// between frames (the virtual cursor in entry/client.c) has to explicitly save what it's about to
+// cover and restore it before moving on, or it leaves a permanent trail on every panel that
+// doesn't happen to redraw itself that frame (sidebar, chatback, background chrome, static
+// title-screen bezel - anything not the always-redrawn 3D viewport). Raw CT16 texels, not RGB -
+// restoring the exact bytes that were already there is lossless and needs no format conversion.
+void platform_save_region(int x, int y, int w, int h, uint16_t *out) {
+    uint16_t *src = (uint16_t *)screenTexture.Mem;
+    for (int row = 0; row < h; row++) {
+        int sy = y + row;
+        for (int col = 0; col < w; col++) {
+            int sx = x + col;
+            out[row * w + col] = (sy < 0 || sy >= SCREEN_HEIGHT || sx < 0 || sx >= SCREEN_WIDTH) ? 0 : src[sy * screenTexture.Width + sx];
+        }
+    }
+}
+
+void platform_restore_region(int x, int y, int w, int h, const uint16_t *in) {
+    uint16_t *dst = (uint16_t *)screenTexture.Mem;
+    for (int row = 0; row < h; row++) {
+        int sy = y + row;
+        if (sy < 0 || sy >= SCREEN_HEIGHT) {
+            continue;
+        }
+        for (int col = 0; col < w; col++) {
+            int sx = x + col;
+            if (sx < 0 || sx >= SCREEN_WIDTH) {
+                continue;
+            }
+            dst[sy * screenTexture.Width + sx] = in[row * w + col];
+        }
+    }
+}
+
 void platform_poll_events(Client *c) {
     int state = padGetState(0, 0);
     if (state != PAD_STATE_STABLE && state != PAD_STATE_FINDCTP1) {
@@ -360,8 +630,9 @@ void platform_poll_events(Client *c) {
 
     padRead(0, 0, &padData);
 
-    // Left stick drives a virtual mouse cursor - TODO: no on-screen cursor sprite drawn yet,
-    // and there's no keyboard equivalent for chat/typing input on this pass.
+    // Left stick drives a virtual mouse cursor - TODO: no on-screen cursor sprite drawn yet.
+    // Text entry is covered by entry/client.c's on-screen virtual keyboard (see has_keyboard
+    // above) - the left stick doubles as its cursor too when the keyboard is open.
     int dx = (padData.ljoy_h - 128) / 24;
     int dy = (padData.ljoy_v - 128) / 24;
     if (dx != 0 || dy != 0) {
@@ -381,12 +652,19 @@ void platform_poll_events(Client *c) {
     static bool circle_was_down = false;
 
     if (cross && !cross_was_down) {
-        c->shell->mouse_click_x = c->shell->mouse_x;
-        c->shell->mouse_click_y = c->shell->mouse_y;
-        c->shell->mouse_click_button = 1;
-        c->shell->mouse_button = 1;
-        if (_InputTracking.enabled) {
-            inputtracking_mouse_pressed(&_InputTracking, c->shell->mouse_x, c->shell->mouse_y, 0);
+        if (c->virtual_keyboard_visible) {
+            // Keyboard intercepts Cross entirely while open, instead of the normal click path -
+            // otherwise a key commit at these screen coordinates could also land on whatever UI
+            // happens to be underneath the overlay (e.g. the login screen's buttons).
+            c->controller_keyboard_confirm_pressed = true;
+        } else {
+            c->shell->mouse_click_x = c->shell->mouse_x;
+            c->shell->mouse_click_y = c->shell->mouse_y;
+            c->shell->mouse_click_button = 1;
+            c->shell->mouse_button = 1;
+            if (_InputTracking.enabled) {
+                inputtracking_mouse_pressed(&_InputTracking, c->shell->mouse_x, c->shell->mouse_y, 0);
+            }
         }
     } else if (!cross && cross_was_down) {
         c->shell->mouse_button = 0;
@@ -412,6 +690,96 @@ void platform_poll_events(Client *c) {
 
     cross_was_down = cross;
     circle_was_down = circle;
+
+    // Right stick drives camera rotation - by setting the SAME shell->action_key[1..4] flags that
+    // K_LEFT/K_RIGHT/K_UP/K_DOWN already set via key_pressed() (see defines.h/gameshell.c), rather
+    // than duplicating client_update_orbit_camera()'s eased-velocity model here. That function
+    // (entry/client.c) already reads these as plain "is this direction held" booleans and already
+    // gates the EVENT_CAMERA_POSITION anti-cheat packet on them - reusing it is free and correct,
+    // whereas re-deriving a second velocity curve from raw stick magnitude would just be a second,
+    // uncoordinated easing curve stacked on top of the existing one for no real benefit (the
+    // existing targets are small, +-24 yaw / +-12 pitch out of a 2048-unit circle).
+    // Deadzone +-40 (of 0-255, center 128): comfortably outside real analog stick idle drift while
+    // still reachable well short of full deflection. Independent per axis, matching how ljoy_h/v
+    // are already handled for the cursor above (not a circular deadzone).
+    const int CAM_DEADZONE = 40;
+    int rh = padData.rjoy_h - 128;
+    int rv = padData.rjoy_v - 128;
+    c->shell->action_key[1] = rh < -CAM_DEADZONE ? 1 : 0; // yaw left
+    c->shell->action_key[2] = rh > CAM_DEADZONE ? 1 : 0;  // yaw right
+    c->shell->action_key[3] = rv < -CAM_DEADZONE ? 1 : 0; // pitch up (zoom in/tilt down)
+    c->shell->action_key[4] = rv > CAM_DEADZONE ? 1 : 0;  // pitch down (zoom out/tilt up)
+
+    // L1/R1 cycle sidebar tabs (see handleControllerTabInput() in entry/client.c) - edge-detected
+    // (not level, unlike the camera above) so holding the button doesn't rapid-fire tab changes;
+    // a physical mouse click, what this otherwise mirrors, is already a single discrete event.
+    bool l1 = !(padData.btns & PAD_L1);
+    bool r1 = !(padData.btns & PAD_R1);
+    static bool l1_was_down = false, r1_was_down = false;
+    if (r1 && !r1_was_down) {
+        c->controller_tab_step = 1;
+    }
+    if (l1 && !l1_was_down) {
+        c->controller_tab_step = -1;
+    }
+    l1_was_down = l1;
+    r1_was_down = r1;
+
+    // Triangle/Square/Select/Start - one-shot press-edge flags, meaning assigned and consumed in
+    // handleControllerButtonInput()/the virtual keyboard logic in entry/client.c (kept there so
+    // every button's real-world MEANING lives in one platform-agnostic place, while only the
+    // hardware bit lives here).
+    bool triangle = !(padData.btns & PAD_TRIANGLE);
+    bool square = !(padData.btns & PAD_SQUARE);
+    bool select = !(padData.btns & PAD_SELECT);
+    bool start = !(padData.btns & PAD_START);
+    static bool triangle_was_down = false, square_was_down = false, select_was_down = false, start_was_down = false;
+    if (triangle && !triangle_was_down) {
+        c->controller_back_pressed = true;
+    }
+    if (square && !square_was_down) {
+        c->controller_inventory_pressed = true;
+    }
+    if (select && !select_was_down) {
+        c->controller_snap_camera_pressed = true;
+    }
+    if (start && !start_was_down) {
+        c->controller_start_pressed = true;
+    }
+    triangle_was_down = triangle;
+    square_was_down = square;
+    select_was_down = select;
+    start_was_down = start;
+
+    // L2/R2 - fine zoom, held (level, not edge) since it's a continuous nudge rather than a
+    // discrete action. Independent of the right stick's pitch-based zoom, for finer control.
+    bool l2 = !(padData.btns & PAD_L2);
+    bool r2 = !(padData.btns & PAD_R2);
+    c->controller_zoom_bias = r2 ? 1 : (l2 ? -1 : 0);
+
+    // D-pad - only meaningful to the virtual keyboard's grid navigation (dead input otherwise);
+    // edge-detected like the tab triggers above, one step per press.
+    bool dpad_up = !(padData.btns & PAD_UP);
+    bool dpad_down = !(padData.btns & PAD_DOWN);
+    bool dpad_left = !(padData.btns & PAD_LEFT);
+    bool dpad_right = !(padData.btns & PAD_RIGHT);
+    static bool dpad_up_was_down = false, dpad_down_was_down = false, dpad_left_was_down = false, dpad_right_was_down = false;
+    if (dpad_up && !dpad_up_was_down) {
+        c->controller_dpad_y = -1;
+    }
+    if (dpad_down && !dpad_down_was_down) {
+        c->controller_dpad_y = 1;
+    }
+    if (dpad_left && !dpad_left_was_down) {
+        c->controller_dpad_x = -1;
+    }
+    if (dpad_right && !dpad_right_was_down) {
+        c->controller_dpad_x = 1;
+    }
+    dpad_up_was_down = dpad_up;
+    dpad_down_was_down = dpad_down;
+    dpad_left_was_down = dpad_left;
+    dpad_right_was_down = dpad_right;
 }
 
 uint64_t rs2_now(void) {

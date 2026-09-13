@@ -106,9 +106,59 @@ static void client_build_scene(Client *c);
 static void client_clear_caches(void);
 static void client_update_orbit_camera(Client *c);
 static int8_t *client_load_map_file(const char *kind, int mapsquareX, int mapsquareZ, int *out_size);
+static void client_cache_file_path(const char *filename_only, char *out, size_t out_size);
+#ifndef __PS2__
 static int8_t *client_load_raw_file(const char *filename_only, int *out_size);
+#endif
 static inline bool component_valid(int id);
 static inline Component *component_get(int id);
+static void handleControllerTabInput(Client *c);
+static void handleControllerButtonInput(Client *c);
+static void virtual_keyboard_maybe_open(Client *c, int target);
+static void virtual_keyboard_close(Client *c, bool submit);
+static void virtual_keyboard_handle_input(Client *c);
+static void virtual_keyboard_draw(Client *c);
+static void virtual_cursor_draw(Client *c);
+
+#ifdef __PS2__
+// See platform_save_region()/platform_restore_region() in platform/ps2.c - used by
+// virtual_cursor_draw() below to avoid leaving a permanent cursor trail on panels that don't
+// redraw themselves every frame.
+void platform_save_region(int x, int y, int w, int h, uint16_t *out);
+void platform_restore_region(int x, int y, int w, int h, const uint16_t *in);
+
+// See platform/ps2.c - returns "mass:/" once a USB mass-storage device carrying the game's own
+// rom/cache/client/... tree is detected (real hardware / a USB-stick boot), or "" to keep using
+// today's plain relative paths (which PCSX2's host: dev shortcut transparently redirects).
+const char *ps2_cache_prefix(void);
+#endif
+
+#ifdef __PS2__
+// PHASE 4 audit instrumentation: net wait (clientstream.c) already ruled out as the dominant cost
+// inside client_update_game() - update time is genuinely CPU-bound. Split its main phases so the
+// next PS2 PERF report says which one, instead of guessing from code reading alone (that
+// discipline already found two real bugs this session - the ondemand.zip residency issue and the
+// player double-free - worth applying again here rather than reasoning blind about a huge function).
+typedef struct {
+    int64_t packets_ms;
+    int64_t players_ms;
+    int64_t npcs_ms;
+    int64_t chats_ms;
+    int64_t mergelocs_ms;
+    int64_t getnpcpos_ms;
+    int64_t getplayer_ms;
+} TickPhaseAccum;
+static TickPhaseAccum _TickPhase = {0};
+
+int64_t client_tick_packets_ms(void) { return _TickPhase.packets_ms; }
+int64_t client_tick_players_ms(void) { return _TickPhase.players_ms; }
+int64_t client_tick_npcs_ms(void) { return _TickPhase.npcs_ms; }
+int64_t client_tick_chats_ms(void) { return _TickPhase.chats_ms; }
+int64_t client_tick_mergelocs_ms(void) { return _TickPhase.mergelocs_ms; }
+int64_t client_tick_getnpcpos_ms(void) { return _TickPhase.getnpcpos_ms; }
+int64_t client_tick_getplayer_ms(void) { return _TickPhase.getplayer_ms; }
+void client_tick_phase_reset(void) { _TickPhase = (TickPhaseAccum){0}; }
+#endif
 
 void client_init_global(void) {
     int acc = 0;
@@ -193,6 +243,8 @@ void client_load(Client *c) {
             snprintf(crc_filename, sizeof(crc_filename), "cache/client/crc.");
 #elif defined(NXDK)
             snprintf(crc_filename, sizeof(crc_filename), "D:\\cache\\client\\crc");
+#elif defined(__PS2__)
+            snprintf(crc_filename, sizeof(crc_filename), "%srom/cache/client/crc", ps2_cache_prefix());
 #else
             snprintf(crc_filename, sizeof(crc_filename), "rom/cache/client/crc");
 #endif
@@ -279,6 +331,21 @@ void client_load(Client *c) {
     // only so the NULL-check above still passes). Not fatal if missing: model_from_id() falls back
     // to the old models.jag-based path (producing wrong/missing geometry, not a crash) when
     // ondemand isn't loaded, matching how every other best-effort fallback in this file behaves.
+#ifdef __PS2__
+    // ondemand.zip is ~6MB - mz_zip_reader_init_mem's whole-file-resident approach (every other
+    // platform, below) would alone consume ~19% of PS2's fixed 32MB EE RAM for the rest of the
+    // session, permanently, on top of everything else client_load() holds resident. Open it
+    // straight off disk instead (mz_zip_reader_init_file - real stdio fopen/fseek/fread under the
+    // hood, the same file API client_load_raw_file() already uses for every other file on this
+    // platform): only the zip's own central directory (entry names/offsets - tens of KB, not
+    // entry payloads) stays resident. ondemand_get()/ondemand_get_by_index() are unchanged - miniz
+    // reads whichever entry is actually requested straight from disk at the point it's needed,
+    // which is already the same "lazy, on first real use" moment those callers request it at.
+    char ondemand_zip_path[PATH_MAX];
+    client_cache_file_path("ondemand.zip", ondemand_zip_path, sizeof(ondemand_zip_path));
+    ondemand_load_file(ondemand_zip_path);
+    rs2_log("MEM after streaming ondemand.zip (file-backed, not resident): used=%d free=%d\n", mallinfo().uordblks, mallinfo().fordblks);
+#else
     int ondemand_zip_size = 0;
     int8_t *ondemand_zip_data = client_load_raw_file("ondemand.zip", &ondemand_zip_size);
     if (ondemand_zip_data) {
@@ -288,6 +355,7 @@ void client_load(Client *c) {
         // on success, ondemand_load() keeps ondemand_zip_data alive for the client's lifetime
         // (miniz's mz_zip_reader_init_mem does not copy the buffer) - do not free it here.
     }
+#endif
 
     c->levelTileFlags = calloc(4, sizeof(*c->levelTileFlags));
     c->levelHeightmap = calloc(4, sizeof(*c->levelHeightmap));
@@ -616,31 +684,52 @@ void client_load(Client *c) {
     malloc_stats();
     if (!bump_allocator_init(8 << 20)) {
 #elif defined(__PS2__)
-    // component_unpack() alone was leaving only a few hundred KB free by the time this runs (even
-    // after reclaiming inter/media/wordenc just above) - the dreamcast/nds 8MB size still isn't
-    // realistic here. 1MB was tried first as a guess and real usage overflowed it by only ~1.2KB
-    // while building the very first scene after login (this allocator is reset once per scene
-    // rebuild - see bump_allocator_reset() in client_clear_caches() - so it's a per-load budget,
-    // not cumulative). Doubling to 2MB was tried next and made things WORSE: mallinfo() reports
-    // well under 1MB truly free at this point (PS2 has only 32MB total EE RAM and ~27.6MB was
-    // already resident here), so the extra 1MB apparently pushed something else (stack or a later
-    // buffer) past the real physical ceiling - instead of the clean "Allocator full" error, this
-    // corrupted something hard enough to produce a BIOS-level "# Restart." (real HW/memory reset)
-    // followed by "DMAC(5) Handler does not exist." and a hang. Going with a small margin over the
-    // actual observed overflow instead - 1MB + 128KB, i.e. ~100x the ~1.2KB shortfall - rather than
-    // another full MB we don't have room for.
-    // Turns out the real requirement isn't fixed: 1MB+128KB (1,179,648) overflowed by 4 bytes, then
-    // 1MB+192KB (1,245,184) overflowed by 12, then 1MB+512KB (1,572,864) overflowed by 40 - all
-    // clean "Allocator full" errors. Tried reasoning our way to 2MB next (baseline `used` math
-    // suggested it should fit with room to spare) and got the corrupting "# Restart." /
-    // "DMAC(5) Handler does not exist." failure mode again - twice now at exactly 2MB. Whatever the
-    // real cause, it's evidently not just cumulative heap pressure (the math said this should've
-    // been safe) - something about a single allocation request that size specifically breaks
-    // something. Backing off to a small, proven increment from the last value that gave a clean
-    // (if insufficient) overflow instead of trying to reason our way to a bigger jump again:
-    // 1MB+512KB (1,572,864, overflowed by 40 bytes) + another 128KB.
+    // 2026-09-13 update: ondemand.zip (~6MB) used to be read whole into a permanently-resident heap
+    // buffer (mz_zip_reader_init_mem) - switched to mz_zip_reader_init_file (see ondemand_load_file()
+    // call site above) so only its small central-directory index stays resident. Confirmed via
+    // mallinfo() this genuinely reclaims ~5.9MB: `used` at this exact checkpoint dropped from
+    // ~26.8MB to ~20.9MB, real data from a real boot, not projected. That directly changes the risk
+    // calculus for this arena's size - the corrupting "# Restart." failure mode described below was
+    // observed at a *total footprint* (baseline used + arena capacity) of ~28.8MB (26.8MB + 2MB);
+    // the largest *clean* (non-corrupting) attempt was ~28.4MB (26.8MB + 1.57MB). That ~300-400KB
+    // band is the closest real data point to wherever the actual physical ceiling is - nothing here
+    // pins it down more precisely than that, and this is still a step taken without being able to
+    // run the emulator directly in this pass, so it is deliberately conservative rather than pushing
+    // all the way to that observed edge.
+    //
+    // 2026-09-13, round 2: gave the 3MB size above a real boot. Result ruled out "just needs a
+    // slightly bigger arena": alloc_count went from 32,455 (at 1,703,936 cap) to 62,209 (at
+    // 3,145,728 cap) - almost exactly doubling in lockstep with the arena itself (avg ~51 bytes/
+    // alloc BOTH times). A bump allocator has no idea how much capacity remains until it fails, so
+    // it always fails on whatever the next allocation happens to be - the fact both overflow amounts
+    // (172 bytes, then 288 bytes) were tiny relative to capacity is a property of THIS allocator's
+    // failure mode, not evidence the scene was nearly finished either time. The real signal is that
+    // consumption scales linearly with whatever capacity you give it, with no sign yet of leveling
+    // off - i.e. this region's real total requirement is unknown and could be substantially larger
+    // than anything tried so far. That's not necessarily a bug: this exact bump arena is 16-32MB on
+    // every non-lowmem platform for the same purpose (temporary per-scene model/loc geometry), and
+    // this map region (real evidence: 60K+ small allocations and counting) may simply be a busy one.
+    //
+    // Given that, the only real lever left without deeper surgery (compacting model.c's int32
+    // vertex/face arrays to int16, or reducing simultaneously-loaded region count - see the PHASE 2
+    // audit notes, not attempted this round) is to spend more of the headroom the ondemand.zip fix
+    // freed, and see where it actually lands. Safety ceiling estimate unchanged from above: total
+    // footprint (used + capacity) corrupted at ~28.8MB and stayed clean at ~28.4MB, both under the
+    // OLD ~26.8MB baseline. At the NEW ~20.9MB baseline, 6MB keeps total footprint at ~26.9MB - a
+    // full 1.5MB under the clean data point, not just under the corruption one, while giving 2x the
+    // arena of the last (still-insufficient) attempt. bump_allocator_reset()'s new peak-usage log
+    // (allocator.c) will show whether this scene actually completes now, or keeps scaling - if it's
+    // still not enough, the next move should be the model-compaction/region-count option above, not
+    // another blind capacity jump toward the ceiling.
+    //
+    // History of prior attempts, kept for context: 1MB+128KB (1,179,648) overflowed by 4 bytes, then
+    // 1MB+192KB (1,245,184) overflowed by 12, then 1MB+512KB (1,572,864) overflowed by 40, then 3MB
+    // (3,145,728) overflowed by 288 - all clean "Allocator full" errors, all but the last under the
+    // OLD baseline. Tried reasoning our way to 2MB once under the OLD baseline (math suggested it
+    // should fit with room to spare) and got the corrupting "# Restart." / "DMAC(5) Handler does not
+    // exist." failure mode instead - twice.
     rs2_log("MEM before bump allocator: used=%d free=%d\n", mallinfo().uordblks, mallinfo().fordblks);
-    if (!bump_allocator_init((1 << 20) + (640 << 10))) {
+    if (!bump_allocator_init(6 << 20)) {
 #else
     if (!(_Client.lowmem ? bump_allocator_init(16 << 20) : bump_allocator_init(32 << 20))) {
 #endif
@@ -1058,6 +1147,10 @@ void client_update(Client *c) {
     }
 
     _Client.loop_cycle++;
+    // Runs unconditionally (not just from client_update_game()'s per-tick input block) since the
+    // virtual keyboard also has to work on the login screen, which goes through
+    // client_update_title() instead and never reaches that block.
+    virtual_keyboard_handle_input(c);
     if (c->ingame) {
         client_update_game(c);
     } else {
@@ -1952,6 +2045,7 @@ bool handleInterfaceAction(Client *c, Component *com) {
         c->social_input[0] = '\0';
         c->social_action = 1;
         strcpy(c->social_message, "Enter name of friend to add to list");
+        virtual_keyboard_maybe_open(c, 3);
     }
 
     if (clientCode == 202) {
@@ -1961,6 +2055,7 @@ bool handleInterfaceAction(Client *c, Component *com) {
         c->social_input[0] = '\0';
         c->social_action = 2;
         strcpy(c->social_message, "Enter name of friend to delete from list");
+        virtual_keyboard_maybe_open(c, 3);
     }
 
     if (clientCode == 205) {
@@ -1975,6 +2070,7 @@ bool handleInterfaceAction(Client *c, Component *com) {
         c->social_input[0] = '\0';
         c->social_action = 4;
         strcpy(c->social_message, "Enter name of player to add to list");
+        virtual_keyboard_maybe_open(c, 3);
     }
 
     if (clientCode == 502) {
@@ -1984,6 +2080,7 @@ bool handleInterfaceAction(Client *c, Component *com) {
         c->social_input[0] = '\0';
         c->social_action = 5;
         strcpy(c->social_message, "Enter name of player to delete from list");
+        virtual_keyboard_maybe_open(c, 3);
     }
 
     if (clientCode >= 300 && clientCode <= 313) {
@@ -2290,7 +2387,7 @@ static void updateForceMovement(PathingEntity *entity) {
 }
 
 static void startForceMovement(PathingEntity *entity) {
-    if (entity->forceMoveStartCycle == _Client.loop_cycle || entity->primarySeqId == -1 || entity->primarySeqDelay != 0 || entity->primarySeqCycle + 1 > _SeqType.instances[entity->primarySeqId]->delay[entity->primarySeqFrame]) {
+    if (entity->forceMoveStartCycle == _Client.loop_cycle || entity->primarySeqId == -1 || entity->primarySeqDelay != 0 || entity->primarySeqCycle + 1 > seqtype_get_duration(_SeqType.instances[entity->primarySeqId], entity->primarySeqFrame)) {
         int duration = entity->forceMoveStartCycle - entity->forceMoveEndCycle;
         int delta = _Client.loop_cycle - entity->forceMoveEndCycle;
         int dx0 = entity->forceMoveStartSceneTileX * 128 + entity->size * 64;
@@ -2516,7 +2613,7 @@ static void updateSequences(PathingEntity *e) {
     if (e->secondarySeqId != -1) {
         seq = _SeqType.instances[e->secondarySeqId];
         e->secondarySeqCycle++;
-        if (e->secondarySeqFrame < seq->frameCount && e->secondarySeqCycle > seq->delay[e->secondarySeqFrame]) {
+        if (e->secondarySeqFrame < seq->frameCount && e->secondarySeqCycle > seqtype_get_duration(seq, e->secondarySeqFrame)) {
             e->secondarySeqCycle = 0;
             e->secondarySeqFrame++;
         }
@@ -2529,8 +2626,8 @@ static void updateSequences(PathingEntity *e) {
     if (e->primarySeqId != -1 && e->primarySeqDelay == 0) {
         seq = _SeqType.instances[e->primarySeqId];
         e->primarySeqCycle++;
-        while (e->primarySeqFrame < seq->frameCount && e->primarySeqCycle > seq->delay[e->primarySeqFrame]) {
-            e->primarySeqCycle -= seq->delay[e->primarySeqFrame];
+        while (e->primarySeqFrame < seq->frameCount && e->primarySeqCycle > seqtype_get_duration(seq, e->primarySeqFrame)) {
+            e->primarySeqCycle -= seqtype_get_duration(seq, e->primarySeqFrame);
             e->primarySeqFrame++;
         }
 
@@ -2559,8 +2656,8 @@ static void updateSequences(PathingEntity *e) {
 
         seq = _SpotAnimType.instances[e->spotanimId]->seq;
         e->spotanimCycle++;
-        while (e->spotanimFrame < seq->frameCount && e->spotanimCycle > seq->delay[e->spotanimFrame]) {
-            e->spotanimCycle -= seq->delay[e->spotanimFrame];
+        while (e->spotanimFrame < seq->frameCount && e->spotanimCycle > seqtype_get_duration(seq, e->spotanimFrame)) {
+            e->spotanimCycle -= seqtype_get_duration(seq, e->spotanimFrame);
             e->spotanimFrame++;
         }
 
@@ -3500,6 +3597,7 @@ static void useMenuOption(Client *cl, int optionId) {
                 cl->social_action = 3;
                 cl->social_name37 = cl->friendName37[friend];
                 sprintf(cl->social_message, "Enter message to send to %s", cl->friendName[friend]);
+                virtual_keyboard_maybe_open(cl, 3);
             }
         }
     } else if (action == 55) {
@@ -4474,6 +4572,421 @@ static void handleTabInput(Client *c) {
     }
 }
 
+// L1/R1 sidebar tab cycling - mirrors handleTabInput()'s exact 3-line effect above (redraw_sidebar/
+// selected_tab/redraw_sideicons), stepping to the next/prev tab whose slot isn't -1 rather than
+// hit-testing pixel rects. c->controller_tab_step is a one-shot +-1 set by ps2.c on L1/R1 press.
+static void handleControllerTabInput(Client *c) {
+    if (c->controller_tab_step == 0) {
+        return;
+    }
+
+    int step = c->controller_tab_step;
+    c->controller_tab_step = 0;
+
+    int next = c->selected_tab;
+    for (int tries = 0; tries < 14; tries++) {
+        next = (next + step + 14) % 14;
+        if (c->tab_interface_id[next] != -1) {
+            c->redraw_sidebar = true;
+            c->selected_tab = next;
+            c->redraw_sideicons = true;
+            break;
+        }
+    }
+}
+
+// The rest of the controller button map (see src/platform/ps2.c for which hardware bit sets each
+// one-shot/level field). Each button's real-world meaning lives here, platform-agnostically -
+// ps2.c only knows about hardware bits, never about tabs/camera/chat.
+static void handleControllerButtonInput(Client *c) {
+    if (c->controller_inventory_pressed) {
+        c->controller_inventory_pressed = false;
+        if (c->tab_interface_id[3] != -1) {
+            c->redraw_sidebar = true;
+            c->selected_tab = 3;
+            c->redraw_sideicons = true;
+        }
+    }
+
+    if (c->controller_snap_camera_pressed) {
+        c->controller_snap_camera_pressed = false;
+        if (c->local_player) {
+            // Immediate snap rather than easing toward it - a deliberate, explicit "orient behind
+            // me" reset should feel instant, not glide like the stick-driven rotation does.
+            c->orbit_camera_yaw = c->local_player->pathing_entity.yaw & 0x7ff;
+        }
+    }
+
+    if (c->controller_zoom_bias != 0) {
+        // Same clamp as client_update_orbit_camera()'s own pitch integration (entry/client.c) -
+        // this is a supplementary fine-zoom nudge independent of the right stick's pitch axis.
+        c->orbit_camera_pitch += c->controller_zoom_bias * 2;
+        if (c->orbit_camera_pitch < 128) {
+            c->orbit_camera_pitch = 128;
+        }
+        if (c->orbit_camera_pitch > 383) {
+            c->orbit_camera_pitch = 383;
+        }
+    }
+
+    if (c->controller_start_pressed) {
+        c->controller_start_pressed = false;
+        if (c->virtual_keyboard_visible) {
+            virtual_keyboard_close(c, true);
+        } else if (c->ingame && c->chat_interface_id == -1 && !c->show_social_input && !c->chatback_input_open) {
+            // "Press Start to type" - the PS2-equivalent of pressing any key to start typing,
+            // since there's no physical keyboard to just start pressing.
+            virtual_keyboard_maybe_open(c, 2);
+        }
+    }
+
+    if (c->controller_back_pressed) {
+        // Left unconsumed (and untouched) here while the keyboard is open - virtual_keyboard_
+        // handle_input() consumes it itself, as Backspace, in that case. This guard makes the two
+        // consumers order-independent regardless of which is called first each tick.
+        if (!c->virtual_keyboard_visible) {
+            c->controller_back_pressed = false;
+            if (c->menu_visible) {
+                c->menu_visible = false;
+            } else if (c->modal_message[0]) {
+                c->modal_message[0] = '\0';
+                c->redraw_chatback = true;
+            } else if (c->show_social_input) {
+                c->show_social_input = false;
+                c->redraw_chatback = true;
+            } else if (c->chatback_input_open) {
+                c->chatback_input_open = false;
+                c->redraw_chatback = true;
+            }
+        }
+    }
+}
+
+// On-screen virtual keyboard - QWERTY, 6 rows (digits, QWERTYUIOP, ASDFGHJKL, ZXCVBNM, punctuation,
+// function row). Letter rows store both cases explicitly (avoids pulling in <ctype.h> for two
+// chars' worth of case-folding); digits/punctuation/function row are case-independent.
+#define VKB_COLS 10
+#define VKB_ROWS 6
+#define VKB_CELL_W 28
+#define VKB_CELL_H 20
+#define VKB_FN_COUNT 5
+
+static const char *const VKB_ROW_UPPER[VKB_ROWS - 1] = {"1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM", ".,!?'-"};
+static const char *const VKB_ROW_LOWER[VKB_ROWS - 1] = {"1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm", ".,!?'-"};
+static const char *const VKB_FN_LABELS[VKB_FN_COUNT] = {"Shift", "Space", "Back", "Cancel", "Done"};
+
+static int vkb_row_len(int row) {
+    if (row == 5) {
+        return VKB_FN_COUNT;
+    }
+    return (int)strlen(VKB_ROW_UPPER[row]);
+}
+
+static char vkb_row_char(Client *c, int row, int col) {
+    const char *src = c->virtual_keyboard_shift ? VKB_ROW_UPPER[row] : VKB_ROW_LOWER[row];
+    return src[col];
+}
+
+// Row 0/1 (10 cols) span the full grid width; shorter rows are centered within it; the function
+// row (5 wide cells) also spans the full width. This mirrors a real staggered keyboard layout
+// rather than a plain uniform grid.
+static void vkb_cell_rect(Client *c, int row, int col, int *out_x, int *out_y, int *out_w, int *out_h) {
+    int grid_w = VKB_COLS * VKB_CELL_W;
+    int origin_x = c->shell->screen_width / 2 - grid_w / 2;
+    int origin_y = c->shell->screen_height - VKB_ROWS * VKB_CELL_H - 10;
+
+    if (row == 5) {
+        int cell_w = grid_w / VKB_FN_COUNT;
+        *out_x = origin_x + col * cell_w;
+        *out_w = cell_w;
+    } else {
+        int n = vkb_row_len(row);
+        int row_w = n * VKB_CELL_W;
+        *out_x = origin_x + (grid_w - row_w) / 2 + col * VKB_CELL_W;
+        *out_w = VKB_CELL_W;
+    }
+    *out_y = origin_y + row * VKB_CELL_H;
+    *out_h = VKB_CELL_H;
+}
+
+static void vkb_commit_cell(Client *c, int row, int col) {
+    if (row == 5) {
+        switch (col) {
+            case 0: // Shift
+                c->virtual_keyboard_shift = !c->virtual_keyboard_shift;
+                break;
+            case 1: // Space
+                key_pressed(c->shell, 0, ' ');
+                break;
+            case 2: // Backspace
+                key_pressed(c->shell, 8, 8);
+                break;
+            case 3: // Cancel
+                virtual_keyboard_close(c, false);
+                break;
+            case 4: // Done
+                virtual_keyboard_close(c, true);
+                break;
+        }
+        return;
+    }
+
+    char ch = vkb_row_char(c, row, col);
+    key_pressed(c->shell, 0, (int)ch);
+}
+
+static void virtual_keyboard_maybe_open(Client *c, int target) {
+    if (c->shell->has_keyboard) {
+        return;
+    }
+    c->virtual_keyboard_visible = true;
+    c->virtual_keyboard_target = target;
+    c->virtual_keyboard_cursor_row = 0;
+    c->virtual_keyboard_cursor_col = 0;
+    c->virtual_keyboard_shift = false;
+
+    // Warp the shared stick-cursor onto cell (0,0) too - virtual_keyboard_handle_input()'s hover
+    // tracking runs every tick and will otherwise immediately overwrite cursor_row/col above from
+    // wherever shell->mouse_x/mouse_y was last left (e.g. mid-viewport from walking around before
+    // the keyboard opened), which can coincidentally fall inside a totally unrelated grid cell and
+    // silently mis-highlight it the instant the overlay appears.
+    int x, y, w, h;
+    vkb_cell_rect(c, 0, 0, &x, &y, &w, &h);
+    c->shell->mouse_x = x + w / 2;
+    c->shell->mouse_y = y + h / 2;
+}
+
+static void virtual_keyboard_close(Client *c, bool submit) {
+    if (submit) {
+        switch (c->virtual_keyboard_target) {
+            case 0:
+                // Username done - advance to the password field the same way physical Tab/Enter
+                // does in client_update_title()'s own key handling, and keep the keyboard open.
+                key_pressed(c->shell, 9, 9);
+                c->virtual_keyboard_target = 1;
+                c->virtual_keyboard_shift = false;
+                return;
+            case 1:
+                // The login screen has no physical "submit" key - Tab/Enter there only toggle
+                // fields (see client_update_title()) - so mirror the Login button's click path
+                // directly. client_login() force-closes the keyboard itself on entry.
+                client_login(c, c->username, c->password, false);
+                break;
+            default:
+                // Chat/social/chatback all already treat Enter as submit-and-clear.
+                key_pressed(c->shell, 13, 13);
+                break;
+        }
+    } else if (c->show_social_input) {
+        // Cancelling has to back out of the field it was covering too, the same way Triangle
+        // does when the keyboard isn't open - otherwise the overlay disappears but the field
+        // stays open with no other way to close it.
+        c->show_social_input = false;
+        c->redraw_chatback = true;
+    } else if (c->chatback_input_open) {
+        c->chatback_input_open = false;
+        c->redraw_chatback = true;
+    }
+
+    c->virtual_keyboard_visible = false;
+    c->virtual_keyboard_shift = false;
+
+    // The keyboard panel is static (bottom of the screen) and fully repaints itself every frame
+    // while open, so it never trails on its own - but the moment it closes, nothing else is going
+    // to redraw that region on its own initiative (sidebar/chatback/background chrome only redraw
+    // when their own dirty flags are set), so the last-drawn keyboard image would otherwise stay
+    // permanently baked into the screen. Force one full non-viewport redraw to clear it - a
+    // one-time cost on close, not a per-frame one. (No-op while not in-game/not visible; the title
+    // screen already redraws everything unconditionally every frame on its own.)
+    c->redraw_background = true;
+}
+
+static void virtual_keyboard_handle_input(Client *c) {
+    // These one-shots are consumed exactly once per tick regardless of visibility, so a stale
+    // press from before the keyboard opened (or after it closed) never leaks into a later session.
+    int dpad_x = c->controller_dpad_x;
+    int dpad_y = c->controller_dpad_y;
+    c->controller_dpad_x = 0;
+    c->controller_dpad_y = 0;
+    bool confirm = c->controller_keyboard_confirm_pressed;
+    c->controller_keyboard_confirm_pressed = false;
+
+    if (!c->virtual_keyboard_visible) {
+        return;
+    }
+
+    // The left-stick-driven cursor (shell->mouse_x/mouse_y) hovers a cell just by being inside
+    // it - converges on the same cursor_row/cursor_col the D-pad drives, so either input method
+    // works interchangeably for both highlighting and (via controller_keyboard_confirm_pressed)
+    // committing.
+    for (int row = 0; row < VKB_ROWS; row++) {
+        int len = vkb_row_len(row);
+        for (int col = 0; col < len; col++) {
+            int x, y, w, h;
+            vkb_cell_rect(c, row, col, &x, &y, &w, &h);
+            if (c->shell->mouse_x >= x && c->shell->mouse_x < x + w && c->shell->mouse_y >= y && c->shell->mouse_y < y + h) {
+                c->virtual_keyboard_cursor_row = row;
+                c->virtual_keyboard_cursor_col = col;
+            }
+        }
+    }
+
+    if (dpad_y != 0) {
+        int row = c->virtual_keyboard_cursor_row + dpad_y;
+        if (row < 0) {
+            row = 0;
+        }
+        if (row >= VKB_ROWS) {
+            row = VKB_ROWS - 1;
+        }
+        c->virtual_keyboard_cursor_row = row;
+        int len = vkb_row_len(row);
+        if (c->virtual_keyboard_cursor_col >= len) {
+            c->virtual_keyboard_cursor_col = len - 1;
+        }
+    }
+
+    if (dpad_x != 0) {
+        int len = vkb_row_len(c->virtual_keyboard_cursor_row);
+        int col = c->virtual_keyboard_cursor_col + dpad_x;
+        if (col < 0) {
+            col = 0;
+        }
+        if (col >= len) {
+            col = len - 1;
+        }
+        c->virtual_keyboard_cursor_col = col;
+    }
+
+    // Backspace here (not in handleControllerButtonInput()) - that function deliberately leaves
+    // controller_back_pressed unconsumed while the keyboard is visible for exactly this purpose.
+    if (c->controller_back_pressed) {
+        c->controller_back_pressed = false;
+        key_pressed(c->shell, 8, 8);
+    }
+
+    if (confirm) {
+        vkb_commit_cell(c, c->virtual_keyboard_cursor_row, c->virtual_keyboard_cursor_col);
+    }
+}
+
+// pix2d_fill_rect()/pix2d_hline()/etc. all write into whatever buffer is currently pix2d_bind()-ed
+// (a single global draw target, _Pix2D - see pix2d.c). client_draw_scene() (world3d_draw() and
+// friends) relies on that staying bound to c->area_viewport CONTINUOUSLY ACROSS FRAMES - it never
+// re-binds itself before drawing. Any temporary rebind elsewhere must save and restore the exact
+// previous binding (matching the established pattern in objtype.c's icon builder), or the very
+// next frame's 3D scene render silently writes into the wrong buffer - confirmed as the actual
+// cause of a real regression here (screen frozen except for whatever drew into its own buffer).
+typedef struct {
+    int *pixels, width, height, left, top, right, bottom;
+} Pix2DBinding;
+
+static Pix2DBinding pix2d_save_binding(void) {
+    Pix2DBinding saved = {_Pix2D.pixels, _Pix2D.width, _Pix2D.height, _Pix2D.left, _Pix2D.top, _Pix2D.right, _Pix2D.bottom};
+    return saved;
+}
+
+static void pix2d_restore_binding(Pix2DBinding saved) {
+    pix2d_bind(saved.width, saved.height, saved.pixels);
+    pix2d_set_clipping(saved.bottom, saved.right, saved.top, saved.left);
+}
+
+static void virtual_keyboard_draw(Client *c) {
+    // Every visible panel in this engine (sidebar, chatback, the login screen text) composites
+    // onto the real screen by binding its own dedicated PixMap, drawing into it, then calling
+    // pixmap_draw() -> platform_blit_surface(). Do the same here: a panel spanning the full screen
+    // width (so vkb_cell_rect()'s absolute x already lines up as local x with no translation
+    // needed) but only as tall as the keyboard itself.
+    Pix2DBinding saved = pix2d_save_binding();
+
+    static PixMap *vkb_panel = NULL;
+    int panel_h = VKB_ROWS * VKB_CELL_H;
+    if (!vkb_panel) {
+        vkb_panel = pixmap_new(c->shell->screen_width, panel_h);
+    }
+    pixmap_bind(vkb_panel);
+    int origin_y = c->shell->screen_height - panel_h - 10;
+
+    for (int row = 0; row < VKB_ROWS; row++) {
+        int len = vkb_row_len(row);
+        for (int col = 0; col < len; col++) {
+            int x, y, w, h;
+            vkb_cell_rect(c, row, col, &x, &y, &w, &h);
+            int local_y = y - origin_y;
+            bool highlighted = row == c->virtual_keyboard_cursor_row && col == c->virtual_keyboard_cursor_col;
+
+            pix2d_fill_rect(x, local_y, BLACK, w, h);
+            pix2d_draw_rect(x, local_y, highlighted ? YELLOW : WHITE, w, h);
+
+            char label[8];
+            if (row == 5) {
+                strncpy(label, VKB_FN_LABELS[col], sizeof(label) - 1);
+                label[sizeof(label) - 1] = '\0';
+            } else {
+                label[0] = vkb_row_char(c, row, col);
+                label[1] = '\0';
+            }
+            drawStringCenter(c->font_plain12, x + w / 2, local_y + h / 2 + 4, label, highlighted ? YELLOW : WHITE);
+        }
+    }
+
+    pixmap_draw(vkb_panel, 0, origin_y);
+
+    pix2d_restore_binding(saved);
+}
+
+// Only reachable on a platform with no native pointer of its own (currently just PS2, same
+// has_keyboard flag the virtual keyboard already gates on - see gameshell.h) - every other
+// platform relies on the host OS's own mouse cursor and would get a confusing duplicate cursor
+// drawn on top of it here. Without this, the stick-driven shell->mouse_x/mouse_y cursor used for
+// every click in the game (menus, the login screen, the virtual keyboard itself) is completely
+// invisible, making it guesswork to click anything precisely.
+static void virtual_cursor_draw(Client *c) {
+    // Same reasoning as virtual_keyboard_draw() above (see pix2d_save_binding()'s comment) -
+    // composite through a small dedicated PixMap, and save/restore the binding around it so
+    // client_draw_scene()'s next frame still finds _Pix2D pointed at c->area_viewport.
+    Pix2DBinding saved = pix2d_save_binding();
+
+    static PixMap *cursor_panel = NULL;
+    const int SIZE = 13;
+    if (!cursor_panel) {
+        cursor_panel = pixmap_new(SIZE, SIZE);
+    }
+
+    int x = c->shell->mouse_x - SIZE / 2;
+    int y = c->shell->mouse_y - SIZE / 2;
+
+#ifdef __PS2__
+    // Restore whatever the cursor covered last frame BEFORE drawing it at the new position -
+    // platform_blit_surface() never clears anything, it only overwrites, so without this every
+    // panel that doesn't happen to redraw itself this frame keeps yesterday's cursor mark baked in
+    // forever (this is what "cursor leaves a trail" actually was).
+    static uint16_t backing[13 * 13];
+    static bool backing_valid = false;
+    static int last_x, last_y;
+    if (backing_valid) {
+        platform_restore_region(last_x, last_y, SIZE, SIZE, backing);
+    }
+    platform_save_region(x, y, SIZE, SIZE, backing);
+    backing_valid = true;
+    last_x = x;
+    last_y = y;
+#endif
+
+    pixmap_bind(cursor_panel);
+    // Black-outlined white crosshair filling the whole panel (13px cross, then a 9px cross on
+    // top) so there's always a 1px dark border - keeps the hotspot visible against both light and
+    // dark UI panels.
+    pix2d_fill_rect(0, 0, BLACK, SIZE, SIZE);
+    pix2d_hline(0, 6, BLACK, 13);
+    pix2d_vline(6, 0, BLACK, 13);
+    pix2d_hline(2, 6, WHITE, 9);
+    pix2d_vline(6, 2, WHITE, 9);
+    pixmap_draw(cursor_panel, x, y);
+
+    pix2d_restore_binding(saved);
+}
+
 static void handleChatSettingsInput(Client *c) {
     if (c->shell->mouse_click_button != 1) {
         return;
@@ -4545,8 +5058,14 @@ void client_update_game(Client *c) {
         c->idle_timeout--;
     }
 
+#ifdef __PS2__
+    int64_t phase_t0 = rs2_now();
+#endif
     for (int i = 0; i < 5 && client_read(c); i++) {
     }
+#ifdef __PS2__
+    _TickPhase.packets_ms += rs2_now() - phase_t0;
+#endif
 
     if (c->ingame) {
         for (int wave = 0; wave < c->wave_count; wave++) {
@@ -4614,10 +5133,25 @@ void client_update_game(Client *c) {
             client_try_reconnect(c);
         }
 
+#ifdef __PS2__
+        phase_t0 = rs2_now();
+        updatePlayers(c);
+        _TickPhase.players_ms += rs2_now() - phase_t0;
+        phase_t0 = rs2_now();
+        updateNpcs(c);
+        _TickPhase.npcs_ms += rs2_now() - phase_t0;
+        phase_t0 = rs2_now();
+        updateEntityChats(c);
+        _TickPhase.chats_ms += rs2_now() - phase_t0;
+        phase_t0 = rs2_now();
+        updateMergeLocs(c);
+        _TickPhase.mergelocs_ms += rs2_now() - phase_t0;
+#else
         updatePlayers(c);
         updateNpcs(c);
         updateEntityChats(c);
         updateMergeLocs(c);
+#endif
 
         if ((c->shell->action_key[1] == 1 || c->shell->action_key[2] == 1 || c->shell->action_key[3] == 1 || c->shell->action_key[4] == 1) && c->camera_moved_write++ > 5) {
             c->camera_moved_write = 0;
@@ -4725,6 +5259,8 @@ void client_update_game(Client *c) {
         handleMouseInput(c);
         handleMinimapInput(c);
         handleTabInput(c);
+        handleControllerTabInput(c);
+        handleControllerButtonInput(c);
         handleChatSettingsInput(c);
 
         if (c->shell->mouse_button == 1 || c->shell->mouse_click_button == 1) {
@@ -4845,12 +5381,113 @@ void client_update_game(Client *c) {
     }
 }
 
+#ifdef __PS2__
+// Real PS2 USB mass storage (see ps2.c's own USB driver history) racks up disproportionate FAT/
+// directory-lookup overhead per discrete file open on slow media - REBUILD_NORMAL below opens up to
+// ~18 separate map files per rebuild out of ~830 total in the full set, each a fresh fopen()/fseek/
+// fread/fclose. maps.dat (built by scripts/pack_maps.cjs) combines all of them into one file with a
+// small in-memory index, so a real session needs exactly one fopen() for the whole game instead of
+// hundreds - after that, every map load is just a seek within an already-open handle. Falls back to
+// the original one-file-per-mapsquare path below if maps.dat isn't present (e.g. not yet copied onto
+// a given deployment), so this is a strict improvement, never a hard new requirement.
+typedef struct {
+    uint8_t kind;
+    uint8_t mapsquareX;
+    uint8_t mapsquareZ;
+    uint32_t offset;
+    uint32_t length;
+} Ps2MapArchiveEntry;
+
+static bool ps2_map_archive_checked = false;
+static FILE *ps2_map_archive_file = NULL;
+static Ps2MapArchiveEntry *ps2_map_archive_index = NULL;
+static int ps2_map_archive_count = 0;
+
+static bool ps2_map_archive_open(void) {
+    if (ps2_map_archive_checked) {
+        return ps2_map_archive_file != NULL;
+    }
+    ps2_map_archive_checked = true;
+
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%srom/cache/client/maps.dat", ps2_cache_prefix());
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        rs2_log("map: no combined %s - falling back to individual map files\n", path);
+        return false;
+    }
+
+    char magic[4];
+    uint32_t count;
+    if (fread(magic, 1, 4, file) != 4 || memcmp(magic, "MAPZ", 4) != 0 || fread(&count, sizeof(count), 1, file) != 1) {
+        rs2_error("map: %s has an invalid header - falling back to individual map files\n", path);
+        fclose(file);
+        return false;
+    }
+
+    Ps2MapArchiveEntry *index = malloc(count * sizeof(Ps2MapArchiveEntry));
+    for (uint32_t i = 0; i < count; i++) {
+        // Raw 12-byte little-endian records (see pack_maps.cjs) decoded by hand rather than a
+        // direct struct fread - this project's own struct layout/padding/endianness isn't
+        // guaranteed to match the packer's fixed on-disk format bit-for-bit.
+        uint8_t raw[12];
+        if (fread(raw, 1, sizeof(raw), file) != sizeof(raw)) {
+            rs2_error("map: %s index truncated at entry %u - falling back to individual map files\n", path, i);
+            free(index);
+            fclose(file);
+            return false;
+        }
+        index[i].kind = raw[0];
+        index[i].mapsquareX = raw[1];
+        index[i].mapsquareZ = raw[2];
+        index[i].offset = (uint32_t)raw[4] | ((uint32_t)raw[5] << 8) | ((uint32_t)raw[6] << 16) | ((uint32_t)raw[7] << 24);
+        index[i].length = (uint32_t)raw[8] | ((uint32_t)raw[9] << 8) | ((uint32_t)raw[10] << 16) | ((uint32_t)raw[11] << 24);
+    }
+
+    ps2_map_archive_file = file;
+    ps2_map_archive_index = index;
+    ps2_map_archive_count = (int)count;
+    rs2_log("map: opened combined %s, %d entries\n", path, ps2_map_archive_count);
+    return true;
+}
+
+// Returns NULL (without logging) if the archive isn't open or doesn't contain this square, exactly
+// like a cache miss - the caller (client_load_map_file()) treats that as "fall back to the
+// individual-file path", not as an error in its own right.
+static int8_t *ps2_map_archive_read(const char *kind, int mapsquareX, int mapsquareZ, int *out_size) {
+    if (!ps2_map_archive_open()) {
+        return NULL;
+    }
+    uint8_t want_kind = (uint8_t)kind[0];
+    for (int i = 0; i < ps2_map_archive_count; i++) {
+        Ps2MapArchiveEntry *entry = &ps2_map_archive_index[i];
+        if (entry->kind != want_kind || entry->mapsquareX != mapsquareX || entry->mapsquareZ != mapsquareZ) {
+            continue;
+        }
+        int8_t *data = malloc(entry->length);
+        fseek(ps2_map_archive_file, (long)entry->offset, SEEK_SET);
+        if (fread(data, 1, entry->length, ps2_map_archive_file) != entry->length) {
+            rs2_error("map: short read from maps.dat for %s%d_%d\n", kind, mapsquareX, mapsquareZ);
+        }
+        *out_size = (int)entry->length;
+        return data;
+    }
+    return NULL;
+}
+#endif
+
 // Loads a "<kind><mapsquareX>_<mapsquareZ>" map file (kind is "m" for land or "l" for locs) from
 // the platform cache path, mirroring the per-platform path conventions client_load()/load_archive()
 // already use. Returns NULL (and logs) if the file is missing - there is no rev254 server-side
 // fallback request for missing map data (see REBUILD_NORMAL below), so a missing file here means an
 // incomplete local cache, not a recoverable network condition.
 static int8_t *client_load_map_file(const char *kind, int mapsquareX, int mapsquareZ, int *out_size) {
+#ifdef __PS2__
+    int8_t *archived = ps2_map_archive_read(kind, mapsquareX, mapsquareZ, out_size);
+    if (archived) {
+        return archived;
+    }
+#endif
     char filename[PATH_MAX];
 #ifdef _arch_dreamcast
     snprintf(filename, sizeof(filename), "cache/client/maps/%s%d_%d.", kind, mapsquareX, mapsquareZ);
@@ -4858,10 +5495,19 @@ static int8_t *client_load_map_file(const char *kind, int mapsquareX, int mapsqu
     snprintf(filename, sizeof(filename), "D:\\cache\\client\\maps\\%s%d_%d", kind, mapsquareX, mapsquareZ);
 #elif defined(__EMSCRIPTEN__)
     snprintf(filename, sizeof(filename), "%s%d_%d", kind, mapsquareX, mapsquareZ);
+#elif defined(__PS2__)
+    snprintf(filename, sizeof(filename), "%srom/cache/client/maps/%s%d_%d", ps2_cache_prefix(), kind, mapsquareX, mapsquareZ);
 #else
     snprintf(filename, sizeof(filename), "rom/cache/client/maps/%s%d_%d", kind, mapsquareX, mapsquareZ);
 #endif
 
+#ifdef __PS2__
+    // Logged BEFORE the open (not just on failure) so a real-hardware hang inside fopen() itself -
+    // e.g. a slow/failing USB read retry on a missing file, a real, plausible failure mode for a
+    // minimal FAT driver that this project doesn't control - still shows exactly which map square
+    // it got stuck on, via boot.log (see ps2.c's ps2_log_to_file()), rather than nothing at all.
+    rs2_log("map: opening %s\n", filename);
+#endif
 #if ANDROID
     SDL_RWops *file = SDL_RWFromFile(filename, "rb");
 #else
@@ -4871,6 +5517,9 @@ static int8_t *client_load_map_file(const char *kind, int mapsquareX, int mapsqu
         rs2_error("Missing map data: %s\n", filename);
         return NULL;
     }
+#ifdef __PS2__
+    rs2_log("map: opened %s\n", filename);
+#endif
 
     size_t size;
 #ifdef ANDROID
@@ -4900,20 +5549,30 @@ static int8_t *client_load_map_file(const char *kind, int mapsquareX, int mapsqu
     return data;
 }
 
+// Shared with client_load_raw_file() below and (on PS2) the streaming ondemand.zip opener - keeps
+// every caller's notion of "the platform's cache path" in exactly one place.
+static void client_cache_file_path(const char *filename_only, char *out, size_t out_size) {
+#ifdef _arch_dreamcast
+    snprintf(out, out_size, "cache/client/%s", filename_only);
+#elif defined(NXDK)
+    snprintf(out, out_size, "D:\\cache\\client\\%s", filename_only);
+#elif defined(__EMSCRIPTEN__)
+    snprintf(out, out_size, "%s", filename_only);
+#elif defined(__PS2__)
+    snprintf(out, out_size, "%srom/cache/client/%s", ps2_cache_prefix(), filename_only);
+#else
+    snprintf(out, out_size, "rom/cache/client/%s", filename_only);
+#endif
+}
+
 // Reads one whole file straight from the platform's cache path with no Jagfile/.jag-specific
 // header parsing (unlike load_archive() above, which expects the classic bzip2 .jag container) -
-// used for ondemand.zip, a real generic ZIP file the server serves as-is (see ondemand.c).
+// used for ondemand.zip on every platform except PS2 (see the PS2-specific streaming path at this
+// function's call site in client_load()). Unused (and compiled out) on PS2 itself for that reason.
+#ifndef __PS2__
 static int8_t *client_load_raw_file(const char *filename_only, int *out_size) {
     char filename[PATH_MAX];
-#ifdef _arch_dreamcast
-    snprintf(filename, sizeof(filename), "cache/client/%s", filename_only);
-#elif defined(NXDK)
-    snprintf(filename, sizeof(filename), "D:\\cache\\client\\%s", filename_only);
-#elif defined(__EMSCRIPTEN__)
-    snprintf(filename, sizeof(filename), "%s", filename_only);
-#else
-    snprintf(filename, sizeof(filename), "rom/cache/client/%s", filename_only);
-#endif
+    client_cache_file_path(filename_only, filename, sizeof(filename));
 
 #if ANDROID
     SDL_RWops *file = SDL_RWFromFile(filename, "rb");
@@ -4952,6 +5611,7 @@ static int8_t *client_load_raw_file(const char *filename_only, int *out_size) {
     *out_size = (int)size;
     return data;
 }
+#endif
 
 // Several IF_SET* server packets carry a raw component id straight from the network. rev254's
 // Progressive server can reference interfaces/components Client3 hasn't instantiated locally (or
@@ -5130,7 +5790,13 @@ bool client_read(Client *c) {
     }
     if (c->packet_type == 123) { // NPC_INFO
         // NPC_INFO
+#ifdef __PS2__
+        int64_t npcpos_t0 = rs2_now();
         getNpcPos(c, c->in, c->packet_size);
+        _TickPhase.getnpcpos_ms += rs2_now() - npcpos_t0;
+#else
+        getNpcPos(c, c->in, c->packet_size);
+#endif
         c->packet_type = -1;
         return true;
     }
@@ -5159,6 +5825,16 @@ bool client_read(Client *c) {
         int minMapsquareZ = (c->sceneCenterZoneZ - 6) / 8;
         int maxMapsquareZ = (c->sceneCenterZoneZ + 6) / 8;
         int regions = (maxMapsquareX - minMapsquareX + 1) * (maxMapsquareZ - minMapsquareZ + 1);
+#ifdef __PS2__
+        // 2026-09-13: the per-read timing trail showed read #9 (the last one seen frozen on screen)
+        // actually completing in 10ms before the freeze, not stalling mid-read as assumed - so the
+        // read loop may simply have FINISHED (regions == 9) and the real hang is in whatever runs
+        // right after it. Logging this here settles that directly: if regions is 9, the freeze is
+        // downstream of this loop, not inside it, and every USB/file-organization/pacing experiment
+        // so far was correctly targeting a loop that was never actually the problem.
+        rs2_log("map: regions=%d (zone %d,%d -> mapsquare X %d..%d Z %d..%d)\n", regions, c->sceneCenterZoneX,
+                c->sceneCenterZoneZ, minMapsquareX, maxMapsquareX, minMapsquareZ, maxMapsquareZ);
+#endif
 
         client_scenemap_free(c);
         c->sceneMapLandData = calloc(regions, sizeof(int8_t *));
@@ -5173,23 +5849,110 @@ bool client_read(Client *c) {
             for (int mapsquareZ = minMapsquareZ; mapsquareZ <= maxMapsquareZ; mapsquareZ++) {
                 c->sceneMapIndex[i] = (mapsquareX << 8) + mapsquareZ;
 
+#ifdef __PS2__
+                // This whole loop is synchronous/blocking and the client is single-threaded - if
+                // client_load_map_file() ever hangs on a real-hardware-only USB/filesystem issue,
+                // nothing ever draws again, so whatever's on screen at that exact instant is frozen
+                // forever. Show which mapsquare is about to load and force an immediate flip (not
+                // just bind+draw, which only updates the area_viewport PixMap in memory -
+                // platform_update_surface() is what actually presents a frame, same pattern
+                // client_login() already uses for its own "Connecting..." screen) so a hang leaves
+                // a legible "stuck on X_Z" on screen instead of a generic, uninformative "Loading".
+                // Counted (not just coordinate-labeled) to distinguish "this specific file is the
+                // problem" from "a fixed number of file opens exhausts some small IOP-side resource
+                // table (open-file slots, directory cache, ...) regardless of which file is Nth" -
+                // switching USB drivers entirely (BDM -> usbhdfsd) didn't change which coordinate
+                // this hangs on, which points at the latter, not anything about this one file.
+                // Also shows whether maps.dat is actually in use - a silent fallback to the
+                // individual-file path (e.g. maps.dat not yet copied onto a given drive) would
+                // otherwise look identical to this same freeze with no indication the archive was
+                // ever tried, exactly what happened testing this the first time.
+                char loading_msg[64];
+                snprintf(loading_msg, sizeof(loading_msg), "Loading map %d_%d... (#%d, %s)", mapsquareX, mapsquareZ, i + 1,
+                         ps2_map_archive_open() ? "archive" : "individual");
+                pixmap_bind(c->area_viewport);
+                pix2d_fill_rect(0, 130, BLACK, 512, 40);
+                drawStringCenter(c->font_plain12, 257, 151, loading_msg, BLACK);
+                drawStringCenter(c->font_plain12, 256, 150, loading_msg, WHITE);
+                pixmap_draw(c->area_viewport, 4, 4);
+                platform_update_surface();
+#endif
+
+#ifdef __PS2__
+                // Rate-limiting test (20ms sleep after each read) is DONE and disproven - confirmed
+                // via real hardware, this still hangs at the exact same read regardless, ruling out
+                // a USB controller/driver queuing issue triggered by rapid back-to-back small reads.
+                // Removed rather than left in: it was pure per-iteration cost with zero remaining
+                // diagnostic value.
+                //
+                // What's left to distinguish, now that file count/organization, driver stack, and
+                // read pacing are all ruled out: does per-read latency climb before the freeze
+                // (pointing at some IOP-side resource leaking a little more each read, eventually
+                // deadlocking) or stay flat right up to a sudden cutoff (pointing at a fixed-size
+                // table/queue that's fine until it's exactly full)? boot.log has never actually been
+                // confirmed to show up on a real drive (fopen/fwrite/fflush/fclose all "succeed" per
+                // ps2_log_to_file's own bookkeeping, but the FAT driver may only commit the directory
+                // entry on a clean unmount, which a hang/power-cycle never gets) - so this can't rely
+                // on it. It goes on screen instead: this always shows the LAST read that actually
+                // completed, so whatever it says right before a freeze is real data even if nothing
+                // written to boot.log ever survives to be read back.
+                char timing_msg[64];
+                int64_t land_t0 = rs2_now();
+#endif
                 int landSize = 0;
                 int8_t *landData = client_load_map_file("m", mapsquareX, mapsquareZ, &landSize);
                 if (landData) {
                     c->sceneMapLandDataIndexLength[i] = landSize;
                     c->sceneMapLandData[i] = landData;
                 }
+#ifdef __PS2__
+                int land_ms = (int)(rs2_now() - land_t0);
+                rs2_log("map read #%d land %d_%d: %dms (%d bytes)\n", i + 1, mapsquareX, mapsquareZ, land_ms, landSize);
+                snprintf(timing_msg, sizeof(timing_msg), "last read: #%d land %dms (%dB)", i + 1, land_ms, landSize);
+                pixmap_bind(c->area_viewport);
+                pix2d_fill_rect(0, 170, BLACK, 512, 20);
+                drawStringCenter(c->font_plain12, 257, 181, timing_msg, BLACK);
+                drawStringCenter(c->font_plain12, 256, 180, timing_msg, WHITE);
+                pixmap_draw(c->area_viewport, 4, 4);
+                platform_update_surface();
 
+                int64_t loc_t0 = rs2_now();
+#endif
                 int locSize = 0;
                 int8_t *locData = client_load_map_file("l", mapsquareX, mapsquareZ, &locSize);
                 if (locData) {
                     c->sceneMapLocDataIndexLength[i] = locSize;
                     c->sceneMapLocData[i] = locData;
                 }
+#ifdef __PS2__
+                int loc_ms = (int)(rs2_now() - loc_t0);
+                rs2_log("map read #%d loc %d_%d: %dms (%d bytes)\n", i + 1, mapsquareX, mapsquareZ, loc_ms, locSize);
+                snprintf(timing_msg, sizeof(timing_msg), "last read: #%d loc %dms (%dB)", i + 1, loc_ms, locSize);
+                pixmap_bind(c->area_viewport);
+                pix2d_fill_rect(0, 170, BLACK, 512, 20);
+                drawStringCenter(c->font_plain12, 257, 181, timing_msg, BLACK);
+                drawStringCenter(c->font_plain12, 256, 180, timing_msg, WHITE);
+                pixmap_draw(c->area_viewport, 4, 4);
+                platform_update_surface();
+#endif
 
                 i++;
             }
         }
+
+#ifdef __PS2__
+        // Checkpoint: if this line's flip is the LAST thing ever visible on a frozen screen (instead
+        // of the "last read: ..." line from inside the loop above), that proves every map file read
+        // finished and the hang is somewhere in the tile-shift/npc/player/scene-build code below,
+        // not in file I/O at all - directly testable, not a guess.
+        pixmap_bind(c->area_viewport);
+        pix2d_fill_rect(0, 170, BLACK, 512, 20);
+        drawStringCenter(c->font_plain12, 257, 181, "All map reads done, building scene...", BLACK);
+        drawStringCenter(c->font_plain12, 256, 180, "All map reads done, building scene...", WHITE);
+        pixmap_draw(c->area_viewport, 4, 4);
+        platform_update_surface();
+        rs2_log("map: all %d region reads complete, entering post-load scene build\n", regions);
+#endif
 
         pixmap_bind(c->area_viewport);
         pixmap_draw(c->area_viewport, 4, 4);
@@ -5536,6 +6299,7 @@ bool client_read(Client *c) {
         c->chatback_input[0] = '\0';
         c->redraw_chatback = true;
         c->packet_type = -1;
+        virtual_keyboard_maybe_open(c, 4);
         return true;
     }
     if (c->packet_type == 168) { // UPDATE_INV_STOP_TRANSMIT
@@ -6162,7 +6926,13 @@ bool client_read(Client *c) {
     }
     if (c->packet_type == 87) { // PLAYER_INFO
         // PLAYER_INFO
+#ifdef __PS2__
+        int64_t getplayer_t0 = rs2_now();
         getPlayer(c, c->in, c->packet_size);
+        _TickPhase.getplayer_ms += rs2_now() - getplayer_t0;
+#else
+        getPlayer(c, c->in, c->packet_size);
+#endif
         if (c->scene_state == 1) {
             c->scene_state = 2;
             _World.levelBuilt = c->currentLevel;
@@ -6528,7 +7298,20 @@ void getPlayer(Client *c, Packet *buf, int size) {
     for (int i = 0; i < c->entityRemovalCount; i++) {
         int index = c->entityRemovalIds[i];
         if (c->players[index]->pathing_entity.cycle != _Client.loop_cycle) {
-            free(c->players[i]);
+            // Was `free(c->players[i])` - froze the loop counter's slot instead of the actual
+            // removed player at `index` (the NPC-removal code a few hundred lines below this one
+            // gets it right - free(c->npcs[index]) - confirming this was an isolated copy/paste
+            // bug, not an intentional pattern). Two real, compounding bugs from one typo: every
+            // real player removal permanently leaked its PlayerEntity (never freed, since
+            // c->players[index] was set to NULL without freeing it first), while c->players[i]
+            // (i is just 0/1/2/... the position within this tick's short removal list, an
+            // unrelated small index almost always still occupied by a live player) got a genuine
+            // double-free the next time any removal list also reached that same small i - each hit
+            // corrupts the heap allocator's internal free-list further, which is entirely
+            // consistent with the observed per-tick slowdown that gets worse over a session
+            // (busier areas -> more removals/tick -> more corruption events) rather than a single
+            // one-time cost.
+            free(c->players[index]);
             c->players[index] = NULL;
         }
     }
@@ -6559,6 +7342,26 @@ static void client_clear_caches(void) {
     bump_allocator_reset();
 }
 
+#ifdef __PS2__
+// Bisecting client_build_scene() stage by stage: the map-file read loop above was proven (via its
+// own on-screen "All map reads done, building scene..." checkpoint surviving to a frozen screen)
+// to always finish - the freeze is somewhere inside THIS function instead. It has several large,
+// allocation-heavy stages (world_new, per-mapsquare bzip decompress into a 100KB scratch buffer,
+// world_build's model/loc geometry into the scene bump arena) on a port that was already
+// documented as tight on EE memory before this specific bug - one breadcrumb per stage says
+// exactly which one is failing instead of continuing to guess at the whole function.
+static void ps2_scene_checkpoint(Client *c, const char *label) {
+    rs2_log("%s: bump=%d/%d heap_used=%d heap_free=%d\n", label, bump_allocator_used(), bump_allocator_capacity(),
+             mallinfo().uordblks, mallinfo().fordblks);
+    pixmap_bind(c->area_viewport);
+    pix2d_fill_rect(0, 170, BLACK, 512, 20);
+    drawStringCenter(c->font_plain12, 257, 181, label, BLACK);
+    drawStringCenter(c->font_plain12, 256, 180, label, WHITE);
+    pixmap_draw(c->area_viewport, 4, 4);
+    platform_update_surface();
+}
+#endif
+
 static void client_build_scene(Client *c) {
     // try {
     c->minimap_level = -1;
@@ -6572,9 +7375,15 @@ static void client_build_scene(Client *c) {
     for (int level = 0; level < 4; level++) {
         collisionmap_reset(c->levelCollisionMap[level]);
     }
+#ifdef __PS2__
+    ps2_scene_checkpoint(c, "scene: reset done");
+#endif
 
     World *world = world_new(104, 104, c->levelHeightmap, c->levelTileFlags);
     _World.lowMemory = _World3D.lowMemory;
+#ifdef __PS2__
+    ps2_scene_checkpoint(c, "scene: world_new done");
+#endif
 
     int maps = c->sceneMapIndexLength;
 
@@ -6596,6 +7405,15 @@ static void client_build_scene(Client *c) {
     }
 
     int8_t *data = calloc(100000, sizeof(int8_t));
+#ifdef __PS2__
+    if (!data) {
+        // Same "fail loudly instead of a silent NULL-pointer hardware fault" reasoning as the
+        // platform_new() screen texture check - bzip_decompress() below would otherwise write
+        // straight into a NULL scratch buffer.
+        rs2_error("client_build_scene: calloc(100000) scratch buffer failed - out of EE RAM\n");
+    }
+    ps2_scene_checkpoint(c, "scene: scratch buffer allocated");
+#endif
 
     // NO_TIMEOUT
     p1isaac(c->out, 239); // NO_TIMEOUT
@@ -6607,6 +7425,22 @@ static void client_build_scene(Client *c) {
         if (src) {
             Packet *buf = packet_new(src, c->sceneMapLandDataIndexLength[i]);
             int length = g4(buf);
+#ifdef __PS2__
+            // bzip_decompress() writes into `data` (the fixed 100000-byte scratch buffer above) with
+            // no capacity parameter of its own - it trusts the caller to have sized the destination
+            // correctly. That's always held for land data in practice (fixed 64x64 heightmap per
+            // square), but nothing actually enforces it. A silent overflow here would corrupt
+            // whatever heap chunk follows `data` - on PS2's much smaller, more tightly packed heap
+            // (vs. a 64-bit desktop build of the same source) that's far more likely to corrupt
+            // something load-bearing on the very next allocation instead of quietly going unnoticed.
+            if (length > 100000) {
+                rs2_error("client_build_scene: land data for mapsquare %d_%d decompresses to %d bytes - exceeds "
+                          "100000-byte scratch buffer, skipping to avoid heap corruption\n",
+                          c->sceneMapIndex[i] >> 8, c->sceneMapIndex[i] & 0xff, length);
+                free(buf);
+                continue;
+            }
+#endif
             bzip_decompress(data, src, c->sceneMapLandDataIndexLength[i] - 4, 4);
             free(buf);
             world_load_ground(world, (c->sceneCenterZoneX - 6) * 8, (c->sceneCenterZoneZ - 6) * 8, x, z, data, length);
@@ -6614,6 +7448,9 @@ static void client_build_scene(Client *c) {
             clearLandscape(world, z, x, 64, 64);
         }
     }
+#ifdef __PS2__
+    ps2_scene_checkpoint(c, "scene: land decode done");
+#endif
 
     // NO_TIMEOUT
     p1isaac(c->out, 239); // NO_TIMEOUT
@@ -6622,13 +7459,49 @@ static void client_build_scene(Client *c) {
         if (src) {
             Packet *buf = packet_new(src, c->sceneMapLocDataIndexLength[i]);
             int length = g4(buf);
+#ifdef __PS2__
+            // Same overflow guard as the land loop above, and the prime suspect for THIS specific
+            // hang (loc decode is variable-length per square, unlike land's fixed 64x64 write, so a
+            // single unusually loc-dense square - exactly what a spawn town square would be - is the
+            // one case where the shared 100000-byte scratch buffer could plausibly be too small).
+            if (length > 100000) {
+                rs2_error("client_build_scene: loc data for mapsquare %d_%d decompresses to %d bytes - exceeds "
+                          "100000-byte scratch buffer, skipping to avoid heap corruption\n",
+                          c->sceneMapIndex[i] >> 8, c->sceneMapIndex[i] & 0xff, length);
+                free(buf);
+                continue;
+            }
+#endif
             bzip_decompress(data, src, c->sceneMapLocDataIndexLength[i] - 4, 4);
             free(buf);
             int x = (c->sceneMapIndex[i] >> 8) * 64 - c->sceneBaseTileX;
             int z = (c->sceneMapIndex[i] & 0xff) * 64 - c->sceneBaseTileZ;
+#ifdef __PS2__
+            // The whole-loop checkpoint before/after this loop narrowed the hang to somewhere in
+            // here, but not WHICH of the 9 mapsquares' loc data - world_load_locations() itself is
+            // a variable-length decode loop over an arbitrary number of loc placements, so unlike
+            // the land loop (fixed 64x64 heightmap writes per square, same cost every time) a single
+            // pathological mapsquare here could dwarf the other 8 combined. Per-square resolution is
+            // the only way to tell "one bad square" from "the Nth call into a shared resource that's
+            // now empty" (bump arena, model cache, ...).
+            char loc_msg[64];
+            snprintf(loc_msg, sizeof(loc_msg), "loc decode #%d/%d (mapsquare %d_%d)", i + 1, maps, c->sceneMapIndex[i] >> 8,
+                     c->sceneMapIndex[i] & 0xff);
+            rs2_log("%s: bump=%d/%d heap_used=%d heap_free=%d\n", loc_msg, bump_allocator_used(), bump_allocator_capacity(),
+                     mallinfo().uordblks, mallinfo().fordblks);
+            pixmap_bind(c->area_viewport);
+            pix2d_fill_rect(0, 170, BLACK, 512, 20);
+            drawStringCenter(c->font_plain12, 257, 181, loc_msg, BLACK);
+            drawStringCenter(c->font_plain12, 256, 180, loc_msg, WHITE);
+            pixmap_draw(c->area_viewport, 4, 4);
+            platform_update_surface();
+#endif
             world_load_locations(world, c->scene, c->locList, c->levelCollisionMap, data, length, x, z);
         }
     }
+#ifdef __PS2__
+    ps2_scene_checkpoint(c, "scene: loc decode done");
+#endif
 
     free(data);
 
@@ -6636,6 +7509,9 @@ static void client_build_scene(Client *c) {
     p1isaac(c->out, 239); // NO_TIMEOUT
     world_build(world, c->scene, c->levelCollisionMap);
     pixmap_bind(c->area_viewport);
+#ifdef __PS2__
+    ps2_scene_checkpoint(c, "scene: world_build done");
+#endif
 
     // NO_TIMEOUT
     p1isaac(c->out, 239); // NO_TIMEOUT
@@ -6654,6 +7530,9 @@ static void client_build_scene(Client *c) {
             sortObjStacks(c, x, z);
         }
     }
+#ifdef __PS2__
+    ps2_scene_checkpoint(c, "scene: obj stacks sorted");
+#endif
 
     for (LocAddEntity *loc = (LocAddEntity *)linklist_head(c->spawned_locations); loc; loc = (LocAddEntity *)linklist_next(c->spawned_locations)) {
         addLoc(c, loc->plane, loc->x, loc->z, loc->locIndex, loc->angle, loc->shape, loc->layer);
@@ -6664,6 +7543,9 @@ static void client_build_scene(Client *c) {
     lrucache_clear(_LocType.modelCacheStatic);
     pix3d_init_pool(PIX3D_POOL_COUNT);
     world_free(world);
+#ifdef __PS2__
+    ps2_scene_checkpoint(c, "scene: build_scene complete");
+#endif
 }
 
 void drawMinimapLoc(Client *c, int tileX, int tileZ, int level, int wallRgb, int doorRgb) {
@@ -7748,6 +8630,7 @@ void client_update_title(Client *c) {
             c->login_message1 = "Enter your username & password.";
             c->title_screen_state = 2;
             c->title_login_field = 0;
+            virtual_keyboard_maybe_open(c, 0);
         }
     } else if (c->title_screen_state == 2) {
         int y = c->shell->screen_height / 2 - 40;
@@ -7756,11 +8639,13 @@ void client_update_title(Client *c) {
 
         if (c->shell->mouse_click_button == 1 && c->shell->mouse_click_y >= y - 15 && c->shell->mouse_click_y < y) {
             c->title_login_field = 0;
+            virtual_keyboard_maybe_open(c, 0);
         }
         y += 15;
 
         if (c->shell->mouse_click_button == 1 && c->shell->mouse_click_y >= y - 15 && c->shell->mouse_click_y < y) {
             c->title_login_field = 1;
+            virtual_keyboard_maybe_open(c, 1);
         }
         y += 15;
 
@@ -7775,6 +8660,7 @@ void client_update_title(Client *c) {
         buttonX = c->shell->screen_width / 2 + 80;
         if (c->shell->mouse_click_button == 1 && c->shell->mouse_click_x >= buttonX - 75 && c->shell->mouse_click_x <= buttonX + 75 && c->shell->mouse_click_y >= buttonY - 20 && c->shell->mouse_click_y <= buttonY + 20) {
             c->title_screen_state = 0;
+            c->virtual_keyboard_visible = false;
             if (!_Custom.remember_username) {
                 c->username[0] = '\0';
             }
@@ -7854,6 +8740,10 @@ void client_login(Client *c, const char *username, const char *password, bool re
         c->login_message0 = "";
         c->login_message1 = "Connecting to server...";
         client_draw_title_screen(c);
+        // Force-close defensively regardless of which field/keyboard state was active - an actual
+        // login attempt is now underway, so a stale virtual keyboard overlay must never linger
+        // into the "Connecting..."/in-game screens that follow.
+        c->virtual_keyboard_visible = false;
     }
     platform_update_surface();
 
@@ -8235,6 +9125,17 @@ void client_draw(Client *c) {
         c->drag_cycles = 0;
     }
 
+    // On-screen virtual keyboard overlay (see gameshell.h's has_keyboard) - drawn last so it
+    // paints over the 3D scene, sidebar, chatback, and any context menu regardless of which of
+    // the two branches above ran, matching how both the login screen and in-game chat need it.
+    if (c->virtual_keyboard_visible) {
+        virtual_keyboard_draw(c);
+    }
+
+    if (!c->shell->has_keyboard) {
+        virtual_cursor_draw(c);
+    }
+
     gl_end_frame();
 }
 
@@ -8610,8 +9511,8 @@ bool client_update_interface_animation(Client *c, int id, int delta) {
             if (seqId != -1) {
                 SeqType *type = _SeqType.instances[seqId];
                 child->seqCycle += delta;
-                while (child->seqCycle > type->delay[child->seqFrame]) {
-                    child->seqCycle -= type->delay[child->seqFrame] + 1;
+                while (child->seqCycle > seqtype_get_duration(type, child->seqFrame)) {
+                    child->seqCycle -= seqtype_get_duration(type, child->seqFrame) + 1;
                     child->seqFrame++;
                     if (child->seqFrame >= type->frameCount) {
                         child->seqFrame -= type->replayoff;
@@ -9630,8 +10531,8 @@ void pushLocs(Client *c) {
             append = true;
         }
 
-        while (loc->seqCycle > loc->seq->delay[loc->seqFrame]) {
-            loc->seqCycle -= loc->seq->delay[loc->seqFrame] + 1;
+        while (loc->seqCycle > seqtype_get_duration(loc->seq, loc->seqFrame)) {
+            loc->seqCycle -= seqtype_get_duration(loc->seq, loc->seqFrame) + 1;
             loc->seqFrame++;
 
             append = true;
@@ -11386,6 +12287,8 @@ Jagfile *load_archive(Client *c, const char *name, int crc, const char *display_
     snprintf(filename, sizeof(filename), "cache/client/%s.", name);
 #elif defined(NXDK)
     snprintf(filename, sizeof(filename), "D:\\cache\\client\\%s", name);
+#elif defined(__PS2__)
+    snprintf(filename, sizeof(filename), "%srom/cache/client/%s", ps2_cache_prefix(), name);
 #else
     snprintf(filename, sizeof(filename), "rom/cache/client/%s", name);
 #endif

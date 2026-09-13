@@ -246,6 +246,18 @@ void model_unpack(Jagfile *models) {
     int triangle_skin_data_offset = 0;
 
     for (int n = 0; n < count; n++) {
+#ifdef __PS2__
+        // This whole function is a pure CPU-bound loop over every model in the game, with zero file
+        // I/O (models is a Jagfile already fully decompressed into RAM by the time this runs) - on
+        // real EE silicon (much slower than PCSX2's dynarec for exactly this kind of hot loop) it
+        // can plausibly take long enough to look indistinguishable from a genuine hang with no
+        // feedback at all. rs2_log() goes to boot.log too (see ps2.c) for a postmortem count if it
+        // does actually stall, and the on-screen bar answers "is this still making progress" live.
+        if (n % 200 == 0) {
+            rs2_log("model_unpack: %d/%d\n", n, count);
+            ps2_boot_progress(n * 100 / count);
+        }
+#endif
         int id = g2(_Model.head);
         Metadata *meta = _Model.metadata[id] = calloc(1, sizeof(Metadata));
         meta->vertex_count = g2(_Model.head);

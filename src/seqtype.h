@@ -27,3 +27,4 @@ typedef struct {
 
 void seqtype_free_global(void);
 void seqtype_unpack(Jagfile *config);
+int seqtype_get_duration(SeqType *seq, int frame);

@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdlib.h>
 
 #include "animframe.h"
@@ -7,9 +8,56 @@
 #include "seqtype.h"
 
 SeqTypeData _SeqType = {0};
-extern AnimFrameData _AnimFrame;
 
 static void seqtype_decode(SeqType *seq, Packet *dat);
+
+// Matches the reference client's SeqType.getDuration() exactly (2004sp-client's SeqType.ts): a
+// per-frame delay of 0 means "use this frame's own embedded delay instead of a per-sequence
+// override" - resolved here, lazily, at playback time via animframe_get() (which is exactly when
+// this same frame is about to be decoded for rendering anyway, so this doesn't force any decode
+// that wasn't about to happen regardless - unlike trying to resolve this at seq-decode time,
+// which runs at boot before any real animation frame has been lazily loaded yet, see the removed
+// code this replaced in seqtype_decode() above).
+int seqtype_get_duration(SeqType *seq, int frame) {
+    if (!seq->delay || !seq->frames) {
+        return 0;
+    }
+
+    // The reference (JS) has no equivalent check here - an out-of-bounds array read in JS just
+    // silently returns undefined, which its own comparisons (undefined > n, etc.) treat as false
+    // with no crash. C has no such safety net: a real, previously-latent bug is that at least one
+    // caller (startForceMovement(), entry/client.c) calls this without first checking
+    // `frame < seq->frameCount` - harmless before this function existed, since the only thing read
+    // out of bounds was seq->delay[frame] (usually landing on plausible-looking adjacent heap
+    // data), but this function ALSO reads seq->frames[frame] - a completely separate calloc()
+    // allocation - and an out-of-bounds read there can land on genuinely unmapped memory. Confirmed
+    // via a real boot: TLB Miss faults plus cascading packet-desync errors immediately after this
+    // function started being called more broadly. Bounds-check defensively here, once, rather than
+    // auditing/fixing every call site individually. Return value matters: every real caller only
+    // ever uses this in a `cycle > duration`-shaped comparison (a subtraction of the same value
+    // only ever follows a comparison that already proved `frame` in-bounds for that same
+    // iteration), so INT_MAX - guaranteed to make that comparison false - is the faithful match
+    // for JS's real "cycle > undefined is always false" behavior on an out-of-bounds access,
+    // rather than guessing at a plausible-but-arbitrary small duration.
+    if (frame < 0 || frame >= seq->frameCount) {
+        return INT_MAX;
+    }
+
+    int duration = seq->delay[frame];
+
+    if (duration == 0) {
+        AnimFrame *transform = animframe_get(seq->frames[frame]);
+        if (transform) {
+            duration = seq->delay[frame] = transform->delay;
+        }
+    }
+
+    if (duration == 0) {
+        duration = 1;
+    }
+
+    return duration;
+}
 
 static SeqType *seqtype_new(void) {
     SeqType *seq = calloc(1, sizeof(SeqType));
@@ -75,20 +123,20 @@ static void seqtype_decode(SeqType *seq, Packet *dat) {
                     seq->iframes[i] = -1;
                 }
 
+                // A real, previously-live bug lived here: this used to try resolving a 0 (see
+                // seqtype_get_duration() below for what 0 actually means) via a raw
+                // _AnimFrame.instances[] check, then hardcode it to 1 if that didn't find
+                // anything - but this decode runs at boot, before ANY real gameplay animation
+                // frame has been lazily decoded (see animframe.c's lazy-loading note), so the
+                // check essentially never found anything and every 0-delay frame got permanently
+                // hardcoded to the fastest possible speed (1 tick/frame) the instant it was
+                // decoded, for the rest of the session. That's a strict superset of "some
+                // animations play too fast" - it's every animation whose real per-frame timing
+                // comes from the frame's own embedded delay rather than a per-sequence override
+                // (confirmed against the reference client's SeqType.decode(), which just stores
+                // the raw value here with no resolution attempt at all - see getDuration() below,
+                // which is where the reference actually resolves this, lazily, at playback time).
                 seq->delay[i] = g2(dat);
-                // Deliberately a raw array check, not animframe_get(id) - this runs for every
-                // seqtype at boot, right after animframe_unpack_ondemand(), so routing it through
-                // the lazy loader would force-decode nearly every animation frame immediately and
-                // defeat the whole point of making them lazy (see animframe.c's PS2 OOM note).
-                // Only picks up the real delay for frames some earlier lookup already cached;
-                // otherwise falls through to the "delay == 0 -> 1" default below, same as always.
-                if (seq->delay[i] == 0 && seq->frames[i] >= 0 && seq->frames[i] < _AnimFrame.count && _AnimFrame.instances[seq->frames[i]]) {
-                    seq->delay[i] = _AnimFrame.instances[seq->frames[i]]->delay;
-                }
-
-                if (seq->delay[i] == 0) {
-                    seq->delay[i] = 1;
-                }
             }
         } else if (code == 2) {
             seq->replayoff = g2(dat);

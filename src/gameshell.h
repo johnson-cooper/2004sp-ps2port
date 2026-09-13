@@ -26,6 +26,11 @@ struct GameShell {
     int key_queue_read_pos;
     int key_queue_write_pos;
     bool has_focus;
+    // True on every platform except a keyboard-less gamepad-only one (currently just PS2, set
+    // false in ps2.c's platform_new()) - gates whether entry/client.c's on-screen virtual keyboard
+    // auto-opens at text-entry focus points. Platform-agnostic by design so any other
+    // keyboard-less port can opt in later just by also setting this false.
+    bool has_keyboard;
 };
 
 extern bool update_touch;

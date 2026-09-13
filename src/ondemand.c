@@ -23,6 +23,16 @@ bool ondemand_load(int8_t *zip_data, int zip_size) {
     return true;
 }
 
+bool ondemand_load_file(const char *path) {
+    memset(&_OnDemand.zip, 0, sizeof(_OnDemand.zip));
+    if (!mz_zip_reader_init_file(&_OnDemand.zip, path, 0)) {
+        rs2_error("ondemand: failed to open ondemand.zip file (%s)\n", mz_zip_get_error_string(mz_zip_get_last_error(&_OnDemand.zip)));
+        return false;
+    }
+    _OnDemand.loaded = true;
+    return true;
+}
+
 bool ondemand_is_loaded(void) {
     return _OnDemand.loaded;
 }

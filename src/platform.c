@@ -264,6 +264,15 @@ void platform_free_surface(Surface *surface) {
 #endif
 }
 
+#ifdef __PS2__
+// See platform/ps2.c - appends every log line to a file too (mass0:/boot.log on real hardware,
+// falling back to a plain relative "boot.log" under PCSX2's host: shortcut), since a hang or crash
+// reached via uLaunchELF/a real USB boot has no live console at all (unlike ps2link, which isn't a
+// reliable option either - see ps2.c's own SifIopReset() comment) - this is the only way to get a
+// postmortem trace back off real hardware: plug the drive into a PC afterward and read the file.
+void ps2_log_to_file(const char *format, va_list args);
+#endif
+
 void rs2_log(const char *format, ...) {
     va_list args;
     va_start(args, format);
@@ -272,6 +281,12 @@ void rs2_log(const char *format, ...) {
     SDL_LogMessageV(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_INFO, format,
                     args);
 #else
+#ifdef __PS2__
+    va_list args_copy;
+    va_copy(args_copy, args);
+    ps2_log_to_file(format, args_copy);
+    va_end(args_copy);
+#endif
     vprintf(format, args);
 #endif
     fflush(stdout);
@@ -287,6 +302,12 @@ void rs2_error(const char *format, ...) {
     SDL_LogMessageV(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_ERROR,
                     format, args);
 #else
+#ifdef __PS2__
+    va_list args_copy;
+    va_copy(args_copy, args);
+    ps2_log_to_file(format, args_copy);
+    va_end(args_copy);
+#endif
     vfprintf(stderr, format, args);
 #endif
 

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "allocator.h"
 #include "collisionmap.h"
 #include "datastruct/linklist.h"
 #include "defines.h"
@@ -390,8 +391,39 @@ void world_load_ground(World *world, int originX, int originZ, int xOffset, int 
 void world_load_locations(World *world, World3D *scene, LinkList *locs, CollisionMap **collision, int8_t *src, int src_len, int xOffset, int zOffset) {
     Packet *buf = packet_new(src, src_len);
     int locId = -1;
+#ifdef __PS2__
+    // The per-mapsquare checkpoint in client_build_scene() narrowed a real-hardware hang to
+    // *inside* the very first call to this function (mapsquare 49_49, the first of 9 squares,
+    // right after a fresh bump_allocator_reset()) - so it's not simple arena exhaustion building
+    // up across squares. This function streams an unknown number of loc placements per square with
+    // no visibility into how many it gets through before dying - a per-N-placements heartbeat
+    // (reusing ps2_boot_progress(), the same font-less raw-GS progress indicator model_unpack()
+    // uses, since this function has no PixMap/Client access to draw real text) tells us whether it
+    // dies on the first placement (points at something wrong with this square's specific data or
+    // the very first loc type/model it references) or gets deep into the square first (points at
+    // per-instance cost, e.g. bump allocator fill-up within a single dense square).
+    int ps2_loc_count = 0;
+    int64_t ps2_t0 = rs2_now();
+#endif
 
     while (true) {
+#ifdef __PS2__
+        // gsmarts()/g1() do no bounds checking at all (same known hazard already documented at
+        // loctype_decode()'s unrecognised-opcode path: an unrecognised/desynced decode "can read
+        // arbitrarily far past the buffer and crash much later, far from this site") - a truncated
+        // or subtly corrupt loc stream for this one mapsquare would spin this loop reading
+        // whatever heap bytes happen to follow `buf->data` forever, never naturally hitting a 0
+        // terminator, which looks exactly like a hang and gives zero indication anything is wrong.
+        // This turns that into a clean, logged, recoverable failure instead of silent unbounded
+        // reads - it does not change behavior at all for a well-formed stream.
+        if (buf->pos >= buf->length) {
+            rs2_error("world_load_locations: decode ran past end of buffer (pos=%d len=%d) after %d placements - "
+                      "truncated or corrupt loc data, aborting this mapsquare\n",
+                      buf->pos, buf->length, ps2_loc_count);
+            free(buf);
+            return;
+        }
+#endif
         int deltaId = gsmarts(buf);
         if (deltaId == 0) {
             free(buf);
@@ -402,6 +434,15 @@ void world_load_locations(World *world, World3D *scene, LinkList *locs, Collisio
 
         int locPos = 0;
         while (true) {
+#ifdef __PS2__
+            if (buf->pos >= buf->length) {
+                rs2_error("world_load_locations: decode ran past end of buffer (pos=%d len=%d) mid-loc (id=%d) after "
+                          "%d placements - truncated or corrupt loc data, aborting this mapsquare\n",
+                          buf->pos, buf->length, locId, ps2_loc_count);
+                free(buf);
+                return;
+            }
+#endif
             int deltaPos = gsmarts(buf);
             if (deltaPos == 0) {
                 break;
@@ -418,6 +459,24 @@ void world_load_locations(World *world, World3D *scene, LinkList *locs, Collisio
             int stx = x + xOffset;
             int stz = z + zOffset;
 
+#ifdef __PS2__
+            // `level` is masked to 3 bits by the wire format's own encoding (locPos >> 12 leaves no
+            // higher bits once locPos itself is well-formed) but nothing here actually enforces
+            // that - a desynced/corrupt stream can produce a `locPos` with garbage above bit 12, and
+            // `level`/`currentLevel` then indexes world->levelHeightmap/levelTileFlags/collision[]
+            // directly with ZERO bounds checking (only stx/stz get checked below). Those are fixed
+            // 4-level arrays (see client.c's `calloc(4, ...)` for levelHeightmap/levelTileFlags) -
+            // an out-of-range level is a genuine out-of-bounds heap read/write, not just wrong game
+            // behavior, and exactly the kind of thing that corrupts silently on a forgiving desktop
+            // allocator but faults immediately on PS2's much smaller, tighter heap.
+            if (level < 0 || level >= 4) {
+                rs2_error("world_load_locations: loc #%d id=%d has out-of-range level %d (locPos=%d) - skipping "
+                          "this placement, likely stream desync\n",
+                          ps2_loc_count + 1, locId, level, locPos);
+                continue;
+            }
+#endif
+
             if (stx > 0 && stz > 0 && stx < 104 - 1 && stz < 104 - 1) {
                 int currentLevel = level;
                 if ((world->levelTileFlags[1][stx][stz] & 0x2) == 2) {
@@ -429,6 +488,24 @@ void world_load_locations(World *world, World3D *scene, LinkList *locs, Collisio
                     collisionMap = collision[currentLevel];
                 }
 
+#ifdef __PS2__
+                // Throttled to every 10th placement, not every one - rs2_log() on PS2 does a real
+                // fopen/fflush/fclose on boot.log per call (see ps2_log_to_file()), and doing that
+                // for every single placement in a dense square would add enough real USB I/O
+                // overhead per iteration to become its own confound, the same mistake the earlier
+                // (disproven) rs2_sleep(20) pacing experiment made by accident.
+                ps2_loc_count++;
+                // Unthrottled for the first few placements specifically - the previous test showed
+                // zero progress-bar movement at all (never even reached placement #10), so whatever
+                // happened, happened before the throttle would ever have logged anything. This is
+                // the only way to see it.
+                if (ps2_loc_count <= 5 || ps2_loc_count % 10 == 0) {
+                    rs2_log("world_load_locations: loc #%d id=%d shape=%d rot=%d x=%d z=%d level=%d bump=%d/%d elapsed=%dms\n",
+                            ps2_loc_count, locId, shape, rotation, stx, stz, level, bump_allocator_used(), bump_allocator_capacity(),
+                            (int)(rs2_now() - ps2_t0));
+                    ps2_boot_progress(ps2_loc_count % 100);
+                }
+#endif
                 world_add_loc2(world, level, stx, stz, scene, locs, collisionMap, locId, shape, rotation);
             }
         }

@@ -14,6 +14,12 @@
 extern ClientData _Client;
 extern InputTracking _InputTracking;
 
+#ifdef __PS2__
+// See platform/ps2.c - "mass:/" once a USB mass-storage device is detected, else "" (today's
+// plain relative path, which PCSX2's host: dev shortcut transparently redirects).
+const char *ps2_cache_prefix(void);
+#endif
+
 #if defined(__WII__) || defined(__3DS__) || defined(__WIIU__) || defined(__SWITCH__) || defined(__PSP__) || defined(__vita__) || defined(_arch_dreamcast) || defined(NXDK) || defined(__NDS__) || defined(ANDROID)
 Custom _Custom = {.chat_era = 2, .http_port = 80, .show_performance = true};
 #else
@@ -55,6 +61,10 @@ Custom _Custom = {.chat_era = 2, .http_port = 80};
 bool load_ini_args(void) {
 #ifdef NXDK
     ini_t *config = ini_load("D:\\config.ini");
+#elif defined(__PS2__)
+    char config_path[64];
+    snprintf(config_path, sizeof(config_path), "%sconfig.ini", ps2_cache_prefix());
+    ini_t *config = ini_load(config_path);
 #else
     ini_t *config = ini_load("config.ini");
 #endif
@@ -83,6 +93,10 @@ bool load_ini_args(void) {
 void load_ini_config(Client *c) {
 #ifdef NXDK
     ini_t *config = ini_load("D:\\config.ini");
+#elif defined(__PS2__)
+    char config_path[64];
+    snprintf(config_path, sizeof(config_path), "%sconfig.ini", ps2_cache_prefix());
+    ini_t *config = ini_load(config_path);
 #else
     ini_t *config = ini_load("config.ini");
 #endif

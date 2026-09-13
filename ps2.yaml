@@ -24,4 +24,38 @@ targets:
       - patches
       - pad
       - m
-    embed_irx: [dev9, netman, smap]
+    embed_irx:
+      # All 8 modules are embedded again, including dev9/netman/smap - a real, deliberate step back
+      # from an EE-memory-reclaim attempt (making dev9/netman/smap file-loaded and freed after use,
+      # saving ~39KB) that had to be abandoned: it required loading USB before networking so those
+      # three could be read from a working device, and doing that - on TWO separate USB driver
+      # stacks (first usbhdfsd, then this same BDM stack) - caused a new real-hardware-only stall
+      # mid-network-bring-up that never happened with everything embedded and USB deferred until
+      # after DHCP. That the stall reproduced on both driver stacks is itself evidence it's not
+      # about which driver, but about USB activity anywhere near network bring-up at all - the same
+      # class of problem this project's own precedent already found once before (SIO2MAN/PADMAN
+      # moved to AFTER network bring-up due to IOP resource/thread contention with SMAP's own worker
+      # threads). A boot-time stall is a worse failure than the memory cost, so this fully reverts to
+      # the original, proven-stable sequence (see ps2.c's platform_init()): dev9/netman/smap load and
+      # bring up networking completely first, USB loads only once that's done.
+      #
+      # The BDM stack itself (usbd+iomanx+bdm+bdmfs_fatfs+usbmass_bd, ~97KB across 5 modules)
+      # replaced an earlier, lighter usbhdfsd attempt for an unrelated, still-valid reason: usbhdfsd
+      # had a real reliability problem under sustained I/O on real hardware, confirmed via two
+      # independent hangs in different code paths (opening ~830 separate small map files one at a
+      # time; separately, seeking through ~8929 entries inside a single already-combined
+      # ondemand.zip archive - the second case rules out "too many separate files" as the
+      # explanation, since that archive was never many files). Neither hang ever reproduced on
+      # PCSX2. BDM is what this project's own boot loader already uses successfully to read
+      # client.elf itself, and what a separate, more mature PS2 homebrew project
+      # (OptiJuegos/ReleasePlusPlus) uses in its own shipped real-hardware builds - real, working
+      # precedent, not a guess. That part of the fix stays; only the file-vs-embedded question for
+      # dev9/netman/smap reverted.
+      - dev9:dev9_embed
+      - netman:netman_embed
+      - smap:smap_embed
+      - usbd:usbd_embed
+      - iomanx:iomanx_embed
+      - bdm:bdm_embed
+      - bdmfs_fatfs:bdmfs_fatfs_embed
+      - usbmass_bd:usbmass_bd_embed

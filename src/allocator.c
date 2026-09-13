@@ -12,6 +12,16 @@ typedef struct {
     int8_t *data;
     int capacity;
     int used;
+#ifdef __PS2__
+    // Diagnostic-only (see PHASE 7 audit notes): the scene bump arena has essentially zero safety
+    // margin on PS2 (sized from observed overflow amounts, not a real budget - see the sizing
+    // comment at bump_allocator_init()'s PS2 call site in entry/client.c) and callers don't tag
+    // their allocations by subsystem, so a plain size histogram + running count is the cheapest way
+    // to see WHAT is filling it without instrumenting ~150 individual call sites in model.c.
+    int alloc_count;
+    int largest_alloc;
+    int histogram[6]; // buckets: <=32, <=128, <=512, <=2048, <=8192, >8192 bytes
+#endif
 } BumpAllocator;
 
 static BumpAllocator alloc = {0};
@@ -57,8 +67,25 @@ void bump_allocator_free(void) {
 
 void bump_allocator_reset(void) {
     // rs2_log("Allocator reset: clearing caches (size %d)", alloc.used);
+#ifdef __PS2__
+    // Log the completed cycle's peak usage BEFORE clearing it - this is the only place a
+    // successful (non-overflowing) scene build's real high-water mark is visible; previously only
+    // an actual overflow logged anything at all.
+    if (alloc.alloc_count > 0) {
+        rs2_log("Scene arena cycle complete: used=%d/%d, alloc_count=%d, largest_alloc=%d, "
+                "histogram(<=32/<=128/<=512/<=2048/<=8192/>8192): %d %d %d %d %d %d\n",
+                alloc.used, alloc.capacity, alloc.alloc_count, alloc.largest_alloc,
+                alloc.histogram[0], alloc.histogram[1], alloc.histogram[2], alloc.histogram[3],
+                alloc.histogram[4], alloc.histogram[5]);
+    }
+#endif
     memset(alloc.data, 0, alloc.capacity);
     alloc.used = 0;
+#ifdef __PS2__
+    alloc.alloc_count = 0;
+    alloc.largest_alloc = 0;
+    memset(alloc.histogram, 0, sizeof(alloc.histogram));
+#endif
 }
 
 void *rs2_malloc(bool use_allocator, int size) {
@@ -77,8 +104,24 @@ static void *bump_alloc(int size) {
 #else
     int aligned_ptr = alloc.used + 7 & ~7;
 #endif
+#ifdef __PS2__
+    alloc.alloc_count++;
+    if (size > alloc.largest_alloc) {
+        alloc.largest_alloc = size;
+    }
+    int bucket = size <= 32 ? 0 : size <= 128 ? 1 : size <= 512 ? 2 : size <= 2048 ? 3 : size <= 8192 ? 4 : 5;
+    alloc.histogram[bucket]++;
+#endif
     if (aligned_ptr + size > alloc.capacity) {
+#ifdef __PS2__
+        rs2_error("Allocator full: this should never happen! attempted: %d, capacity: %d, alloc_count: %d, "
+                  "largest_alloc: %d, histogram(<=32/<=128/<=512/<=2048/<=8192/>8192): %d %d %d %d %d %d",
+                  alloc.used + size, alloc.capacity, alloc.alloc_count, alloc.largest_alloc,
+                  alloc.histogram[0], alloc.histogram[1], alloc.histogram[2], alloc.histogram[3],
+                  alloc.histogram[4], alloc.histogram[5]);
+#else
         rs2_error("Allocator full: this should never happen! attempted: %d, capacity: %d", alloc.used + size, alloc.capacity);
+#endif
         exit(1);
     }
 

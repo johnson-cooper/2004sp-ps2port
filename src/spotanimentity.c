@@ -20,8 +20,8 @@ SpotAnimEntity *spotanimentity_new(int id, int level, int x, int z, int y, int c
 }
 
 void spotanimentity_update(SpotAnimEntity *entity, int delta) {
-    for (entity->seqCycle += delta; entity->seqCycle > entity->type->seq->delay[entity->seqFrame];) {
-        entity->seqCycle -= entity->type->seq->delay[entity->seqFrame] + 1;
+    for (entity->seqCycle += delta; entity->seqCycle > seqtype_get_duration(entity->type->seq, entity->seqFrame);) {
+        entity->seqCycle -= seqtype_get_duration(entity->type->seq, entity->seqFrame) + 1;
         entity->seqFrame++;
 
         if (entity->seqFrame >= entity->type->seq->frameCount) {

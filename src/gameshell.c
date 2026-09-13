@@ -11,6 +11,74 @@
 #include <3ds.h>
 #endif
 
+#ifdef __PS2__
+#include <malloc.h>
+
+#include "allocator.h"
+#include "clientstream.h"
+
+// PHASE 4 audit instrumentation: per-phase frame timing, aggregated and printed every ~2s rather
+// than every frame (rs2_log isn't free - see platform.c's fflush-per-call note - and per-frame
+// spam would itself be a measurable overhead on top of what's being measured). Wall-clock (rs2_now,
+// millisecond resolution) rather than a cycle counter - coarser, but survives PCSX2/real-hardware
+// clock-rate differences and needs no new platform API.
+typedef struct {
+    int64_t frame_ms;
+    int64_t update_ms;
+    int64_t draw_ms;
+    int64_t gs_upload_ms;
+    int frame_count;
+    int64_t window_start;
+} PerfAccum;
+static PerfAccum _Perf = {0};
+// Self-measurement: rs2_log() does vprintf()+fflush(stdout) per call (platform.c), and the report
+// below used to be 15 lines in one call - if PCSX2's console has real per-line cost (GUI repaint,
+// or fflush itself being expensive over however PS2 stdout is actually wired up), that cost happens
+// BETWEEN perf windows, invisible to every timer inside them - it would look exactly like the
+// bursty "fast then frozen" pattern being reported, and would explain why fixing recv() batching
+// changed nothing (if the real cost was never in recv() at all). Can't time a print during its own
+// call, so this stores the duration and reports it deferred by one window instead.
+static int64_t _last_log_ms = 0;
+
+static void perf_report_if_due(void) {
+    int64_t now = rs2_now();
+    if (_Perf.window_start == 0) {
+        _Perf.window_start = now;
+        return;
+    }
+    int64_t elapsed = now - _Perf.window_start;
+    if (elapsed < 2000 || _Perf.frame_count == 0) {
+        return;
+    }
+    double fps = _Perf.frame_count * 1000.0 / (double)elapsed;
+    int64_t log_t0 = rs2_now();
+    rs2_log("PERF fps=%.1f frame=%.1f update=%.1f netwait=%.1f netcall=%.1f pkt=%.1f npcpos=%.1f getplr=%.1f plr=%.1f npc=%.1f chat=%.1f mrgl=%.1f draw=%.1f gs=%.1f ramKB=%d arenaKB=%d/%d lastlogms=%d\n",
+             fps,
+             (double)_Perf.frame_ms / _Perf.frame_count,
+             (double)_Perf.update_ms / _Perf.frame_count,
+             (double)clientstream_net_wait_ms() / _Perf.frame_count,
+             (double)clientstream_net_call_ms() / _Perf.frame_count,
+             (double)client_tick_packets_ms() / _Perf.frame_count,
+             (double)client_tick_getnpcpos_ms() / _Perf.frame_count,
+             (double)client_tick_getplayer_ms() / _Perf.frame_count,
+             (double)client_tick_players_ms() / _Perf.frame_count,
+             (double)client_tick_npcs_ms() / _Perf.frame_count,
+             (double)client_tick_chats_ms() / _Perf.frame_count,
+             (double)client_tick_mergelocs_ms() / _Perf.frame_count,
+             (double)_Perf.draw_ms / _Perf.frame_count,
+             (double)_Perf.gs_upload_ms / _Perf.frame_count,
+             mallinfo().fordblks / 1024,
+             bump_allocator_used() / 1024, bump_allocator_capacity() / 1024,
+             (int)_last_log_ms);
+    _last_log_ms = rs2_now() - log_t0;
+    clientstream_net_wait_reset();
+    clientstream_net_call_reset();
+    client_tick_phase_reset();
+    _Perf = (PerfAccum){0};
+    _Perf.window_start = now;
+}
+#endif
+
 extern InputTracking _InputTracking;
 
 bool update_touch = false;
@@ -38,6 +106,7 @@ GameShell *gameshell_new(void) {
     shell->key_queue = calloc(128, sizeof(int));
     shell->key_queue_read_pos = 0;
     shell->key_queue_write_pos = 0;
+    shell->has_keyboard = true;
     return shell;
 }
 
@@ -119,6 +188,9 @@ void gameshell_run(Client *c) {
         }
 
         rs2_sleep(delta);
+#ifdef __PS2__
+        int64_t frame_t0 = rs2_now();
+#endif
         while (count < 256) {
             platform_poll_events(c);
             client_update(c);
@@ -126,13 +198,28 @@ void gameshell_run(Client *c) {
             c->shell->key_queue_read_pos = c->shell->key_queue_write_pos;
             count += ratio;
         }
+#ifdef __PS2__
+        int64_t update_t1 = rs2_now();
+#endif
         count &= 0xff;
         if (c->shell->deltime > 0) {
             c->shell->fps = ratio * 1000 / (c->shell->deltime * 256);
         }
         client_draw(c);
         gameshell_update_touch(c); // update mouse after client_draw_scene to fix model picking (not needed for touch on release like client-ts)
+#ifdef __PS2__
+        int64_t draw_t2 = rs2_now();
+#endif
         platform_update_surface();
+#ifdef __PS2__
+        int64_t gs_t3 = rs2_now();
+        _Perf.update_ms += update_t1 - frame_t0;
+        _Perf.draw_ms += draw_t2 - update_t1;
+        _Perf.gs_upload_ms += gs_t3 - draw_t2;
+        _Perf.frame_ms += gs_t3 - frame_t0;
+        _Perf.frame_count++;
+        perf_report_if_due();
+#endif
     }
     if (c->shell->state == -1) {
         gameshell_shutdown(c);
