@@ -30,6 +30,8 @@
 #include "../defines.h"
 #include "../gameshell.h"
 #include "../inputtracking.h"
+#include "../pix2d.h"
+#include "../pixfont.h"
 #include "../pixmap.h"
 #include "../thirdparty/bzip.h"
 
@@ -69,15 +71,10 @@ static GSTEXTURE screenTexture;
 // the canvas is ever visible (125px cut off horizontally, 23px vertically), which reads as
 // "zoomed in" since nothing is actually made smaller, just less of it is shown.
 //
-// This instead keeps a full-resolution SOURCE texture - CPU-side rendering is untouched, still the
-// full 765x503 logical canvas, just padded up to SCREEN_SRC_WIDTH (768, the next 64-aligned value)
-// so the GS tiling requirement above is still satisfied; the padding columns are simply never drawn
-// to. platform_update_surface()'s existing gsKit_prim_sprite_texture_3d call already takes
-// independent source (u/v) and destination (x/y) rectangles for its textured quad - sampling the
-// real 765x503 region as source but a 640x480 destination lets the GS hardware scale the whole
-// canvas down for free as part of a draw call that already happens every frame, at zero added
-// per-pixel CPU cost (unlike resampling every platform_blit_surface() call individually, which is
-// called many times per frame for arbitrary small rects - see platform.c's draw_rect/fill_rect).
+// Text and phase diagnostics must be readable on the television.  The simple UI profile frees
+// enough cached chrome to return this final composite to native resolution.
+#define SCREEN_LOGICAL_WIDTH SCREEN_WIDTH
+#define SCREEN_LOGICAL_HEIGHT SCREEN_HEIGHT
 #define SCREEN_SRC_WIDTH 768
 
 // Filling the full 640x480 destination with a 765x503 source independently per axis (640/765 for
@@ -88,7 +85,7 @@ static GSTEXTURE screenTexture;
 // fill the width leaves the scaled height short of 480 - centered with a thin letterbox rather than
 // stretched to fill it.
 #define SCREEN_DST_WIDTH SCREEN_FB_WIDTH
-#define SCREEN_DST_HEIGHT (SCREEN_HEIGHT * SCREEN_FB_WIDTH / SCREEN_WIDTH)
+#define SCREEN_DST_HEIGHT (SCREEN_LOGICAL_HEIGHT * SCREEN_FB_WIDTH / SCREEN_LOGICAL_WIDTH)
 #define SCREEN_DST_X 0
 #define SCREEN_DST_Y ((SCREEN_FB_HEIGHT - SCREEN_DST_HEIGHT) / 2)
 
@@ -232,7 +229,140 @@ void ps2_boot_progress(int percent) {
     gsKit_sync_flip(gsGlobal);
 }
 
+// 2026-09-14: real-hardware-only scene-construction hang, narrowed over many rounds of on-screen
+// checkpoints to somewhere inside world_load_locations() for the very first loc file of a scene -
+// every downstream suspect (loc->anim bounds, model_from_id() NULL, a GS-sync diagnostic cost) has
+// been fixed and ruled out without changing the freeze point at all. This project has a real,
+// already-confirmed precedent for exactly this failure shape - a genuine unhandled EE exception
+// (the errno-alignment bug elsewhere in this file) that PCSX2 tolerates but real silicon faults on,
+// with nothing here ever having installed a custom exception handler to report it. Instead of
+// continuing to guess at C-level bugs one at a time, this installs a minimal handler for the most
+// likely synchronous exception causes (address error load/store, bus error, reserved instruction,
+// coprocessor-unusable, overflow, trap - deliberately NOT Syscall(8) or Interrupt(0), which are
+// legitimately used by the OS/game itself) that reads EPC/Cause/BadVAddr directly from COP0 via the
+// real GetCop0() kernel call and renders them through ps2_scene_checkpoint() - reused specifically
+// because by the time any scene-construction fault could occur, ps2_crash_client (see client.h) has
+// already been fully initialized and successfully used for dozens of checkpoint draws this session,
+// making it far lower-risk than writing a new raw GS text path untested from inside a real exception
+// context. Deliberately does NOT attempt to resume execution (no ERET handling) - it renders once,
+// then loops forever redrawing every ~1s so the on-screen text survives long enough for a photo,
+// rather than risking undefined behavior from resuming after an unknown fault. EPC, once seen, can
+// be resolved to an exact C file/line via:
+//   mips64r5900el-ps2-elf-addr2line -e client.elf -f -C 0x<EPC>
+static void ps2_exception_handler(void) {
+    uint32_t epc = GetCop0(COP0_EPC);
+    uint32_t cause = GetCop0(COP0_CAUSE);
+    uint32_t badvaddr = GetCop0(COP0_BADVADDR);
+    uint32_t status = GetCop0(COP0_STATUS);
+    char msg[96];
+    snprintf(msg, sizeof(msg), "EE EXCEPTION cause=%u epc=0x%08x bad=0x%08x sr=0x%08x", (unsigned int)((cause >> 2) & 0x1f),
+             (unsigned int)epc, (unsigned int)badvaddr, (unsigned int)status);
+    // 2026-09-14: draws directly instead of going through ps2_scene_checkpoint() (now globally a
+    // no-op via client.c's PS2_CHECKPOINTS_ENABLED master switch, added after repeated confirmed
+    // false freezes from stacking many checkpoint draws during NORMAL execution). A real EE exception
+    // is the opposite case - it fires at most once per run and this loop redraws the SAME message
+    // roughly once a second (via the busy-wait below), not rapidly stacked - so it was never actually
+    // part of that problem, and going silent here would mean a genuine future crash produces zero
+    // diagnostic output at all. Safe to bypass unconditionally.
+    for (;;) {
+        if (ps2_crash_client) {
+            pixmap_bind(ps2_crash_client->area_viewport);
+            pix2d_fill_rect(0, 170, BLACK, 512, 20);
+            drawStringCenter(ps2_crash_client->font_plain12, 257, 181, msg, BLACK);
+            drawStringCenter(ps2_crash_client->font_plain12, 256, 180, msg, WHITE);
+            pixmap_draw(ps2_crash_client->area_viewport, 4, 4);
+            platform_update_surface();
+        }
+        for (volatile int i = 0; i < 30000000; i++) {
+        }
+    }
+}
+
+// 2026-09-14: added alongside the OOM NULL-checks swept through model.c/allocator.c this pass - see
+// this function's own declaration comment in client.h for why it bypasses PS2_CHECKPOINTS_ENABLED.
+// Drawn at a different row than ps2_exception_handler()'s message (y=190 vs y=170) so the two can
+// never visually overlap if an OOM is what then triggers a subsequent NULL-deref exception.
+void ps2_report_oom(const char *msg) {
+    static int ps2_oom_draws = 0;
+    if (!ps2_crash_client || ps2_oom_draws >= 3) {
+        return;
+    }
+    ps2_oom_draws++;
+    pixmap_bind(ps2_crash_client->area_viewport);
+    pix2d_fill_rect(0, 190, BLACK, 512, 20);
+    drawStringCenter(ps2_crash_client->font_plain12, 257, 201, msg, BLACK);
+    drawStringCenter(ps2_crash_client->font_plain12, 256, 200, msg, WHITE);
+    pixmap_draw(ps2_crash_client->area_viewport, 4, 4);
+    platform_update_surface();
+}
+
+static void ps2_install_exception_handler(void) {
+    // 2026-09-14: narrowed from all 9 synchronous-exception causes to just AdEL/AdES (address error on
+    // load/store) - see the removal note at the old call site below for why hooking the full set
+    // regressed earlier (almost certainly CpU firing as normal, silently-recovered behavior during
+    // lazy FPU context save/restore, turned into a permanent hang by this handler's deliberate no-ERET
+    // design). AdEL/AdES specifically mean "dereferenced an invalid/misaligned address" - not something
+    // legitimate kernel/FPU bookkeeping raises during normal operation - so this is a much narrower,
+    // safer bet for catching a genuine bad-pointer crash, which is exactly what real-hardware
+    // checkpoint bisection has narrowed model_calculate_bounds_cylinder() down to: a hang in a ~5-line
+    // window too small for further checkpoint-based bisection to resolve.
+    // 2026-09-14: added TLB Mod/TLBL/TLBS (1,2,3). Bisection has since moved to a new freeze site -
+    // hashtable_get()'s very first line (table->buckets[...]) in lrucache_get(), frozen on the
+    // "before hashtable_get" checkpoint with the loop-guard's own cycle-detection message never
+    // appearing, meaning execution stopped dead rather than looping. A plain invalid/unmapped pointer
+    // dereference (a wild/corrupted `cache->hashtable`) raises a TLB exception on MIPS, NOT AdEL/AdES
+    // (those are specifically for misaligned-but-mapped addresses) - this exact cause family has never
+    // been hooked before now. Still deliberately excludes CpU(11)/Ov(12)/Tr(13)/Bp(9)/RI(10)/bus
+    // errors(6,7) and Sys(8)/Int(0), matching the prior narrowing rationale: TLB causes aren't raised
+    // by legitimate FPU lazy-save/restore, so this shouldn't reintroduce that regression.
+    // 2026-09-14, later session: added IBE/DBE bus errors (6,7). Context: after the patch-plan item-1
+    // NULL-check sweep (model.c/allocator.c) and the item-4 ondemand-payload bounds check, a fresh
+    // hardware run still hung with NEITHER an OOM screen NOR an "EE EXCEPTION" screen appearing - i.e.
+    // not caught by anything hooked so far, and not a bump-arena exhaustion (that path now always
+    // draws before returning NULL, per ps2_report_oom() above). A genuinely wild/corrupted pointer
+    // dereferencing a physical address with no real backing memory (as opposed to a merely misaligned
+    // one, AdEL/AdES's case, or one needing a TLB entry the EE doesn't really use in this direct-mapped
+    // context) raises a bus error, not an address or TLB exception - this specific cause family was
+    // never tried. Unlike CpU, bus errors aren't part of normal FPU lazy-save/restore bookkeeping, so
+    // this shouldn't reintroduce the earlier all-9-causes regression; still leaving out
+    // CpU(11)/Ov(12)/Tr(13)/Bp(9)/RI(10)/Sys(8)/Int(0) for the same reasons as before.
+    // 2026-09-14, later session: bus errors ALSO came back silent on a fresh run, so Ov(12)/Tr(13)/
+    // RI(10)/Bp(9) were tried too, reasoning they weren't part of the FPU lazy-save/restore mechanism
+    // that caused the original CpU regression. REVERTED after one hardware round: the very next test
+    // crashed hard to OSDSYS (a full PS2 reset, not a hang) right as the title screen's real per-frame
+    // rendering started - a fundamentally worse regression than CpU's, and Ov is almost certainly why.
+    // This codebase relies on wraparound signed-integer arithmetic constantly and BY DESIGN (see the
+    // large family of pre-existing "suggest parentheses around '+'/'-' in operand of '&'" compiler
+    // warnings throughout client.c - `entity->dstYaw - entity->yaw & 0x7ff` angle wrapping, `mix()`'s
+    // `(src & 0xff00ff) * invAlpha + (dst & 0xff00ff) * alpha & 0xff00ff00` color blending, etc.) - on
+    // MIPS, `add`/`sub` trap on signed overflow (unlike `addu`/`subu`), so hooking Ov very plausibly
+    // fires on completely ordinary, intended overflow the moment real rendering math runs. Worse: this
+    // handler's own drawing code (pixmap/pix2d/font blending) does the exact same class of arithmetic
+    // WHILE ALREADY INSIDE the fault vector - a second overflow there, with no ERET and no real nested-
+    // exception handling by design, is the most likely explanation for a hard reset instead of the
+    // intended diagnostic screen (a fault inside the fault handler, with nowhere left to go). Back to
+    // the previously-validated set only. Do not re-add Ov/Tr/RI/Bp without first auditing whether the
+    // handler's OWN draw path can itself overflow, not just re-trying blindly.
+    int causes[] = {1, 2, 3, 4, 5, 6, 7}; // Mod, TLBL, TLBS, AdEL, AdES, IBE, DBE
+    for (unsigned int i = 0; i < sizeof(causes) / sizeof(causes[0]); i++) {
+        SetVCommonHandler(causes[i], (void *)ps2_exception_handler);
+    }
+}
+
 bool platform_init(void) {
+    // 2026-09-14: ps2_install_exception_handler() RE-ENABLED, narrowed to just AdEL/AdES (see that
+    // function's own comment). Original attempt hooked all 9 synchronous-exception causes and
+    // regressed the freeze earlier (back to the initial map file-read stage, exception screen never
+    // appearing) - almost certainly CpU (coprocessor-unusable) firing as normal, silently-recovered
+    // behavior during lazy FPU context save/restore somewhere in the boot path, turned into a
+    // permanent hang by this handler's deliberate no-ERET design. AdEL/AdES (address error on
+    // load/store) are a much narrower bet: they specifically mean a bad/misaligned pointer
+    // dereference, not something legitimate kernel/FPU bookkeeping raises. Real-hardware checkpoint
+    // bisection has since narrowed the actual scene-construction hang down to a ~5-line window inside
+    // model_calculate_bounds_cylinder() too small for further checkpoint-based bisection to resolve -
+    // if it's a genuine bad pointer access, this will catch it and print the real EPC/BadVAddr instead
+    // of more guessing.
+    ps2_install_exception_handler();
     dmaKit_init(D_CTRL_RELE_OFF, D_CTRL_MFD_OFF, D_CTRL_STS_UNSPEC, D_CTRL_STD_OFF, D_CTRL_RCYC_8, 1 << DMA_CHANNEL_GIF);
     dmaKit_chan_init(DMA_CHANNEL_GIF);
 
@@ -320,6 +450,16 @@ bool platform_init(void) {
     extern unsigned char smap_embed_irx[];
     extern unsigned int size_smap_embed_irx;
 
+    // Reverted back to embedding dev9 - the "it's ROM-resident, embedding is only a PCSX2 quirk"
+    // theory was real reasoning, but the actual real-hardware test regressed: the game hung/stalled
+    // much EARLIER (during boot/loading, before even reaching login) than the original scene-
+    // construction hang this was meant to help investigate. Whatever the exact mechanism (this
+    // specific uLaunchELF-based boot chain interacting badly with a plain SifLoadModule("rom0:...")
+    // call at this point in the sequence, vs. SifExecModuleBuffer - not yet understood), the empirical
+    // result is unambiguous: this real-hardware setup needs dev9 embedded too, matching all 7 of the
+    // others. Kept the reasoning above (in git blame / this file's history) as a record of a
+    // plausible-but-empirically-wrong idea, not repeated here - don't re-attempt this exact change
+    // without new evidence.
     int dev9_modres = -1;
     int dev9_ret = SifExecModuleBuffer(dev9_embed_irx, size_dev9_embed_irx, 0, NULL, &dev9_modres);
     rs2_log("net: dev9 ret=%d modres=%d\n", dev9_ret, dev9_modres);
@@ -488,17 +628,16 @@ void platform_new(GameShell *shell) {
     shell->has_keyboard = false;
     // Full logical canvas height (SCREEN_HEIGHT, 503 - no alignment requirement), padded width
     // (SCREEN_SRC_WIDTH, 768 - see the comment above platform_init()) - holds the whole 765x503
-    // canvas rather than a 640x480 crop of it; platform_update_surface() scales it down to the
+    // canvas rather than a 640x480 crop of it; platform_update_surface() scales it up to the
     // physical 640x480 output when drawing it as a textured sprite.
     screenTexture.Width = SCREEN_SRC_WIDTH;
-    screenTexture.Height = SCREEN_HEIGHT;
+    screenTexture.Height = SCREEN_LOGICAL_HEIGHT;
     // CT16 halves this texture's VRAM cost vs CT32 (2 bytes/pixel instead of 4) - needed to fit
     // alongside the double-buffered framebuffer in GS's 4MB VRAM (see platform_init()'s note).
     screenTexture.PSM = GS_PSM_CT16;
-    // LINEAR instead of NEAREST now that this texture is genuinely scaled (768x503 source down to
-    // 640x480 destination, a non-integer ratio) rather than drawn 1:1 - NEAREST would alias/look
-    // blocky under real scaling.
-    screenTexture.Filter = GS_FILTER_LINEAR;
+    // The game uses a tiny pixel font.  At reduced-resolution presentation, nearest keeps that font
+    // legible; linear filtering was visibly blurred in the real-hardware capture.
+    screenTexture.Filter = GS_FILTER_NEAREST;
     // Delayed=1 ("delay upload to VRAM") isn't documented beyond its header comment (gsKit ships
     // prebuilt, no source to check its exact semantics against) and we already explicitly call
     // gsKit_texture_upload() ourselves every frame - 0 removes any ambiguity about the two
@@ -529,20 +668,26 @@ void platform_free(void) {
     free(screenTexture.Mem);
 }
 
+void platform_clear_surface(void) {
+    if (screenTexture.Mem) {
+        memset(screenTexture.Mem, 0, gsKit_texture_size(screenTexture.Width, screenTexture.Height, screenTexture.PSM));
+    }
+}
+
 void platform_update_surface(void) {
     // Each of the two double-buffered surfaces still needs its own margin cleared before it's
     // first displayed, not just whichever was active at startup, hence the per-frame clear.
     gsKit_clear(gsGlobal, GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x00, 0x00));
     gsKit_texture_upload(gsGlobal, &screenTexture);
-    // Source rect is the real SCREEN_WIDTH x SCREEN_HEIGHT (765x503) canvas, NOT
-    // screenTexture.Width/Height (768x503 - includes the alignment padding columns, which would
+    // Source rect is the half-resolution logical canvas, NOT screenTexture.Width/Height (which
+    // includes alignment padding columns that would
     // otherwise get sampled into the scaled output as a thin sliver of garbage/black on the right
     // edge). Destination rect (SCREEN_DST_*, see above) is a uniformly-scaled, letterboxed
     // sub-rectangle of gsGlobal->Width/Height (640x480), not the full thing - aspect-correct
     // instead of stretched.
     gsKit_prim_sprite_texture_3d(gsGlobal, &screenTexture,
                                   SCREEN_DST_X, SCREEN_DST_Y, 0, 0, 0,
-                                  SCREEN_DST_X + SCREEN_DST_WIDTH, SCREEN_DST_Y + SCREEN_DST_HEIGHT, 0, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                  SCREEN_DST_X + SCREEN_DST_WIDTH, SCREEN_DST_Y + SCREEN_DST_HEIGHT, 0, SCREEN_LOGICAL_WIDTH, SCREEN_LOGICAL_HEIGHT,
                                   GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00));
     gsKit_queue_exec(gsGlobal);
     gsKit_sync_flip(gsGlobal);
@@ -555,30 +700,23 @@ void platform_blit_surface(Surface *surface, int x, int y) {
     // (see the CT32 note this replaced for why channel order matters here) and set opaque.
     uint16_t *dst = (uint16_t *)screenTexture.Mem;
     uint32_t *src = (uint32_t *)surface->pixels;
-    // x/y arrive in the game's full logical canvas (SCREEN_WIDTH x SCREEN_HEIGHT, 765x503), which
-    // is now also what screenTexture holds (see the comment above platform_init()) - no offset
-    // needed, just clip to the real canvas bounds (screenTexture.Width itself is padded wider, to
-    // SCREEN_SRC_WIDTH, purely for GS tiling alignment - nothing should actually draw into that
-    // padding).
-    for (int row = 0; row < surface->h; row++) {
-        int screen_y = y + row;
-        if (screen_y < 0) {
-            continue;
-        }
-        if (screen_y >= SCREEN_HEIGHT) {
-            break;
-        }
+    // x/y are full game-canvas coordinates.  Resample panels directly into the 3/4 composite;
+    // this is only the final UI copy, while the GS performs the scale to television output.
+    int first_y = MAX(0, (y * SCREEN_LOGICAL_HEIGHT + SCREEN_HEIGHT - 1) / SCREEN_HEIGHT);
+    int end_y = MIN(SCREEN_LOGICAL_HEIGHT, ((y + surface->h) * SCREEN_LOGICAL_HEIGHT + SCREEN_HEIGHT - 1) / SCREEN_HEIGHT);
+    int first_x = MAX(0, (x * SCREEN_LOGICAL_WIDTH + SCREEN_WIDTH - 1) / SCREEN_WIDTH);
+    int end_x = MIN(SCREEN_LOGICAL_WIDTH, ((x + surface->w) * SCREEN_LOGICAL_WIDTH + SCREEN_WIDTH - 1) / SCREEN_WIDTH);
+    for (int screen_y = first_y; screen_y < end_y; screen_y++) {
         uint16_t *dst_row = &dst[screen_y * screenTexture.Width];
-        uint32_t *src_row = &src[row * surface->w];
-        for (int col = 0; col < surface->w; col++) {
-            int screen_x = x + col;
-            if (screen_x < 0) {
-                continue;
-            }
-            if (screen_x >= SCREEN_WIDTH) {
-                break;
-            }
-            uint32_t argb = src_row[col];
+        int src_y = screen_y * SCREEN_HEIGHT / SCREEN_LOGICAL_HEIGHT - y;
+        if (src_y < 0) src_y = 0;
+        if (src_y >= surface->h) src_y = surface->h - 1;
+        uint32_t *src_row = &src[src_y * surface->w];
+        for (int screen_x = first_x; screen_x < end_x; screen_x++) {
+            int src_x = screen_x * SCREEN_WIDTH / SCREEN_LOGICAL_WIDTH - x;
+            if (src_x < 0) src_x = 0;
+            if (src_x >= surface->w) src_x = surface->w - 1;
+            uint32_t argb = src_row[src_x];
             uint32_t r5 = ((argb >> 16) & 0xFF) >> 3;
             uint32_t g5 = ((argb >> 8) & 0xFF) >> 3;
             uint32_t b5 = (argb & 0xFF) >> 3;
@@ -600,7 +738,8 @@ void platform_save_region(int x, int y, int w, int h, uint16_t *out) {
         int sy = y + row;
         for (int col = 0; col < w; col++) {
             int sx = x + col;
-            out[row * w + col] = (sy < 0 || sy >= SCREEN_HEIGHT || sx < 0 || sx >= SCREEN_WIDTH) ? 0 : src[sy * screenTexture.Width + sx];
+            out[row * w + col] = (sy < 0 || sy >= SCREEN_HEIGHT || sx < 0 || sx >= SCREEN_WIDTH) ? 0 :
+                                 src[(sy * SCREEN_LOGICAL_HEIGHT / SCREEN_HEIGHT) * screenTexture.Width + sx * SCREEN_LOGICAL_WIDTH / SCREEN_WIDTH];
         }
     }
 }
@@ -617,7 +756,7 @@ void platform_restore_region(int x, int y, int w, int h, const uint16_t *in) {
             if (sx < 0 || sx >= SCREEN_WIDTH) {
                 continue;
             }
-            dst[sy * screenTexture.Width + sx] = in[row * w + col];
+            dst[(sy * SCREEN_LOGICAL_HEIGHT / SCREEN_HEIGHT) * screenTexture.Width + sx * SCREEN_LOGICAL_WIDTH / SCREEN_WIDTH] = in[row * w + col];
         }
     }
 }

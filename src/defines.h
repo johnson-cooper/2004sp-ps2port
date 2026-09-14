@@ -52,11 +52,48 @@
 
 // avoid doubles on consoles with only single precision floats or no fpu at all!
 // TODO: this doesn't change all occurences of doubles into floats yet
-#if defined(__PSP__) || defined(__NDS__)
+// 2026-09-14: __PS2__ added per the original C client author - PS2's EE FPU is single-precision only
+// (per the PS2 wiki), same constraint as PSP/NDS here. Previously this flag only gated two genuinely
+// cold-path functions (pix3d_set_gamma, jrand); this session extended it to the real hot paths -
+// model.c's per-face/per-vertex sqrt() calls and world.c's per-tile lighting sqrt() (up to 104*104
+// times per level, 4 levels, every single scene build) - which is the far more likely explanation for
+// this whole session's real-hardware-only "hangs" that never once reproduced on PCSX2/desktop (native
+// double FPU there vs. software-emulated double math here): not a crash, just severe, compounding
+// slowness from tens of thousands of software-emulated double-precision sqrt calls.
+#if defined(__PSP__) || defined(__NDS__) || defined(__PS2__)
 #define USE_FLOATS
 #endif
 
-#if defined(_arch_dreamcast) || defined(__NDS__) || defined(__PS2__)
+#if defined(__PS2__)
+// The EE has 32 MiB total RAM. Texels are a reloadable LRU cache, so keep the
+// permanent cache intentionally tiny: one expanded texture slot. Terrain is untextured below,
+// and pix3d_get_texels() evicts/regenerates this slot for the remaining textured models.
+#define MODEL_MAX_DEPTH 600
+#define MODEL_DEPTH_FACE_COUNT 80
+#define PIX3D_POOL_COUNT 1
+#define DISABLE_FLAMES
+#define PS2_RENDER_RADIUS 6
+#define PS2_TERRAIN_MIN_TILE 24
+#define PS2_TERRAIN_MAX_TILE 72
+#define PS2_3D_RENDER_WIDTH 256
+#define PS2_3D_RENDER_HEIGHT 167
+// Keep simulation/network ticks at 50 Hz and cap expensive software rendering
+// and the full-screen GIF upload at 25 Hz.
+#define PS2_RENDER_DIVISOR 2
+// Start the 32 MiB build with terrain and dynamic entities only. Static map
+// locations are deferred until a proper incremental scene-loader is added.
+// This prevents their synchronous bzip/model build from blocking the boot.
+#define PS2_DEFER_STATIC_LOCATIONS 1
+// In that terrain-and-entities-only profile, the 512x512 minimap and all of
+// its location icons provide no useful information but consume over 1 MiB.
+#define PS2_DISABLE_MINIMAP 1
+// Drop the cached stone frame panels after the title screen.  The live scene,
+// chat and sidebar targets remain; only decorative chrome is removed.
+#define PS2_SIMPLE_UI 1
+// Terrain textures are replaced by the map's existing vertex-lit floor colours.
+// This preserves height, light and biome tint while avoiding textured terrain work.
+#define PS2_UNTEXTURED_TERRAIN 1
+#elif defined(_arch_dreamcast) || defined(__NDS__)
 // NOTE: more extreme lowmem mode, making the game fully explorable on 32 MB
 // -2 MB RAM, may cause some models to be invisible
 #define MODEL_MAX_DEPTH 600

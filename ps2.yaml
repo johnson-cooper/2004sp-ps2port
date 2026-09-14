@@ -3,6 +3,7 @@ project: client
 targets:
   - name: client
     type: ee
+    opt: -O1
     sources:
       - src/*.c
       - src/entry/*.c
@@ -16,6 +17,12 @@ targets:
       - __PS2__
       - WITH_RSA_LIBTOM
       - PS2IP_DNS
+      # 2026-09-14: PS2_LOC_DECODE_ONLY (was here temporarily) answered its question - decode-only
+      # mode (world_add_loc2() skipped) completed ALL 6 mapsquares' loc decode + world_build() +
+      # reached "scene: build_scene complete" cleanly on real hardware. Bug confirmed to live inside
+      # world_add_loc2()'s subtree, not decoding/Packet/world_build(). Removed so this build now
+      # exercises the real, full path again, with new one-shot entry checkpoints in world_add_loc2()
+      # and loctype_get_model() (world.c/loctype.c) to find exactly where in that subtree it dies.
     libs:
       - gskit
       - dmakit
@@ -25,19 +32,25 @@ targets:
       - pad
       - m
     embed_irx:
-      # All 8 modules are embedded again, including dev9/netman/smap - a real, deliberate step back
-      # from an EE-memory-reclaim attempt (making dev9/netman/smap file-loaded and freed after use,
-      # saving ~39KB) that had to be abandoned: it required loading USB before networking so those
-      # three could be read from a working device, and doing that - on TWO separate USB driver
-      # stacks (first usbhdfsd, then this same BDM stack) - caused a new real-hardware-only stall
-      # mid-network-bring-up that never happened with everything embedded and USB deferred until
-      # after DHCP. That the stall reproduced on both driver stacks is itself evidence it's not
-      # about which driver, but about USB activity anywhere near network bring-up at all - the same
-      # class of problem this project's own precedent already found once before (SIO2MAN/PADMAN
-      # moved to AFTER network bring-up due to IOP resource/thread contention with SMAP's own worker
-      # threads). A boot-time stall is a worse failure than the memory cost, so this fully reverts to
-      # the original, proven-stable sequence (see ps2.c's platform_init()): dev9/netman/smap load and
-      # bring up networking completely first, USB loads only once that's done.
+      # All 8 modules are embedded, including dev9. dev9 WAS briefly removed from this list on the
+      # (real, well-reasoned) theory that it's ROM-resident on real hardware and only ever needed
+      # embedding to work around a PCSX2-specific HLE quirk - but the actual real-hardware test
+      # regressed badly (the game hung/stalled much earlier, during boot, before even reaching
+      # login) rather than improving anything. Reverted - see ps2.c's platform_init() for the fuller
+      # note. Don't re-attempt un-embedding dev9 without new evidence; this was tried and it made
+      # things worse, not better. netman/smap remain embedded - a real, deliberate step back from an
+      # EE-memory-reclaim attempt (making
+      # netman/smap file-loaded and freed after use) that had to be abandoned: it required loading
+      # USB before networking so those two could be read from a working device, and doing that - on
+      # TWO separate USB driver stacks (first usbhdfsd, then this same BDM stack) - caused a new
+      # real-hardware-only stall mid-network-bring-up that never happened with everything embedded
+      # and USB deferred until after DHCP. That the stall reproduced on both driver stacks is itself
+      # evidence it's not about which driver, but about USB activity anywhere near network bring-up
+      # at all - the same class of problem this project's own precedent already found once before
+      # (SIO2MAN/PADMAN moved to AFTER network bring-up due to IOP resource/thread contention with
+      # SMAP's own worker threads). A boot-time stall is a worse failure than the memory cost, so
+      # this stays at the original, proven-stable sequence (see ps2.c's platform_init()): netman/smap
+      # load and bring up networking completely first, USB loads only once that's done.
       #
       # The BDM stack itself (usbd+iomanx+bdm+bdmfs_fatfs+usbmass_bd, ~97KB across 5 modules)
       # replaced an earlier, lighter usbhdfsd attempt for an unrelated, still-valid reason: usbhdfsd
@@ -49,8 +62,9 @@ targets:
       # PCSX2. BDM is what this project's own boot loader already uses successfully to read
       # client.elf itself, and what a separate, more mature PS2 homebrew project
       # (OptiJuegos/ReleasePlusPlus) uses in its own shipped real-hardware builds - real, working
-      # precedent, not a guess. That part of the fix stays; only the file-vs-embedded question for
-      # dev9/netman/smap reverted.
+      # precedent, not a guess. None of these 5 have a real-hardware-safe non-embedded alternative:
+      # none are ROM-resident, and they are themselves the modules that provide file access in the
+      # first place - loading them from a file would require file access that doesn't exist yet.
       - dev9:dev9_embed
       - netman:netman_embed
       - smap:smap_embed

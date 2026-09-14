@@ -48,6 +48,8 @@ void rs2_error(const char *format, ...);
 // the normal client_draw_progress() mechanism (model.c's model_unpack(), called before any per-item
 // progress hook into client.c exists).
 void ps2_boot_progress(int percent);
+// Clears the persistent CPU-side presentation canvas when changing UI layouts.
+void platform_clear_surface(void);
 #endif
 char *platform_strndup(const char *s, size_t len);
 char *platform_strdup(const char *s);

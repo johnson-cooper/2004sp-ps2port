@@ -755,7 +755,23 @@ int clientstream_read_bytes(ClientStream *stream, int8_t *dst, int off, int len)
 
 int clientstream_write(ClientStream *stream, const int8_t *src, int len, int off) {
     if (!stream->closed) {
-#if defined(_WIN32) || defined(__SWITCH__) || defined(__NDS__) || defined(__wasm)
+#ifdef __PS2__
+        // `lwip_write()` can wait for TCP send-buffer space on this stack even
+        // after FIONBIO succeeded for receive operations.  A live game packet
+        // must never park the EE here: return the bytes actually accepted and
+        // let the caller retain any tail for the next tick.
+        errno = 0;
+        int bytes = lwip_send(stream->socket, (const char *)src + off, len, MSG_DONTWAIT);
+        if (bytes < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 0;
+            }
+            rs2_error("PS2NET send() error on fd=%d: errno=%d (%s)\n", stream->socket, errno, strerror(errno));
+            stream->closed = true;
+            return -1;
+        }
+        return bytes;
+#elif defined(_WIN32) || defined(__SWITCH__) || defined(__NDS__) || defined(__wasm)
         return send(stream->socket, (const char *)src + off, len, 0);
 #else
         return write(stream->socket, src + off, len);

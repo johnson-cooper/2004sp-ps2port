@@ -20,7 +20,7 @@ extern InputTracking _InputTracking;
 const char *ps2_cache_prefix(void);
 #endif
 
-#if defined(__WII__) || defined(__3DS__) || defined(__WIIU__) || defined(__SWITCH__) || defined(__PSP__) || defined(__vita__) || defined(_arch_dreamcast) || defined(NXDK) || defined(__NDS__) || defined(ANDROID)
+#if defined(__WII__) || defined(__3DS__) || defined(__WIIU__) || defined(__SWITCH__) || defined(__PSP__) || defined(__vita__) || defined(_arch_dreamcast) || defined(NXDK) || defined(__NDS__) || defined(ANDROID) || defined(__PS2__)
 Custom _Custom = {.chat_era = 2, .http_port = 80, .show_performance = true};
 #else
 Custom _Custom = {.chat_era = 2, .http_port = 80};
@@ -81,6 +81,16 @@ bool load_ini_args(void) {
     INI_INT_LOG(&(&_Client), lowmem, );
 #if defined(__PSP__) || defined(_arch_dreamcast) || defined(__NDS__) || defined(NXDK)
     // implicitly ignore highmem, avoids confusion as there's no way it'll load, except if xbox has mem expansion
+    // 2026-09-14: __PS2__ was added here then REVERTED same day - real-hardware test regressed the
+    // hang to BEFORE client_build_scene() even starts (previously reached deep into
+    // loctype_get_model()/model_calculate_normals()). _Client.lowmem also flips
+    // `p1(c->login, _Client.lowmem ? 1 : 0)` in the login packet (see client.c) - telling the server
+    // this is a lowmem client, untested territory that could change server-side packet behavior before
+    // any of this scene-build code even runs. The two other same-day fixes (model.c OOM/NULL-deref
+    // guards, pushLocs() disabled on PS2) only touch code deep in scene/render paths that were never
+    // reached in the regressed run, so they're not implicated - this flag is the one variable that
+    // plausibly explains a hang moving THIS much earlier. Don't re-add without isolating exactly what
+    // about lowmem=true breaks the login/build-scene handshake first.
     _Client.lowmem = true;
 #endif
     INI_INT_LOG(&(&_Client), members, _Client.members = !_Client.members);

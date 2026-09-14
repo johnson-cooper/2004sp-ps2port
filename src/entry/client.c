@@ -57,6 +57,19 @@
 #include "../world3d.h"
 #include "../gl11.h"
 
+// 2026-09-14: MASTER OFF SWITCH for every PS2 on-screen diagnostic checkpoint in this file (both
+// calls through ps2_scene_checkpoint() and the several raw-draw sites that bypass it entirely - see
+// e.g. the "Loading map"/"last read"/"All map reads done"/"loc decode" blocks in
+// client_load()/client_build_scene()). After repeated (4+) confirmed rounds this session of stacked
+// checkpoint I/O (each a real GS-sync flip, some also unconditional rs2_log() USB/BDM file writes)
+// itself causing a false freeze indistinguishable from a genuine hang - most recently bisected all
+// the way down inside hashtable_get()/lrucache_get() to individual struct fields that all turned out
+// to read back perfectly sane - the user asked to strip every checkpoint rather than keep chasing
+// overhead. Defined here (top of file, before any use) rather than at ps2_scene_checkpoint()'s own
+// definition so it actually covers the earlier raw-draw sites too, not just calls to that function.
+// Flip to 1 for one targeted bisection session if a genuine new hang ever needs this technique again.
+#define PS2_CHECKPOINTS_ENABLED 0
+
 extern int DESIGN_BODY_COLOR_LENGTH[];
 extern int *DESIGN_BODY_COLOR[];
 extern int DESIGN_HAIR_COLOR[];
@@ -131,6 +144,8 @@ void platform_restore_region(int x, int y, int w, int h, const uint16_t *in);
 // rom/cache/client/... tree is detected (real hardware / a USB-stick boot), or "" to keep using
 // today's plain relative paths (which PCSX2's host: dev shortcut transparently redirects).
 const char *ps2_cache_prefix(void);
+static void ps2_draw_large_status(Client *c, const char *status);
+static void ps2_runtime_checkpoint(Client *c, const char *status);
 #endif
 
 #ifdef __PS2__
@@ -363,7 +378,9 @@ void client_load(Client *c) {
     for (int level = 0; level < 4; level++) {
         c->levelCollisionMap[level] = collisionmap_new(104, 104);
     }
+#if !defined(__PS2__) || !PS2_DISABLE_MINIMAP
     c->image_minimap = pix24_new(512, 512, false);
+#endif
     client_draw_progress(c, "Unpacking media", 75);
     c->image_invback = pix8_from_archive(media, "invback", 0);
     c->image_chatback = pix8_from_archive(media, "chatback", 0);
@@ -374,8 +391,11 @@ void client_load(Client *c) {
     for (int i = 0; i < 13; i++) {
         c->image_sideicons[i] = pix8_from_archive(media, "sideicons", i);
     }
+#if !defined(__PS2__) || !PS2_DISABLE_MINIMAP
     c->image_compass = pix24_from_archive(media, "compass", 0);
+#endif
 
+#if !defined(__PS2__) || !PS2_DISABLE_MINIMAP
     for (int i = 0; i < 50; i++) {
         if (_Custom.hide_debug_sprite) {
             if (i == 22) {
@@ -395,6 +415,7 @@ void client_load(Client *c) {
             break;
         }
     }
+#endif
     for (int i = 0; i < 20; i++) {
         c->image_hitmarks[i] = pix24_from_archive(media, "hitmarks", i);
         if (!c->image_hitmarks[i]) {
@@ -407,16 +428,20 @@ void client_load(Client *c) {
             break;
         }
     }
+#if !defined(__PS2__) || !PS2_DISABLE_MINIMAP
     // rev254's media archive calls this sprite "mapmarker" (frame 0 = destination flag, frame 1 =
     // hint/quest arrow, used elsewhere) - "mapflag" doesn't exist in this revision's real archive.
     c->image_mapflag = pix24_from_archive(media, "mapmarker", 0);
+#endif
     for (int i = 0; i < 8; i++) {
         c->image_crosses[i] = pix24_from_archive(media, "cross", i);
     }
+#if !defined(__PS2__) || !PS2_DISABLE_MINIMAP
     c->image_mapdot0 = pix24_from_archive(media, "mapdots", 0);
     c->image_mapdot1 = pix24_from_archive(media, "mapdots", 1);
     c->image_mapdot2 = pix24_from_archive(media, "mapdots", 2);
     c->image_mapdot3 = pix24_from_archive(media, "mapdots", 3);
+#endif
     c->image_scrollbar0 = pix8_from_archive(media, "scrollbar", 0);
     c->image_scrollbar1 = pix8_from_archive(media, "scrollbar", 1);
     c->image_redstone1 = pix8_from_archive(media, "redstone1", 0);
@@ -487,11 +512,14 @@ void client_load(Client *c) {
         pix24_blit_opaque(backhmid2, 0, 0);
     }
 
+#if !defined(__PS2__) || !PS2_DISABLE_MINIMAP
     int rand_r = (int)(jrand() * 21.0) - 10;
     int rand_g = (int)(jrand() * 21.0) - 10;
     int rand_b = (int)(jrand() * 21.0) - 10;
     int _rand = (int)(jrand() * 41.0) - 20;
+#endif
     for (int i = 0; i < 50; i++) {
+#if !defined(__PS2__) || !PS2_DISABLE_MINIMAP
         if (c->image_mapfunction[i]) {
             pix24_translate(c->image_mapfunction[i], rand_r + _rand, rand_g + _rand, rand_b + _rand);
         }
@@ -499,6 +527,7 @@ void client_load(Client *c) {
         if (c->image_mapscene[i]) {
             pix8_translate(c->image_mapscene[i], rand_r + _rand, rand_g + _rand, rand_b + _rand);
         }
+#endif
     }
 
 #ifdef __PS2__
@@ -624,6 +653,10 @@ void client_load(Client *c) {
     c->area_sidebar_offsets = _Pix3D.line_offset;
     pix3d_init3d(512, 334);
     c->area_viewport_offsets = _Pix3D.line_offset;
+#ifdef __PS2__
+    pix3d_init3d(PS2_3D_RENDER_WIDTH, PS2_3D_RENDER_HEIGHT);
+    c->area_viewport_3d_offsets = _Pix3D.line_offset;
+#endif
 
     int *distance = malloc(9 * sizeof(int));
     for (int x = 0; x < 9; x++) {
@@ -633,7 +666,11 @@ void client_load(Client *c) {
         distance[x] = offset * sin >> 16;
     }
 
+#ifdef __PS2__
+    world3d_init(PS2_3D_RENDER_WIDTH, PS2_3D_RENDER_HEIGHT, 500, 800, distance);
+#else
     world3d_init(512, 334, 500, 800, distance);
+#endif
     free(distance);
 #ifdef __PS2__
     // 65 was its original progress-bar percentage back when it loaded upfront alongside the other
@@ -729,6 +766,8 @@ void client_load(Client *c) {
     // should fit with room to spare) and got the corrupting "# Restart." / "DMAC(5) Handler does not
     // exist." failure mode instead - twice.
     rs2_log("MEM before bump allocator: used=%d free=%d\n", mallinfo().uordblks, mallinfo().fordblks);
+    // Six MiB is the established working headroom for the later model build.
+    // The new PS2 area streamer avoids spending it on distant location models.
     if (!bump_allocator_init(6 << 20)) {
 #else
     if (!(_Client.lowmem ? bump_allocator_init(16 << 20) : bump_allocator_init(32 << 20))) {
@@ -5050,6 +5089,24 @@ static void client_scenemap_free(Client *c) {
 }
 
 void client_update_game(Client *c) {
+#ifdef __PS2__
+    // Present an explicit marker before each major section of only the first
+    // three live updates.  If one section blocks, its marker remains visible
+    // on the TV.  This is a temporary bisection aid, deliberately bounded so
+    // it cannot become a permanent per-tick GS cost.
+    // Phase checkpoints were useful for bisection but each one performs a
+    // full GS presentation.  Keep them disabled in the normal hardware build.
+    static int runtime_trace_updates_left = 0;
+    const bool runtime_trace = c->scene_state == 2 && runtime_trace_updates_left > 0;
+#define PS2_RUNTIME_TRACE(stage) \
+    do {                          \
+        if (runtime_trace) {      \
+            ps2_runtime_checkpoint(c, stage); \
+        }                         \
+    } while (0)
+#else
+#define PS2_RUNTIME_TRACE(stage) do { } while (0)
+#endif
     if (c->system_update_timer > 1) {
         c->system_update_timer--;
     }
@@ -5061,7 +5118,16 @@ void client_update_game(Client *c) {
 #ifdef __PS2__
     int64_t phase_t0 = rs2_now();
 #endif
-    for (int i = 0; i < 5 && client_read(c); i++) {
+    PS2_RUNTIME_TRACE("NET");
+    // A five-packet burst can contain enough scene/interface work to monopolise
+    // an EE tick immediately after login.  Keep the game responsive and let the
+    // normal 50 Hz update loop drain it progressively on the 32 MiB target.
+#ifdef __PS2__
+    const int packet_budget = 1;
+#else
+    const int packet_budget = 5;
+#endif
+    for (int i = 0; i < packet_budget && client_read(c); i++) {
     }
 #ifdef __PS2__
     _TickPhase.packets_ms += rs2_now() - phase_t0;
@@ -5134,6 +5200,7 @@ void client_update_game(Client *c) {
         }
 
 #ifdef __PS2__
+        PS2_RUNTIME_TRACE("ENT");
         phase_t0 = rs2_now();
         updatePlayers(c);
         _TickPhase.players_ms += rs2_now() - phase_t0;
@@ -5256,6 +5323,7 @@ void client_update_game(Client *c) {
             c->shell->mouse_click_button = 0;
         }
 
+        PS2_RUNTIME_TRACE("INPUT");
         handleMouseInput(c);
         handleMinimapInput(c);
         handleTabInput(c);
@@ -5368,9 +5436,17 @@ void client_update_game(Client *c) {
 
         // try {
         if (c->stream && c->out->pos > 0) {
-            clientstream_write(c->stream, c->out->data, c->out->pos, 0);
-            c->out->pos = 0;
-            c->heartbeatTimer = 0;
+            int sent = clientstream_write(c->stream, c->out->data, c->out->pos, 0);
+            if (sent > 0) {
+                // A nonblocking socket may only accept a prefix.  Preserve
+                // the unsent tail in order; dropping it would desynchronise
+                // the revision-254 packet stream just as surely as a hang.
+                if (sent < c->out->pos) {
+                    memmove(c->out->data, c->out->data + sent, c->out->pos - sent);
+                }
+                c->out->pos -= sent;
+                c->heartbeatTimer = 0;
+            }
         }
         // NOTE: no catch for logout or reconn
         // } catch (IOException ignored) {
@@ -5379,6 +5455,13 @@ void client_update_game(Client *c) {
         // client_logout(c);
         // }
     }
+#ifdef __PS2__
+    if (runtime_trace) {
+        ps2_runtime_checkpoint(c, "DONE");
+        runtime_trace_updates_left--;
+    }
+#endif
+#undef PS2_RUNTIME_TRACE
 }
 
 #ifdef __PS2__
@@ -5466,9 +5549,37 @@ static int8_t *ps2_map_archive_read(const char *kind, int mapsquareX, int mapsqu
         }
         int8_t *data = malloc(entry->length);
         fseek(ps2_map_archive_file, (long)entry->offset, SEEK_SET);
-        if (fread(data, 1, entry->length, ps2_map_archive_file) != entry->length) {
-            rs2_error("map: short read from maps.dat for %s%d_%d\n", kind, mapsquareX, mapsquareZ);
+        size_t got = fread(data, 1, entry->length, ps2_map_archive_file);
+        if (got != entry->length) {
+            // This used to log and then hand back `data` anyway, with *out_size still set to the
+            // full declared entry->length - the caller (and eventually bzip_decompress(), fed this
+            // buffer as compressed loc/land data) had no way to tell that everything past byte
+            // `got` is uninitialized malloc() garbage, not real compressed bytes. Decompressing a
+            // stream with a garbage tail is exactly how a truncated/incomplete real-hardware USB
+            // read (this project's USB/BDM stack has its own documented history of flakiness) turns
+            // into decompressor state that never finds a valid end-of-stream marker - the exact
+            // condition that motivated hardening bzip_decompress()'s own EOF handling in
+            // thirdparty/bzip.c (see the jmpbuf re-arm comment there). Treat a short read the same
+            // as a missing file (return NULL) instead of returning a corrupt buffer dressed up as a
+            // complete one.
+            rs2_error("map: short read from maps.dat for %s%d_%d (got %zu of %u bytes) - treating as missing\n", kind,
+                      mapsquareX, mapsquareZ, got, entry->length);
+            free(data);
+            return NULL;
         }
+        // 2026-09-14: a FlushCache(INVALIDATE_DCACHE) call used to sit here, on the theory that this
+        // buffer's D-cache lines could be stale relative to the IOP's SIF-DMA'd bytes. Tested on real
+        // hardware and made things WORSE, not better - the freeze moved EARLIER, into this very read
+        // loop (on the very first mapsquare), a stage that had completed cleanly in every prior test
+        // without exception. Root cause of the regression: FlushCache() on PS2 has no address-range
+        // parameter - it operates on the ENTIRE EE data cache, not just this buffer - and
+        // INVALIDATE_DCACHE discards cache content WITHOUT writing it back first. Calling that
+        // repeatedly in a tight loop risks silently dropping dirty (modified-but-unflushed) cache
+        // lines belonging to completely unrelated live state (heap bookkeeping, other globals,
+        // in-flight SIF RPC buffers) - a much bigger blast radius than "flush this one buffer".
+        // Reverted. Don't re-attempt a bare INVALIDATE_DCACHE call in this loop without new evidence;
+        // if cache coherency is ever revisited, it would need WRITEBACK_DCACHE first (or a
+        // targeted/rare use, not per-file-read) to avoid this exact failure mode.
         *out_size = (int)entry->length;
         return data;
     }
@@ -5533,17 +5644,34 @@ static int8_t *client_load_map_file(const char *kind, int mapsquareX, int mapsqu
 
     int8_t *data = malloc(size);
 #ifdef ANDROID
-    if (SDL_RWread(file, data, 1, size) != size) {
+    size_t got = SDL_RWread(file, data, 1, size);
 #else
-    if (fread(data, 1, size, file) != size) {
+    size_t got = fread(data, 1, size, file);
 #endif
-        rs2_error("Failed to read file: %s\n", strerror(errno));
+    bool short_read = got != size;
+    if (short_read) {
+        rs2_error("Failed to read file: %s (%s, got %zu of %zu bytes)\n", filename, strerror(errno), got, size);
     }
 #ifdef ANDROID
     SDL_RWclose(file);
 #else
     fclose(file);
 #endif
+
+    if (short_read) {
+        // See ps2_map_archive_read()'s comment above: this used to hand back `data` with *out_size
+        // == the full stat()'d file size regardless of how many bytes fread actually delivered, so a
+        // genuinely short/interrupted read fed a partially-uninitialized buffer into
+        // bzip_decompress() as if it were a complete compressed stream. Report it the same way a
+        // missing file already is - NULL - instead of silently handing corrupt data onward.
+        free(data);
+        return NULL;
+    }
+
+    // 2026-09-14: see ps2_map_archive_read()'s matching comment above - a FlushCache(INVALIDATE_DCACHE)
+    // call used to sit here too and was reverted for the same reason (tested on real hardware,
+    // regressed the freeze to happen earlier, right in this read loop). Don't re-add without new
+    // evidence.
 
     *out_size = (int)size;
     return data;
@@ -5596,17 +5724,26 @@ static int8_t *client_load_raw_file(const char *filename_only, int *out_size) {
 
     int8_t *data = malloc(size);
 #ifdef ANDROID
-    if (SDL_RWread(file, data, 1, size) != size) {
+    size_t got = SDL_RWread(file, data, 1, size);
 #else
-    if (fread(data, 1, size, file) != size) {
+    size_t got = fread(data, 1, size, file);
 #endif
-        rs2_error("Failed to read file: %s\n", strerror(errno));
+    bool short_read = got != size;
+    if (short_read) {
+        rs2_error("Failed to read file: %s (%s, got %zu of %zu bytes)\n", filename, strerror(errno), got, size);
     }
 #ifdef ANDROID
     SDL_RWclose(file);
 #else
     fclose(file);
 #endif
+
+    if (short_read) {
+        // Same bug class as client_load_map_file()'s equivalent fix above: don't hand back a
+        // buffer claiming the full file size when a short read left its tail uninitialized.
+        free(data);
+        return NULL;
+    }
 
     *out_size = (int)size;
     return data;
@@ -5825,7 +5962,7 @@ bool client_read(Client *c) {
         int minMapsquareZ = (c->sceneCenterZoneZ - 6) / 8;
         int maxMapsquareZ = (c->sceneCenterZoneZ + 6) / 8;
         int regions = (maxMapsquareX - minMapsquareX + 1) * (maxMapsquareZ - minMapsquareZ + 1);
-#ifdef __PS2__
+#if defined(__PS2__) && PS2_CHECKPOINTS_ENABLED
         // 2026-09-13: the per-read timing trail showed read #9 (the last one seen frozen on screen)
         // actually completing in 10ms before the freeze, not stalling mid-read as assumed - so the
         // read loop may simply have FINISHED (regions == 9) and the real hang is in whatever runs
@@ -5849,7 +5986,7 @@ bool client_read(Client *c) {
             for (int mapsquareZ = minMapsquareZ; mapsquareZ <= maxMapsquareZ; mapsquareZ++) {
                 c->sceneMapIndex[i] = (mapsquareX << 8) + mapsquareZ;
 
-#ifdef __PS2__
+#if defined(__PS2__) && PS2_CHECKPOINTS_ENABLED
                 // This whole loop is synchronous/blocking and the client is single-threaded - if
                 // client_load_map_file() ever hangs on a real-hardware-only USB/filesystem issue,
                 // nothing ever draws again, so whatever's on screen at that exact instant is frozen
@@ -5878,7 +6015,7 @@ bool client_read(Client *c) {
                 platform_update_surface();
 #endif
 
-#ifdef __PS2__
+#if defined(__PS2__) && PS2_CHECKPOINTS_ENABLED
                 // Rate-limiting test (20ms sleep after each read) is DONE and disproven - confirmed
                 // via real hardware, this still hangs at the exact same read regardless, ruling out
                 // a USB controller/driver queuing issue triggered by rapid back-to-back small reads.
@@ -5905,7 +6042,7 @@ bool client_read(Client *c) {
                     c->sceneMapLandDataIndexLength[i] = landSize;
                     c->sceneMapLandData[i] = landData;
                 }
-#ifdef __PS2__
+#if defined(__PS2__) && PS2_CHECKPOINTS_ENABLED
                 int land_ms = (int)(rs2_now() - land_t0);
                 rs2_log("map read #%d land %d_%d: %dms (%d bytes)\n", i + 1, mapsquareX, mapsquareZ, land_ms, landSize);
                 snprintf(timing_msg, sizeof(timing_msg), "last read: #%d land %dms (%dB)", i + 1, land_ms, landSize);
@@ -5919,12 +6056,35 @@ bool client_read(Client *c) {
                 int64_t loc_t0 = rs2_now();
 #endif
                 int locSize = 0;
-                int8_t *locData = client_load_map_file("l", mapsquareX, mapsquareZ, &locSize);
-                if (locData) {
-                    c->sceneMapLocDataIndexLength[i] = locSize;
-                    c->sceneMapLocData[i] = locData;
-                }
 #ifdef __PS2__
+                // PS2 streaming mode: retain only the mapsquares that overlap
+                // the 32x32 local-player window.  Do this before the file read
+                // and bzip pass, rather than merely ignoring distant locs after
+                // decoding them.  The 104x104 terrain grid is still loaded.
+                const int ps2ActiveLocMin = 32;
+                const int ps2ActiveLocMax = 64; // exclusive
+                int squareLocalX = mapsquareX * 64 - c->sceneBaseTileX;
+                int squareLocalZ = mapsquareZ * 64 - c->sceneBaseTileZ;
+                bool ps2LoadLoc = squareLocalX < ps2ActiveLocMax && squareLocalX + 64 > ps2ActiveLocMin &&
+                                  squareLocalZ < ps2ActiveLocMax && squareLocalZ + 64 > ps2ActiveLocMin;
+#if PS2_DEFER_STATIC_LOCATIONS
+                // The location stream is the only remaining work between the
+                // confirmed land-decode checkpoint and the hardware freeze.
+                // Do not read or decompress it in the synchronous rebuild.
+                // Terrain, players, NPCs, and server movement remain live.
+                ps2LoadLoc = false;
+#endif
+                if (ps2LoadLoc) {
+#endif
+                    int8_t *locData = client_load_map_file("l", mapsquareX, mapsquareZ, &locSize);
+                    if (locData) {
+                        c->sceneMapLocDataIndexLength[i] = locSize;
+                        c->sceneMapLocData[i] = locData;
+                    }
+#ifdef __PS2__
+                }
+#endif
+#if defined(__PS2__) && PS2_CHECKPOINTS_ENABLED
                 int loc_ms = (int)(rs2_now() - loc_t0);
                 rs2_log("map read #%d loc %d_%d: %dms (%d bytes)\n", i + 1, mapsquareX, mapsquareZ, loc_ms, locSize);
                 snprintf(timing_msg, sizeof(timing_msg), "last read: #%d loc %dms (%dB)", i + 1, loc_ms, locSize);
@@ -5940,15 +6100,24 @@ bool client_read(Client *c) {
             }
         }
 
-#ifdef __PS2__
+#if defined(__PS2__) && PS2_CHECKPOINTS_ENABLED
         // Checkpoint: if this line's flip is the LAST thing ever visible on a frozen screen (instead
         // of the "last read: ..." line from inside the loop above), that proves every map file read
         // finished and the hang is somewhere in the tile-shift/npc/player/scene-build code below,
         // not in file I/O at all - directly testable, not a guess.
+        // 2026-09-14: added heap_free - two consecutive real-hardware tests with byte-for-byte
+        // identical _Client.lowmem state (config.ini already sets lowmem=1, so it was never actually
+        // toggled by the custom.c edit around it) landed on two different checkpoints, one much
+        // earlier than the other. That variability, not a deterministic pointer bug, is the signature
+        // of a resource-exhaustion race - this number is the actual data needed to confirm it instead
+        // of continuing to infer it indirectly from where a freeze happens to land.
+        char ps2_allmaps_msg[64];
+        snprintf(ps2_allmaps_msg, sizeof(ps2_allmaps_msg), "All map reads done, building scene... (free=%d)",
+                 mallinfo().fordblks);
         pixmap_bind(c->area_viewport);
         pix2d_fill_rect(0, 170, BLACK, 512, 20);
-        drawStringCenter(c->font_plain12, 257, 181, "All map reads done, building scene...", BLACK);
-        drawStringCenter(c->font_plain12, 256, 180, "All map reads done, building scene...", WHITE);
+        drawStringCenter(c->font_plain12, 257, 181, ps2_allmaps_msg, BLACK);
+        drawStringCenter(c->font_plain12, 256, 180, ps2_allmaps_msg, WHITE);
         pixmap_draw(c->area_viewport, 4, 4);
         platform_update_surface();
         rs2_log("map: all %d region reads complete, entering post-load scene build\n", regions);
@@ -6368,7 +6537,11 @@ bool client_read(Client *c) {
             int length = g4(c->in);
             int remaining = c->packet_size - 6;
             int8_t *src = calloc(length, sizeof(int8_t));
+#ifdef __PS2__
+            bzip_decompress(src, c->in->data, remaining, c->in->pos, NULL, length);
+#else
             bzip_decompress(src, c->in->data, remaining, c->in->pos);
+#endif
             platform_set_jingle(src, length);
             c->nextMusicDelay = delay;
         }
@@ -6939,12 +7112,22 @@ bool client_read(Client *c) {
             client_build_scene(c);
         }
         if (_Client.lowmem && c->scene_state == 2 && _World.levelBuilt != c->currentLevel) {
+#ifndef __PS2__
             pixmap_bind(c->area_viewport);
             drawStringCenter(c->font_plain12, 257, 151, "Loading - please wait.", BLACK);
             drawStringCenter(c->font_plain12, 256, 150, "Loading - please wait.", WHITE);
             pixmap_draw(c->area_viewport, 4, 4);
+#endif
             _World.levelBuilt = c->currentLevel;
+#ifdef __PS2__
+            // The initial rebuild has already decoded every landscape level.
+            // On the constrained profile static locations and the minimap are
+            // deferred, so a second synchronous rebuild here only repeats
+            // terrain setup and reallocates the scene arena during a player
+            // update.  Keep the new level marker and defer that work instead.
+#else
             client_build_scene(c);
+#endif
         }
         if (c->currentLevel != c->minimap_level && c->scene_state == 2) {
             c->minimap_level = c->currentLevel;
@@ -7350,15 +7533,97 @@ static void client_clear_caches(void) {
 // world_build's model/loc geometry into the scene bump arena) on a port that was already
 // documented as tight on EE memory before this specific bug - one breadcrumb per stage says
 // exactly which one is failing instead of continuing to guess at the whole function.
-static void ps2_scene_checkpoint(Client *c, const char *label) {
-    rs2_log("%s: bump=%d/%d heap_used=%d heap_free=%d\n", label, bump_allocator_used(), bump_allocator_capacity(),
-             mallinfo().uordblks, mallinfo().fordblks);
+// PS2_CHECKPOINTS_ENABLED is now defined near the top of this file (before any use) - see that
+// definition's comment for the full rationale.
+
+void ps2_scene_checkpoint(Client *c, const char *label) {
+#if !PS2_CHECKPOINTS_ENABLED
+    (void)c;
+    (void)label;
+    return;
+#else
+    // 2026-09-14: rs2_log() (a real, unconditional boot.log write - genuine USB/BDM file I/O, no
+    // throttle) REMOVED entirely. Two real, direct reasons: (1) boot.log has never once been
+    // confirmed to actually survive to be read back this whole session ("boot.log never worked
+    // properly") - it was providing zero verified value. (2) It's genuine, real I/O cost on every
+    // single checkpoint call, and this project has now confirmed three separate times this session
+    // that enough of that stacked into a tight spot becomes the actual cause of a freeze rather than
+    // a way to observe one (the bzip heartbeat, the ps2_boot_progress() GS-sync in
+    // world_load_locations(), and a cluster of checkpoints added to loctype_get_model() that
+    // produced a real, reproducible, much-earlier freeze on an otherwise-identical fresh-login/same-
+    // position retest). The on-screen draw below is the only diagnostic output this function
+    // produces now - still real GS-flip cost, but a single distinct one, not two compounded I/O
+    // paths per call.
+    if (!c) {
+        // world_build() runs before some callers have a fully set-up Client (and is reused from
+        // contexts that only care about coarse logging that no longer exists) - nothing left to do
+        // for a NULL c, so return before even computing heap_free.
+        return;
+    }
+    int heap_free = mallinfo().fordblks;
+    // heap_free is drawn on screen: given this whole project's history of OOM-adjacent bugs right
+    // around scene-build memory boundaries, knowing whether heap_free was already critically low at
+    // the LAST checkpoint before a freeze is exactly the data needed to confirm or rule out an
+    // out-of-memory allocation failure as the cause, without needing another instrumented round trip.
+    // 2026-09-14: added bump_allocator_used()/capacity() - every checkpoint so far has only ever shown
+    // GENERAL heap free (mallinfo), never the SEPARATE 6MB scene bump arena that model_calculate_normals()
+    // and friends actually allocate from (rs2_calloc/rs2_malloc with use_allocator=true go through
+    // bump_alloc(), not malloc/calloc). heap_free staying healthy at every checkpoint this session
+    // never actually ruled out the arena specifically being the thing that's tight - this closes that
+    // gap for free on every single existing checkpoint.
+    // 2026-09-14: switched to KB with explicit spacing after a real-hardware reading came back as an
+    // ambiguous run-together digit string ("666076291456") that needed reverse-engineering against
+    // the known capacity constant to parse - the old byte-precision format was too long for this
+    // screen region and got visually clipped/hard to read. KB precision is more than enough here.
+    char label_with_mem[96];
+    snprintf(label_with_mem, sizeof(label_with_mem), "%s f%dK a%dK/%dK", label, heap_free / 1024,
+              bump_allocator_used() / 1024, bump_allocator_capacity() / 1024);
     pixmap_bind(c->area_viewport);
     pix2d_fill_rect(0, 170, BLACK, 512, 20);
-    drawStringCenter(c->font_plain12, 257, 181, label, BLACK);
-    drawStringCenter(c->font_plain12, 256, 180, label, WHITE);
+    drawStringCenter(c->font_plain12, 257, 181, label_with_mem, BLACK);
+    drawStringCenter(c->font_plain12, 256, 180, label_with_mem, WHITE);
     pixmap_draw(c->area_viewport, 4, 4);
     platform_update_surface();
+#endif
+}
+
+// 2026-09-14, later session: added after the patch-plan item-1/4 fixes AND hooking bus errors (see
+// platform/ps2.c) still produced a totally silent hang on real hardware - no "Allocator full" screen,
+// no "EE EXCEPTION" screen, identical freeze shape to every prior hang. That means the freeze point
+// may now be somewhere ps2_scene_checkpoint() can no longer report on, since PS2_CHECKPOINTS_ENABLED
+// is 0 and stays 0 - flipping that master switch back on would also reintroduce the dense per-object
+// sampled checkpoints in loctype_get_model()/model_calculate_normals()/model_calculate_bounds_cylinder()/
+// world_add_loc2(), the confirmed, repeated (3+ times) source of false freezes from stacked GS-flip
+// I/O this session. This is a deliberately separate function, only for genuinely coarse, once-or-a-
+// few-times-per-scene-build phase markers (at most ~15 draws per scene build, each with substantial
+// real computation before/after it - nothing like the hundreds-to-thousands-of-calls density that
+// caused the stacking problem), so it always draws regardless of the master switch. Reuses the same
+// enriched heap_free/bump-arena message format as ps2_scene_checkpoint() above, at a different screen
+// row (150 vs 170) so a phase marker and a later OOM/exception screen (rows 190/170) can coexist
+// without stomping each other if both fire before the next photo. Only wired at true phase boundaries
+// (see call sites in client_build_scene()/world_build()) - every dense per-object site is untouched
+// and stays exactly as gated as it was.
+#define PS2_PHASE_CHECKPOINTS_ENABLED 0
+void ps2_phase_checkpoint(Client *c, const char *label) {
+#if !PS2_PHASE_CHECKPOINTS_ENABLED
+    (void)c;
+    (void)label;
+    return;
+#else
+    if (!c) {
+        return;
+    }
+    int heap_free = mallinfo().fordblks;
+    char label_with_mem[96];
+    snprintf(label_with_mem, sizeof(label_with_mem), "%s f%dK a%dK/%dK", label, heap_free / 1024,
+              bump_allocator_used() / 1024, bump_allocator_capacity() / 1024);
+    pixmap_bind(c->area_viewport);
+    pix2d_fill_rect(0, 150, BLACK, 512, 20);
+    drawStringCenter(c->font_plain12, 257, 161, label_with_mem, BLACK);
+    drawStringCenter(c->font_plain12, 256, 160, label_with_mem, WHITE);
+    pixmap_draw(c->area_viewport, 4, 4);
+    platform_update_surface();
+#endif
 }
 #endif
 
@@ -7377,12 +7642,14 @@ static void client_build_scene(Client *c) {
     }
 #ifdef __PS2__
     ps2_scene_checkpoint(c, "scene: reset done");
+    ps2_phase_checkpoint(c, "scene: reset done");
 #endif
 
     World *world = world_new(104, 104, c->levelHeightmap, c->levelTileFlags);
     _World.lowMemory = _World3D.lowMemory;
 #ifdef __PS2__
     ps2_scene_checkpoint(c, "scene: world_new done");
+    ps2_phase_checkpoint(c, "scene: world_new done");
 #endif
 
     int maps = c->sceneMapIndexLength;
@@ -7413,6 +7680,7 @@ static void client_build_scene(Client *c) {
         rs2_error("client_build_scene: calloc(100000) scratch buffer failed - out of EE RAM\n");
     }
     ps2_scene_checkpoint(c, "scene: scratch buffer allocated");
+    ps2_phase_checkpoint(c, "scene: scratch buffer allocated");
 #endif
 
     // NO_TIMEOUT
@@ -7441,7 +7709,15 @@ static void client_build_scene(Client *c) {
                 continue;
             }
 #endif
+#ifdef __PS2__
+            // NULL here, not `c`: land decode has never once failed to reach "scene: land decode
+            // done" in any real-hardware test so far - only loc decode (below) needs the full
+            // on-screen checkpoint treatment. Still gets log-only diagnostics for free (same
+            // ps2_scene_checkpoint() calls inside bzip_decompress(), just skipping the screen draw).
+            bzip_decompress(data, src, c->sceneMapLandDataIndexLength[i] - 4, 4, NULL, 100000);
+#else
             bzip_decompress(data, src, c->sceneMapLandDataIndexLength[i] - 4, 4);
+#endif
             free(buf);
             world_load_ground(world, (c->sceneCenterZoneX - 6) * 8, (c->sceneCenterZoneZ - 6) * 8, x, z, data, length);
         } else if (c->sceneCenterZoneZ < 800) {
@@ -7450,6 +7726,10 @@ static void client_build_scene(Client *c) {
     }
 #ifdef __PS2__
     ps2_scene_checkpoint(c, "scene: land decode done");
+    // This is deliberately the next single coarse marker, not an additional
+    // per-object diagnostic. In PS2_DEFER_STATIC_LOCATIONS builds it proves the
+    // executable reached the location stage without doing location I/O.
+    ps2_phase_checkpoint(c, "scene: loc stream skipped");
 #endif
 
     // NO_TIMEOUT
@@ -7471,19 +7751,45 @@ static void client_build_scene(Client *c) {
                 free(buf);
                 continue;
             }
-#endif
+            // Real-hardware testing narrowed a hang to somewhere between "scene: land decode done"
+            // and this loop's own post-decompress checkpoint below - which only ever showed the
+            // former, meaning bzip_decompress() itself (or something in its immediate setup: the
+            // malloc'd `headered` buffer, the bd struct, or its dbuf) never returned. This checkpoint,
+            // right before the call, is the only way to tell "never even got here" (would mean the
+            // hang is in packet_new()/g4() instead, upstream of this line) from "entered
+            // bzip_decompress and never came back" (the leading theory - a heap allocation inside it
+            // failing on this platform's tight/fragmented EE memory, or a genuine decode-loop bug
+            // exposed only by loc data's size/shape) once the next boot's photo is compared against
+            // whether the POST-decompress checkpoint below also shows up.
+            char loc_pre_msg[80];
+            snprintf(loc_pre_msg, sizeof(loc_pre_msg), "loc #%d/%d %d_%d pre-decompress (len=%d)", i + 1, maps,
+                     c->sceneMapIndex[i] >> 8, c->sceneMapIndex[i] & 0xff, length);
+            ps2_scene_checkpoint(c, loc_pre_msg);
+            bzip_decompress(data, src, c->sceneMapLocDataIndexLength[i] - 4, 4, c, 100000);
+            {
+                char loc_bzip_done_msg[72];
+                snprintf(loc_bzip_done_msg, sizeof(loc_bzip_done_msg), "loc #%d/%d bzip returned", i + 1, maps);
+                ps2_scene_checkpoint(c, loc_bzip_done_msg);
+            }
+#else
             bzip_decompress(data, src, c->sceneMapLocDataIndexLength[i] - 4, 4);
+#endif
             free(buf);
+#ifdef __PS2__
+            {
+                char loc_buf_free_msg[72];
+                snprintf(loc_buf_free_msg, sizeof(loc_buf_free_msg), "loc #%d/%d packet freed", i + 1, maps);
+                ps2_scene_checkpoint(c, loc_buf_free_msg);
+            }
+#endif
             int x = (c->sceneMapIndex[i] >> 8) * 64 - c->sceneBaseTileX;
             int z = (c->sceneMapIndex[i] & 0xff) * 64 - c->sceneBaseTileZ;
-#ifdef __PS2__
-            // The whole-loop checkpoint before/after this loop narrowed the hang to somewhere in
-            // here, but not WHICH of the 9 mapsquares' loc data - world_load_locations() itself is
-            // a variable-length decode loop over an arbitrary number of loc placements, so unlike
-            // the land loop (fixed 64x64 heightmap writes per square, same cost every time) a single
-            // pathological mapsquare here could dwarf the other 8 combined. Per-square resolution is
-            // the only way to tell "one bad square" from "the Nth call into a shared resource that's
-            // now empty" (bump arena, model cache, ...).
+#if defined(__PS2__) && PS2_CHECKPOINTS_ENABLED
+            // 2026-09-14: this site bypassed ps2_scene_checkpoint() entirely - its own raw draw call
+            // PLUS an unconditional, unthrottled rs2_log() (real USB/BDM file I/O every single
+            // mapsquare) - so the master PS2_CHECKPOINTS_ENABLED switch didn't cover it. Found only
+            // because disabling every checkpoint still left a real-hardware hang reported right here.
+            // Gated the same way as everything else now.
             char loc_msg[64];
             snprintf(loc_msg, sizeof(loc_msg), "loc decode #%d/%d (mapsquare %d_%d)", i + 1, maps, c->sceneMapIndex[i] >> 8,
                      c->sceneMapIndex[i] & 0xff);
@@ -7497,20 +7803,40 @@ static void client_build_scene(Client *c) {
             platform_update_surface();
 #endif
             world_load_locations(world, c->scene, c->locList, c->levelCollisionMap, data, length, x, z);
+#ifdef __PS2__
+            // Coarse before/after for this specific call (the "loc #N/M pre-decompress" checkpoint
+            // above already covers "before" for real; this is the "after" half) - see world.c's
+            // PS2_LOC_DECODE_ONLY comment for why this matters right now: without this, "it returned"
+            // vs. "it's still hung in there" is only inferable from whether the NEXT square's
+            // pre-decompress message ever appears, which is a much less direct signal to read off a
+            // photo.
+            ps2_scene_checkpoint(c, "world_load_locations returned");
+            {
+                char loc_load_done_msg[72];
+                snprintf(loc_load_done_msg, sizeof(loc_load_done_msg), "loc #%d/%d load returned", i + 1, maps);
+                ps2_scene_checkpoint(c, loc_load_done_msg);
+            }
+#endif
         }
     }
 #ifdef __PS2__
     ps2_scene_checkpoint(c, "scene: loc decode done");
+    ps2_phase_checkpoint(c, "scene: loc decode done");
 #endif
 
     free(data);
 
     // NO_TIMEOUT
     p1isaac(c->out, 239); // NO_TIMEOUT
+#ifdef __PS2__
+    world_build(world, c->scene, c->levelCollisionMap, c);
+#else
     world_build(world, c->scene, c->levelCollisionMap);
+#endif
     pixmap_bind(c->area_viewport);
 #ifdef __PS2__
     ps2_scene_checkpoint(c, "scene: world_build done");
+    ps2_phase_checkpoint(c, "scene: world_build done");
 #endif
 
     // NO_TIMEOUT
@@ -7532,6 +7858,7 @@ static void client_build_scene(Client *c) {
     }
 #ifdef __PS2__
     ps2_scene_checkpoint(c, "scene: obj stacks sorted");
+    ps2_phase_checkpoint(c, "scene: obj stacks sorted");
 #endif
 
     for (LocAddEntity *loc = (LocAddEntity *)linklist_head(c->spawned_locations); loc; loc = (LocAddEntity *)linklist_next(c->spawned_locations)) {
@@ -7545,6 +7872,7 @@ static void client_build_scene(Client *c) {
     world_free(world);
 #ifdef __PS2__
     ps2_scene_checkpoint(c, "scene: build_scene complete");
+    ps2_phase_checkpoint(c, "scene: build_scene complete");
 #endif
 }
 
@@ -7688,6 +8016,11 @@ void drawMinimapLoc(Client *c, int tileX, int tileZ, int level, int wallRgb, int
 }
 
 void createMinimap(Client *c, int level) {
+#if defined(__PS2__) && PS2_DISABLE_MINIMAP
+    (void)c;
+    (void)level;
+    return;
+#endif
     int *pixels = c->image_minimap->pixels;
     int length = c->image_minimap->width * c->image_minimap->height;
     for (int i = 0; i < length; i++) {
@@ -9017,6 +9350,32 @@ void client_prepare_game_screen(Client *c) {
 
     client_unload_title(c);
 
+#if defined(__PS2__) && PS2_SIMPLE_UI
+    // These nine PixMaps are static copies of the decorative stone frame.  They are only
+    // ever composited behind other panels, so releasing them leaves a deliberately simple
+    // black UI surround without touching the live viewport, chat/sidebar, or tab icons.
+    pixmap_free(c->area_backleft1);  c->area_backleft1 = NULL;
+    pixmap_free(c->area_backleft2);  c->area_backleft2 = NULL;
+    pixmap_free(c->area_backright1); c->area_backright1 = NULL;
+    pixmap_free(c->area_backright2); c->area_backright2 = NULL;
+    pixmap_free(c->area_backtop1);   c->area_backtop1 = NULL;
+    pixmap_free(c->area_backvmid1);  c->area_backvmid1 = NULL;
+    pixmap_free(c->area_backvmid2);  c->area_backvmid2 = NULL;
+    pixmap_free(c->area_backvmid3);  c->area_backvmid3 = NULL;
+    pixmap_free(c->area_backhmid2);  c->area_backhmid2 = NULL;
+    // Its masks were built during client_load(), and the minimap is disabled above.
+    pix8_free(c->image_mapback);     c->image_mapback = NULL;
+    pix8_free(c->image_invback);     c->image_invback = NULL;
+    pix8_free(c->image_chatback);    c->image_chatback = NULL;
+    pix8_free(c->image_backbase1);   c->image_backbase1 = NULL;
+    pix8_free(c->image_backbase2);   c->image_backbase2 = NULL;
+    pix8_free(c->image_backhmid1);   c->image_backhmid1 = NULL;
+    // PixMap draws permanently composite into the PS2's CPU-side presentation texture.
+    // Once the frame panels are released, erase their previous title/game pixels so they
+    // do not remain as stale fragments around the new simple layout.
+    platform_clear_surface();
+#endif
+
     if (c->shell->draw_area) {
         pixmap_free(c->shell->draw_area);
         c->shell->draw_area = NULL;
@@ -9044,10 +9403,15 @@ void client_prepare_game_screen(Client *c) {
     // don't match the real sprites' actual dimensions (image_mapback alone is genuinely 172x156;
     // pix8_draw()'ing it into a 168x160 buffer clipped/misaligned it, part of the minimap corruption).
     c->area_chatback = pixmap_new(479, 96);
+#if !defined(__PS2__) || !PS2_SIMPLE_UI
     c->area_mapback = pixmap_new(172, 156);
     pix2d_clear();
     pix8_draw(c->image_mapback, 0, 0);
+#endif
     c->area_sidebar = pixmap_new(190, 261);
+#ifdef __PS2__
+    c->area_viewport_3d = pixmap_new(PS2_3D_RENDER_WIDTH, PS2_3D_RENDER_HEIGHT);
+#endif
     c->area_viewport = pixmap_new(512, 334);
     pix2d_clear();
     c->area_backbase1 = pixmap_new(496, 50);
@@ -9284,7 +9648,11 @@ void client_draw_game(Client *c) {
 
         c->redraw_sideicons = false;
         pixmap_bind(c->area_backhmid1);
+#if defined(__PS2__) && PS2_SIMPLE_UI
+        pix2d_fill_rect(0, 0, 0x252a33, 249, 45);
+#else
         pix8_draw(c->image_backhmid1, 0, 0);
+#endif
 
         if (c->sidebar_interface_id == -1) {
             if (c->tab_interface_id[c->selected_tab] != -1) {
@@ -9336,7 +9704,11 @@ void client_draw_game(Client *c) {
 
         pixmap_draw(c->area_backhmid1, 516, 160);
         pixmap_bind(c->area_backbase2);
+#if defined(__PS2__) && PS2_SIMPLE_UI
+        pix2d_fill_rect(0, 0, 0x252a33, 269, 37);
+#else
         pix8_draw(c->image_backbase2, 0, 0);
+#endif
 
         if (c->sidebar_interface_id == -1) {
             if (c->tab_interface_id[c->selected_tab] != -1) {
@@ -9395,7 +9767,11 @@ void client_draw_game(Client *c) {
     if (c->redraw_privacy_settings) {
         c->redraw_privacy_settings = false;
         pixmap_bind(c->area_backbase1);
+#if defined(__PS2__) && PS2_SIMPLE_UI
+        pix2d_fill_rect(0, 0, 0x252a33, 496, 50);
+#else
         pix8_draw(c->image_backbase1, 0, 0);
+#endif
 
         drawStringTaggableCenter(c->font_plain12, "Public chat", 55, 28, WHITE, true);
         if (c->public_chat_setting == 0) {
@@ -10248,6 +10624,75 @@ static void draw3DEntityElements(Client *c) {
     draw_info_overlay(c);
 }
 
+#ifdef __PS2__
+// The 3D renderer writes a quarter as many pixels as the normal viewport. The
+// UI continues to use the 512x334 target after this nearest-neighbour upscale,
+// so its fixed coordinates and input paths remain untouched.
+static void ps2_upscale_viewport_3d(Client *c) {
+    const int *src = c->area_viewport_3d->pixels;
+    int *dst = c->area_viewport->pixels;
+    for (int y = 0; y < PS2_3D_RENDER_HEIGHT; y++) {
+        const int *src_row = src + y * PS2_3D_RENDER_WIDTH;
+        int *dst_row0 = dst + (y * 2) * 512;
+        int *dst_row1 = dst_row0 + 512;
+        for (int x = 0; x < PS2_3D_RENDER_WIDTH; x++) {
+            int pixel = src_row[x];
+            int dx = x * 2;
+            dst_row0[dx] = pixel;
+            dst_row0[dx + 1] = pixel;
+            dst_row1[dx] = pixel;
+            dst_row1[dx + 1] = pixel;
+        }
+    }
+}
+
+// The normal performance strings are rendered at the deliberately low 3D
+// resolution and are too small to diagnose a hardware freeze from a TV.  Copy
+// a tiny text strip with nearest-neighbour scaling into the full-resolution
+// viewport.  This is diagnostic-only and costs a fixed 6,480 pixel copies.
+static void ps2_draw_large_status(Client *c, const char *status) {
+    const int source_x = 4;
+    const int source_y = 2;
+    const int source_w = 180;
+    const int source_h = 18;
+    const int dest_x = 4;
+    const int dest_y = 26;
+    pix2d_fill_rect(source_x, source_y, BLACK, source_w, source_h);
+    drawString(c->font_bold12, source_x + 2, source_y + 13, status, YELLOW);
+
+    int *pixels = c->area_viewport->pixels;
+    for (int y = 0; y < source_h; y++) {
+        const int *src = pixels + (source_y + y) * 512 + source_x;
+        int *dst0 = pixels + (dest_y + y * 2) * 512 + dest_x;
+        int *dst1 = dst0 + 512;
+        for (int x = 0; x < source_w; x++) {
+            const int pixel = src[x];
+            const int dx = x * 2;
+            dst0[dx] = pixel;
+            dst0[dx + 1] = pixel;
+            dst1[dx] = pixel;
+            dst1[dx + 1] = pixel;
+        }
+    }
+}
+
+static void ps2_draw_large_world_time(Client *c, uint64_t world_ms) {
+    char status[32];
+    sprintf(status, "3D %lums", (unsigned long)world_ms);
+    ps2_draw_large_status(c, status);
+}
+
+static void ps2_runtime_checkpoint(Client *c, const char *status) {
+    if (!c->area_viewport) {
+        return;
+    }
+    pixmap_bind(c->area_viewport);
+    ps2_draw_large_status(c, status);
+    pixmap_draw(c->area_viewport, 4, 4);
+    platform_update_surface();
+}
+#endif
+
 void client_draw_scene(Client *c) {
     c->scene_cycle++;
     pushPlayers(c);
@@ -10255,7 +10700,15 @@ void client_draw_scene(Client *c) {
     pushProjectiles(c);
     pushSpotanims(c);
     // TODO see if defines are needed
-#if !defined(_arch_dreamcast) && !defined(__NDS__)
+    // 2026-09-14: __PS2__ added per the original C client author's suggestion. pushLocs() doesn't just
+    // advance animation timers - on every frame an animated loc's seqFrame rolls over, it re-enters
+    // loctype_get_model() -> model_calculate_normals() (see the "append" block below) to regenerate
+    // that loc's model geometry. That's the exact function this session's real-hardware checkpoint
+    // bisection isolated the scene-build hang to, and the exact function that had a real unguarded-OOM
+    // NULL-deref hazard (see model_calculate_normals()'s vertex_normal allocation, fixed this session).
+    // Skipping loc animation entirely on PS2 removes both the extra memory churn AND the repeated,
+    // ongoing (not just first-load) exposure to that code path during live gameplay.
+#if !defined(_arch_dreamcast) && !defined(__NDS__) && !defined(__PS2__)
     pushLocs(c);
 #endif
 
@@ -10340,8 +10793,17 @@ void client_draw_scene(Client *c) {
     jitter = _Pix3D.cycle;
     _Model.check_hover = true;
     _Model.picked_count = 0;
+#ifdef __PS2__
+    pixmap_bind(c->area_viewport_3d);
+    _Pix3D.line_offset = c->area_viewport_3d_offsets;
+    _Pix3D.center_x = PS2_3D_RENDER_WIDTH / 2;
+    _Pix3D.center_y = PS2_3D_RENDER_HEIGHT / 2;
+    _Model.mouse_x = (c->shell->mouse_x - 4) / 2;
+    _Model.mouse_y = (c->shell->mouse_y - 4) / 2;
+#else
     _Model.mouse_x = c->shell->mouse_x - 4;
     _Model.mouse_y = c->shell->mouse_y - 4;
+#endif
     pix2d_clear();
 
     gl_start_drawscene();
@@ -10350,8 +10812,9 @@ void client_draw_scene(Client *c) {
     char buf[MAX_STR];
     uint64_t last = rs2_now();
     world3d_draw(c->scene, c->cameraX, c->cameraY, c->cameraZ, level, c->cameraYaw, c->cameraPitch, _Client.loop_cycle);
+    uint64_t world_ms = rs2_now() - last;
     if (_Custom.show_performance) {
-        sprintf(buf, "World3D: %lu ms", rs2_now() - last);
+        sprintf(buf, "World3D: %lu ms", world_ms);
         drawStringRight(c->font_plain11, 507, 200, buf, YELLOW, true);
     }
 
@@ -10362,6 +10825,15 @@ void client_draw_scene(Client *c) {
     drawTileHint(c);
     updateTextures(c, jitter);
     draw3DEntityElements(c);
+
+#ifdef __PS2__
+    ps2_upscale_viewport_3d(c);
+    pixmap_bind(c->area_viewport);
+    _Pix3D.line_offset = c->area_viewport_offsets;
+    _Pix3D.center_x = 256;
+    _Pix3D.center_y = 167;
+    ps2_draw_large_world_time(c, world_ms);
+#endif
 
     static uint64_t pixmap_now;
     static uint64_t pixmap_last;
@@ -10750,6 +11222,10 @@ void pushPlayers(Client *c) {
 }
 
 void client_draw_minimap(Client *c) {
+#if defined(__PS2__) && PS2_DISABLE_MINIMAP
+    pixmap_bind(c->area_viewport);
+    return;
+#endif
     pixmap_bind(c->area_mapback);
     int angle = c->orbit_camera_yaw + c->minimap_anticheat_angle & 0x7ff;
     int anchorX = c->local_player->pathing_entity.x / 32 + 48;
@@ -10851,7 +11327,11 @@ void client_draw_on_minimap(Client *c, int dy, Pix24 *image, int dx) {
 void client_draw_chatback(Client *c) {
     pixmap_bind(c->area_chatback);
     _Pix3D.line_offset = c->area_chatback_offsets;
+#if defined(__PS2__) && PS2_SIMPLE_UI
+    pix2d_fill_rect(0, 0, 0xe5e5e5, 479, 96);
+#else
     pix8_draw(c->image_chatback, 0, 0);
+#endif
     if (c->show_social_input) {
         char buf[CHAT_LENGTH + 2];
         sprintf(buf, "%s*", c->social_input);
@@ -11030,7 +11510,11 @@ void client_draw_scrollbar(Client *c, int x, int y, int scrollY, int scrollHeigh
 void client_draw_sidebar(Client *c) {
     pixmap_bind(c->area_sidebar);
     _Pix3D.line_offset = c->area_sidebar_offsets;
+#if defined(__PS2__) && PS2_SIMPLE_UI
+    pix2d_fill_rect(0, 0, 0x252a33, 190, 261);
+#else
     pix8_draw(c->image_invback, 0, 0);
+#endif
     if (c->sidebar_interface_id != -1) {
         client_draw_interface(c, component_get(c->sidebar_interface_id), 0, 0, 0);
     } else if (c->tab_interface_id[c->selected_tab] != -1) {
@@ -11979,6 +12463,9 @@ void client_free(Client *c) {
         pixmap_free(c->area_mapback);
         pixmap_free(c->area_sidebar);
         pixmap_free(c->area_viewport);
+#ifdef __PS2__
+        pixmap_free(c->area_viewport_3d);
+#endif
         pixmap_free(c->area_backbase1);
         pixmap_free(c->area_backbase2);
         pixmap_free(c->area_backhmid1);
@@ -12128,12 +12615,22 @@ void client_free(Client *c) {
     free(c->area_chatback_offsets);
     free(c->area_sidebar_offsets);
     free(c->area_viewport_offsets);
+#ifdef __PS2__
+    free(c->area_viewport_3d_offsets);
+#endif
 
     free(c);
 }
 
+#ifdef __PS2__
+Client *ps2_crash_client = NULL;
+#endif
+
 Client *client_new(void) {
     Client *c = calloc(1, sizeof(Client));
+#ifdef __PS2__
+    ps2_crash_client = c;
+#endif
 
     c->shell = gameshell_new();
     c->image_sideicons = calloc(13, sizeof(Pix8 *));
@@ -12361,6 +12858,9 @@ void client_load_title(Client *c) {
         pixmap_free(c->area_mapback);
         pixmap_free(c->area_sidebar);
         pixmap_free(c->area_viewport);
+#ifdef __PS2__
+        pixmap_free(c->area_viewport_3d);
+#endif
         pixmap_free(c->area_backbase1);
         pixmap_free(c->area_backbase2);
         pixmap_free(c->area_backhmid1);
@@ -12368,6 +12868,9 @@ void client_load_title(Client *c) {
         c->area_mapback = NULL;
         c->area_sidebar = NULL;
         c->area_viewport = NULL;
+#ifdef __PS2__
+        c->area_viewport_3d = NULL;
+#endif
         c->area_backbase1 = NULL;
         c->area_backbase2 = NULL;
         c->area_backhmid1 = NULL;

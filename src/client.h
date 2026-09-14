@@ -73,6 +73,11 @@ struct Client {
     PixMap *area_mapback;
     PixMap *area_sidebar;
     PixMap *area_viewport;
+#ifdef __PS2__
+    // Half-resolution software-raster target. It is expanded into
+    // area_viewport before full-resolution UI composition.
+    PixMap *area_viewport_3d;
+#endif
     PixMap *area_backbase1;
     PixMap *area_backbase2;
     PixMap *area_backhmid1;
@@ -152,6 +157,9 @@ struct Client {
     int *area_chatback_offsets;
     int *area_sidebar_offsets;
     int *area_viewport_offsets;
+#ifdef __PS2__
+    int *area_viewport_3d_offsets;
+#endif
     int64_t server_seed;
 
     bool rights;
@@ -531,6 +539,30 @@ void updateMergeLocs(Client *c);
 void updateEntityChats(Client *c);
 void updatePlayers(Client *c);
 #ifdef __PS2__
+// Shared real-hardware checkpoint: logs bump-arena/heap stats and draws `label` to the viewport so a
+// TV photo of a hung boot shows exactly which stage it died in. Exposed (not static) so world_build()
+// can report its own internal stages, not just the coarse before/after client_build_scene() sees.
+void ps2_scene_checkpoint(Client *c, const char *label);
+// Coarse, always-on counterpart to ps2_scene_checkpoint() above - bypasses PS2_CHECKPOINTS_ENABLED
+// deliberately, same reasoning as ps2_report_oom()/the exception handler, but only ever called at true
+// once-or-a-few-times-per-scene-build phase boundaries, never the dense per-object sites. See its own
+// definition comment (entry/client.c, right after ps2_scene_checkpoint()) for the full rationale.
+void ps2_phase_checkpoint(Client *c, const char *label);
+// Set once in client_new() (the only Client instance for the program's whole lifetime) - lets the EE
+// exception handler installed in platform/ps2.c reuse ps2_scene_checkpoint()'s already-proven-working
+// on-screen text drawing without needing its own font/viewport/GS setup, which would be far riskier to
+// get right from inside a raw exception context. Safe specifically because by the time any real
+// scene-construction fault could occur, this Client has long since been fully initialized (login,
+// interface load, and dozens of successful checkpoint draws already completed).
+extern Client *ps2_crash_client;
+// Bypasses PS2_CHECKPOINTS_ENABLED deliberately, same reasoning as the exception handler: a bump-
+// arena exhaustion event is rare and high-value (the one piece of evidence that distinguishes "ran
+// out of arena" from every other freeze/crash shape), not the stacked-in-a-tight-loop diagnostic I/O
+// the master switch was added to kill. Bounded internally to a handful of draws. Defined in
+// platform/ps2.c (owns all the pixmap/GS drawing this needs); called from allocator.c's bump_alloc()
+// via a local extern there (kept out of allocator.h/client.h's mutual include graph on purpose -
+// allocator.c is shared by every platform, not just PS2).
+void ps2_report_oom(const char *msg);
 int64_t client_tick_packets_ms(void);
 int64_t client_tick_players_ms(void);
 int64_t client_tick_npcs_ms(void);

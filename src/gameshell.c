@@ -205,12 +205,27 @@ void gameshell_run(Client *c) {
         if (c->shell->deltime > 0) {
             c->shell->fps = ratio * 1000 / (c->shell->deltime * 256);
         }
+#ifdef __PS2__
+        static int ps2_render_counter = 0;
+        bool ps2_render_frame = (++ps2_render_counter % PS2_RENDER_DIVISOR) == 0;
+        if (ps2_render_frame) {
+            client_draw(c);
+            gameshell_update_touch(c); // update mouse after client_draw_scene to fix model picking
+        }
+#else
         client_draw(c);
         gameshell_update_touch(c); // update mouse after client_draw_scene to fix model picking (not needed for touch on release like client-ts)
+#endif
 #ifdef __PS2__
         int64_t draw_t2 = rs2_now();
 #endif
+#ifdef __PS2__
+        if (ps2_render_frame) {
+            platform_update_surface();
+        }
+#else
         platform_update_surface();
+#endif
 #ifdef __PS2__
         int64_t gs_t3 = rs2_now();
         _Perf.update_ms += update_t1 - frame_t0;

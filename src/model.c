@@ -1,4 +1,5 @@
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,12 +15,38 @@
 #include "pix3d.h"
 #include "platform.h"
 #include "gl11.h"
+#ifdef __PS2__
+// Only for the checkpoints in model_calculate_normals() - ps2_crash_client (still valid to reuse,
+// see loctype.c's matching comment) and ps2_scene_checkpoint(). client.h doesn't include model.h
+// (checked), no cycle.
+#include "client.h"
+#endif
 
 ModelData _Model = {0};
 extern Pix3D _Pix3D;
 extern Pix2D _Pix2D;
 extern AnimFrameData _AnimFrame;
 extern Custom _Custom;
+
+#ifdef __PS2__
+// 2026-09-14: model_calculate_normals()/model_apply_lighting()/loctype_get_model() already got
+// per-site NULL checks on their bump-backed allocations this session (see their own comments) - this
+// covers the three functions that were still missed: model_share_colored(), model_copy_faces(), and
+// model_from_ondemand_data() all check only their own top-level `Model` struct alloc, then do several
+// more unchecked rs2_malloc/rs2_calloc calls and immediately write through the result in the very
+// next lines. Now that bump_alloc() returns NULL under real arena pressure instead of exit(1)-ing
+// (see allocator.c), those sites are a live NULL-deref path, not just a theoretical one. One tiny
+// helper here instead of repeating the same 4-line NULL-check block at ~20 call sites across the
+// three functions.
+static bool ps2_check_model_alloc(void *ptr, const char *what) {
+    if (!ptr) {
+        rs2_error("OOM allocating %s\n", what);
+        ps2_scene_checkpoint(ps2_crash_client, what);
+        return false;
+    }
+    return true;
+}
+#endif
 
 void model_init_global(void) {
     _Model.face_clipped_x = calloc(4096, sizeof(bool));
@@ -343,6 +370,24 @@ void model_unpack(Jagfile *models) {
 // the counts/flags/lengths needed to compute every section's offset via a simple prefix sum.
 static Model *model_from_ondemand_data(int8_t *buf, int size, bool use_allocator) {
     Model *model = rs2_calloc(use_allocator, 1, sizeof(Model));
+#ifdef __PS2__
+    // 2026-09-14: part of a systematic sweep of every "new Model" bump-arena allocation in this file -
+    // bump_alloc() used to call exit(1) on overflow (no OS to hand control back to on bare-metal PS2,
+    // so this almost certainly just locked up the EE with zero visible sign anywhere on screen) and
+    // has since been fixed to return NULL instead (see allocator.c). Before that fix, ANY of these five
+    // unguarded "new Model" sites hitting the arena cap - not just the one inside
+    // model_calculate_normals() this session's bisection chased - would have produced the exact same
+    // silent-freeze symptom, at a DIFFERENT point each time depending purely on which allocation
+    // happened to be the one that tipped the arena over on that specific boot. That fits the observed
+    // variability (freeze location jumping around across supposedly-identical runs) far better than
+    // any single deterministic bug does. Guarding every site converts a silent lock-up into a visible,
+    // diagnostic failure instead.
+    if (!model) {
+        rs2_error("model_from_ondemand_data: OOM allocating Model struct\n");
+        ps2_scene_checkpoint(ps2_crash_client, "model_from_ondemand_data: OOM allocating Model struct");
+        return NULL;
+    }
+#endif
     if (size < 18) {
         rs2_error("Error model: ondemand payload too small (%d bytes)\n", size);
         return model;
@@ -416,6 +461,25 @@ static Model *model_from_ondemand_data(int8_t *buf, int size, bool use_allocator
     int vertex_z_offset = pos;
     pos += data_length_z;
 
+    // 2026-09-14: patch-plan item 4 from the systemic PS2 audit - the 13 section offsets above are a
+    // plain unchecked prefix sum over trailer-declared counts/lengths, with nothing validating the
+    // running total stays inside the actual payload before any of it is used to size allocations or
+    // seed packet-read positions. This has been empirically clean against real rev254 server data all
+    // session (hundreds of models, computed_end matched size-18 exactly every time - see the earlier
+    // "computed_end vs expected_end" verification note), so this is defense-in-depth against a
+    // malformed/truncated payload rather than a fix for an observed failure. Matches the existing
+    // convention right above (size < 18) of returning the already-allocated, still-zeroed `model`
+    // rather than NULL - callers that only check for NULL keep working, they just get a model with
+    // vertex_count==0/face_count==0 instead of one with corrupted geometry.
+    if (pos < 0 || pos > size - 18) {
+        rs2_error("model_from_ondemand_data: computed offsets overrun payload (computed_end=%d expected_end=%d size=%d)\n",
+                  pos, size - 18, size);
+#ifdef __PS2__
+        ps2_scene_checkpoint(ps2_crash_client, "model_from_ondemand_data: offsets overrun payload");
+#endif
+        return model;
+    }
+
     model->vertex_count = vertex_count;
     model->face_count = face_count;
     model->textured_face_count = textured_face_count;
@@ -428,24 +492,70 @@ static Model *model_from_ondemand_data(int8_t *buf, int size, bool use_allocator
     model->textured_p_coordinate = rs2_calloc(use_allocator, textured_face_count, sizeof(int));
     model->textured_m_coordinate = rs2_calloc(use_allocator, textured_face_count, sizeof(int));
     model->textured_n_coordinate = rs2_calloc(use_allocator, textured_face_count, sizeof(int));
+#ifdef __PS2__
+    // 2026-09-14: covers the 9 mandatory arrays above - every one of them is written into by the
+    // decode loops immediately below with no further guard, on the exact call path
+    // (loctype_get_model -> model_from_id -> here) this session's whole bisection has been chasing.
+    if (!ps2_check_model_alloc(model->vertices_x, "model_from_ondemand_data: vertices_x") ||
+        !ps2_check_model_alloc(model->vertices_y, "model_from_ondemand_data: vertices_y") ||
+        !ps2_check_model_alloc(model->vertices_z, "model_from_ondemand_data: vertices_z") ||
+        !ps2_check_model_alloc(model->face_indices_a, "model_from_ondemand_data: face_indices_a") ||
+        !ps2_check_model_alloc(model->face_indices_b, "model_from_ondemand_data: face_indices_b") ||
+        !ps2_check_model_alloc(model->face_indices_c, "model_from_ondemand_data: face_indices_c") ||
+        !ps2_check_model_alloc(model->textured_p_coordinate, "model_from_ondemand_data: textured_p_coordinate") ||
+        !ps2_check_model_alloc(model->textured_m_coordinate, "model_from_ondemand_data: textured_m_coordinate") ||
+        !ps2_check_model_alloc(model->textured_n_coordinate, "model_from_ondemand_data: textured_n_coordinate")) {
+        return NULL;
+    }
+#endif
     if (vertex_label_offset >= 0) {
         model->vertex_labels = rs2_calloc(use_allocator, vertex_count, sizeof(int));
+#ifdef __PS2__
+        if (!ps2_check_model_alloc(model->vertex_labels, "model_from_ondemand_data: vertex_labels")) {
+            return NULL;
+        }
+#endif
     }
     if (face_render_type_offset >= 0) {
         model->face_infos = rs2_calloc(use_allocator, face_count, sizeof(int));
+#ifdef __PS2__
+        if (!ps2_check_model_alloc(model->face_infos, "model_from_ondemand_data: face_infos")) {
+            return NULL;
+        }
+#endif
     }
     if (face_priority_offset >= 0) {
         model->face_priorities = rs2_calloc(use_allocator, face_count, sizeof(int));
+#ifdef __PS2__
+        if (!ps2_check_model_alloc(model->face_priorities, "model_from_ondemand_data: face_priorities")) {
+            return NULL;
+        }
+#endif
     } else {
         model->model_priority = -face_priority_offset - 1;
     }
     if (face_alpha_offset >= 0) {
         model->face_alphas = rs2_calloc(use_allocator, face_count, sizeof(int));
+#ifdef __PS2__
+        if (!ps2_check_model_alloc(model->face_alphas, "model_from_ondemand_data: face_alphas")) {
+            return NULL;
+        }
+#endif
     }
     if (face_label_offset >= 0) {
         model->face_labels = rs2_calloc(use_allocator, face_count, sizeof(int));
+#ifdef __PS2__
+        if (!ps2_check_model_alloc(model->face_labels, "model_from_ondemand_data: face_labels")) {
+            return NULL;
+        }
+#endif
     }
     model->face_colors = rs2_calloc(use_allocator, face_count, sizeof(int));
+#ifdef __PS2__
+    if (!ps2_check_model_alloc(model->face_colors, "model_from_ondemand_data: face_colors")) {
+        return NULL;
+    }
+#endif
 
     Packet order = {0};
     order.data = buf;
@@ -587,6 +697,13 @@ Model *model_from_id(int id, bool use_allocator) {
     }
 
     Model *model = rs2_calloc(use_allocator, 1, sizeof(Model));
+#ifdef __PS2__
+    if (!model) {
+        rs2_error("model_from_id: OOM allocating Model struct (id=%d)\n", id);
+        ps2_scene_checkpoint(ps2_crash_client, "model_from_id: OOM allocating Model struct");
+        return NULL;
+    }
+#endif
     if (_Model.metadata) {
         Metadata *meta = _Model.metadata[id];
         if (!meta) {
@@ -753,6 +870,13 @@ Model *model_from_models(Model **models, int count, bool use_allocator) {
     bool copyLabels = false;
 
     Model *new = rs2_calloc(use_allocator, 1, sizeof(Model));
+#ifdef __PS2__
+    if (!new) {
+        rs2_error("model_from_models: OOM allocating Model struct\n");
+        ps2_scene_checkpoint(ps2_crash_client, "model_from_models: OOM allocating Model struct");
+        return NULL;
+    }
+#endif
     new->vertex_count = 0;
     new->face_count = 0;
     new->textured_face_count = 0;
@@ -987,6 +1111,20 @@ Model *model_from_models_bounds(Model **models, int count) {
 
 Model *model_share_colored(Model *src, bool shareColors, bool shareAlpha, bool shareVertices, bool use_allocator) {
     Model *new = rs2_calloc(use_allocator, 1, sizeof(Model));
+#ifdef __PS2__
+    // 2026-09-14: this is THE most directly relevant site in this sweep - loctype_get_model() calls
+    // this on every single call (not just cache misses), right before model_calculate_normals(), the
+    // exact function this session's checkpoint bisection chased. If this allocation was the one that
+    // hit the arena cap, the old exit(1) behavior would produce this session's exact symptom (frozen
+    // on whatever checkpoint text happened to be on screen, e.g. "share_colored done" or earlier,
+    // depending on how far the previous checkpoint had scrolled) with no crash and no error text -
+    // indistinguishable from every other hang reported this session.
+    if (!new) {
+        rs2_error("model_share_colored: OOM allocating Model struct\n");
+        ps2_scene_checkpoint(ps2_crash_client, "model_share_colored: OOM allocating Model struct");
+        return NULL;
+    }
+#endif
     new->vertex_count = src->vertex_count;
     new->face_count = src->face_count;
     new->textured_face_count = src->textured_face_count;
@@ -999,6 +1137,13 @@ Model *model_share_colored(Model *src, bool shareColors, bool shareAlpha, bool s
         new->vertices_x = rs2_malloc(use_allocator, new->vertex_count * sizeof(int));
         new->vertices_y = rs2_malloc(use_allocator, new->vertex_count * sizeof(int));
         new->vertices_z = rs2_malloc(use_allocator, new->vertex_count * sizeof(int));
+#ifdef __PS2__
+        if (!ps2_check_model_alloc(new->vertices_x, "model_share_colored: vertices_x") ||
+            !ps2_check_model_alloc(new->vertices_y, "model_share_colored: vertices_y") ||
+            !ps2_check_model_alloc(new->vertices_z, "model_share_colored: vertices_z")) {
+            return NULL;
+        }
+#endif
 
         for (int v = 0; v < new->vertex_count; v++) {
             new->vertices_x[v] = src->vertices_x[v];
@@ -1011,6 +1156,11 @@ Model *model_share_colored(Model *src, bool shareColors, bool shareAlpha, bool s
         new->face_colors = src->face_colors;
     } else {
         new->face_colors = rs2_malloc(use_allocator, new->face_count * sizeof(int));
+#ifdef __PS2__
+        if (!ps2_check_model_alloc(new->face_colors, "model_share_colored: face_colors")) {
+            return NULL;
+        }
+#endif
         memcpy(new->face_colors, src->face_colors, new->face_count * sizeof(int));
     }
 
@@ -1018,6 +1168,11 @@ Model *model_share_colored(Model *src, bool shareColors, bool shareAlpha, bool s
         new->face_alphas = src->face_alphas;
     } else {
         new->face_alphas = rs2_malloc(use_allocator, new->face_count * sizeof(int));
+#ifdef __PS2__
+        if (!ps2_check_model_alloc(new->face_alphas, "model_share_colored: face_alphas")) {
+            return NULL;
+        }
+#endif
         if (!src->face_alphas) {
             memset(new->face_alphas, 0, new->face_count * sizeof(int));
         } else {
@@ -1041,6 +1196,13 @@ Model *model_share_colored(Model *src, bool shareColors, bool shareAlpha, bool s
 
 Model *model_copy_faces(Model *src, bool copyVertexY, bool copyFaces, bool use_allocator) {
     Model *new = rs2_calloc(use_allocator, 1, sizeof(Model));
+#ifdef __PS2__
+    if (!new) {
+        rs2_error("model_copy_faces: OOM allocating Model struct\n");
+        ps2_scene_checkpoint(ps2_crash_client, "model_copy_faces: OOM allocating Model struct");
+        return NULL;
+    }
+#endif
     new->vertex_count = src->vertex_count;
     new->face_count = src->face_count;
     new->textured_face_count = src->textured_face_count;
@@ -1057,6 +1219,11 @@ Model *model_copy_faces(Model *src, bool copyVertexY, bool copyFaces, bool use_a
 
     if (copyVertexY) {
         new->vertices_y = rs2_malloc(use_allocator, new->vertex_count * sizeof(int));
+#ifdef __PS2__
+        if (!ps2_check_model_alloc(new->vertices_y, "model_copy_faces: vertices_y")) {
+            return NULL;
+        }
+#endif
         memcpy(new->vertices_y, src->vertices_y, new->vertex_count * sizeof(int));
     } else {
         new->vertices_y = src->vertices_y;
@@ -1066,6 +1233,13 @@ Model *model_copy_faces(Model *src, bool copyVertexY, bool copyFaces, bool use_a
         new->face_color_a = rs2_malloc(use_allocator, new->face_count * sizeof(int));
         new->face_color_b = rs2_malloc(use_allocator, new->face_count * sizeof(int));
         new->face_color_c = rs2_malloc(use_allocator, new->face_count * sizeof(int));
+#ifdef __PS2__
+        if (!ps2_check_model_alloc(new->face_color_a, "model_copy_faces: face_color_a") ||
+            !ps2_check_model_alloc(new->face_color_b, "model_copy_faces: face_color_b") ||
+            !ps2_check_model_alloc(new->face_color_c, "model_copy_faces: face_color_c")) {
+            return NULL;
+        }
+#endif
 
         for (int f = 0; f < new->face_count; f++) {
             new->face_color_a[f] = src->face_color_a[f];
@@ -1074,6 +1248,11 @@ Model *model_copy_faces(Model *src, bool copyVertexY, bool copyFaces, bool use_a
         }
 
         new->face_infos = rs2_malloc(use_allocator, new->face_count * sizeof(int));
+#ifdef __PS2__
+        if (!ps2_check_model_alloc(new->face_infos, "model_copy_faces: face_infos")) {
+            return NULL;
+        }
+#endif
         if (!src->face_infos) {
             memset(new->face_infos, 0, new->face_count * sizeof(int));
         } else {
@@ -1081,8 +1260,18 @@ Model *model_copy_faces(Model *src, bool copyVertexY, bool copyFaces, bool use_a
         }
 
         new->vertex_normal = rs2_malloc(use_allocator, new->vertex_count * sizeof(VertexNormal *));
+#ifdef __PS2__
+        if (!ps2_check_model_alloc(new->vertex_normal, "model_copy_faces: vertex_normal")) {
+            return NULL;
+        }
+#endif
         for (int v = 0; v < new->vertex_count; v++) {
             new->vertex_normal[v] = rs2_malloc(use_allocator, sizeof(VertexNormal));
+#ifdef __PS2__
+            if (!ps2_check_model_alloc(new->vertex_normal[v], "model_copy_faces: vertex_normal[v]")) {
+                return NULL;
+            }
+#endif
             *new->vertex_normal[v] = *src->vertex_normal[v];
         }
 
@@ -1745,26 +1934,106 @@ bool model_point_within_triangle(int x, int y, int ya, int yb, int yc, int xa, i
 }
 
 void model_calculate_normals(Model *m, int light_ambient, int light_attenuation, int lightsrc_x, int lightsrc_y, int lightsrc_z, bool apply_lighting, bool use_allocator) {
+#ifdef USE_FLOATS
+    // 2026-09-14: PS2's EE FPU is single-precision only per the original C client author - every
+    // `double`/sqrt() in this file (there's no shortage of them, one or more per face/vertex) was
+    // getting software-emulated at real cost, not hardware-accelerated. On a model with even a modest
+    // face/vertex count, that compounds into something that can look exactly like a permanent hang
+    // without ever actually crashing - matching this whole session's evidence: never once
+    // reproduced on PCSX2/desktop (real hardware FPU vs. host CPU's native double support), and every
+    // checkpoint added around this exact sqrt-heavy code kept "fixing" itself by changing timing
+    // rather than by fixing a real bug. USE_FLOATS already existed for PSP/NDS (same single-precision
+    // constraint) but was never extended to this file - see defines.h for the __PS2__ addition.
+    const int lightMagnitude = (int)sqrtf((float)(lightsrc_x * lightsrc_x + lightsrc_y * lightsrc_y + lightsrc_z * lightsrc_z));
+#else
     const int lightMagnitude = (int)sqrt(lightsrc_x * lightsrc_x + lightsrc_y * lightsrc_y + lightsrc_z * lightsrc_z);
+#endif
     const int attenuation = light_attenuation * lightMagnitude >> 8;
 
     if (!m->face_color_a) {
         m->face_color_a = rs2_calloc(use_allocator, m->face_count, sizeof(int));
         m->face_color_b = rs2_calloc(use_allocator, m->face_count, sizeof(int));
         m->face_color_c = rs2_calloc(use_allocator, m->face_count, sizeof(int));
+#ifdef __PS2__
+        // 2026-09-14: none of these were ever NULL-checked - rs2_calloc() can genuinely return NULL
+        // under real memory pressure (the "biggest concern" per the original author: this whole
+        // arena/heap can run out), and m->face_color_a[f] = ... below (in the per-face loop, and in
+        // model_apply_lighting()) would then WRITE through a NULL pointer - a hard fault on real PS2
+        // hardware, but silently tolerated on PCSX2's more forgiving low-address memory mapping. Bail
+        // out cleanly and visibly instead of crashing.
+        if (!m->face_color_a || !m->face_color_b || !m->face_color_c) {
+            rs2_error("model_calculate_normals: OOM allocating face_color arrays (face_count=%d)\n", m->face_count);
+            // rs2_error() only writes to a log file, never the screen - now that bump_alloc() returns
+            // NULL on overflow instead of calling exit(1) (see allocator.c), this bail-out is reachable
+            // for real, so make it visible on screen too instead of silently continuing without any
+            // confirmation this is what happened.
+            ps2_scene_checkpoint(ps2_crash_client, "calculate_normals: OOM on face_color arrays");
+            return;
+        }
+#endif
     }
 
     if (!m->vertex_normal) {
         m->vertex_normal = rs2_calloc(use_allocator, m->vertex_count, sizeof(VertexNormal *));
+#ifdef __PS2__
+        if (!m->vertex_normal) {
+            rs2_error("model_calculate_normals: OOM allocating vertex_normal array (vertex_count=%d)\n", m->vertex_count);
+            ps2_scene_checkpoint(ps2_crash_client, "calculate_normals: OOM on vertex_normal array");
+            return;
+        }
+#endif
         for (int v = 0; v < m->vertex_count; v++) {
             m->vertex_normal[v] = rs2_calloc(use_allocator, 1, sizeof(VertexNormal));
+#ifdef __PS2__
+            // Same OOM hazard as above, one level deeper: this specific write (m->vertex_normal[a]->x
+            // += nx; etc., in the per-face loop below and in model_apply_lighting()) is the exact
+            // pointer chain the real-hardware checkpoint bisection isolated the hang to this session.
+            if (!m->vertex_normal[v]) {
+                rs2_error("model_calculate_normals: OOM allocating vertex_normal[%d] (vertex_count=%d)\n", v, m->vertex_count);
+                ps2_scene_checkpoint(ps2_crash_client, "calculate_normals: OOM on vertex_normal[v]");
+                return;
+            }
+#endif
         }
     }
 
+#ifdef __PS2__
+    int ps2_oob_face_count = 0;
+    // Local to this function - loctype.c's ps2_lgm_log isn't visible here. 2026-09-14: switched from
+    // "first 5 calls only" to "every 20th call" - a real scene has far more than 5 loc placements
+    // needing this function, so the old first-N gate meant checkpoints went completely silent after
+    // the very start of the boot, and whatever text was last drawn just sat there frozen on screen
+    // regardless of whether the game kept working fine or genuinely hung later - indistinguishable
+    // from the "All map reads done" stale-text confusion earlier this session. Periodic sampling keeps
+    // visibility across the WHOLE scene build instead of just its first instant, while still bounding
+    // total checkpoint I/O volume.
+    static int ps2_cn_call_num = 0;
+    ps2_cn_call_num++;
+    bool ps2_cn_log = ps2_cn_call_num <= 10 || (ps2_cn_call_num % 4) == 1;
+#endif
     for (int f = 0; f < m->face_count; f++) {
         int a = m->face_indices_a[f];
         int b = m->face_indices_b[f];
         int c = m->face_indices_c[f];
+#ifdef __PS2__
+        // 2026-09-14: found via real-hardware checkpoint bisection - a/b/c come straight from decoded
+        // model geometry (model_from_ondemand_data(), real rev254 asset data, never audited for this
+        // specific hazard) with zero validation against m->vertex_count before indexing
+        // m->vertices_x/y/z[] and m->vertex_normal[] (sized exactly vertex_count entries, allocated a
+        // few lines above). An out-of-range index here reads a garbage/uninitialized pointer out of
+        // vertex_normal[] and then WRITES through it (n->x += nx; etc. below) - the same unchecked-
+        // index-from-decoded-data bug class already found and fixed multiple times this session
+        // (FloType, occluders, gsmarts(), loc->anim), and exactly the kind of thing that corrupts
+        // silently on a forgiving desktop/PCSX2 heap but faults hard on PS2's tighter memory layout.
+        // rs2_error() does real, unconditional USB/BDM I/O on PS2 (same cost class already removed
+        // from ps2_scene_checkpoint() this session) - logging one per bad face inside this loop would
+        // reintroduce that exact observer-effect trap if many faces are bad at once, so this only
+        // counts here and logs ONE summary after the loop instead.
+        if (a < 0 || a >= m->vertex_count || b < 0 || b >= m->vertex_count || c < 0 || c >= m->vertex_count) {
+            ps2_oob_face_count++;
+            continue;
+        }
+#endif
 
         int dx_ab = m->vertices_x[b] - m->vertices_x[a];
         int dy_ab = m->vertices_y[b] - m->vertices_y[a];
@@ -1780,7 +2049,11 @@ void model_calculate_normals(Model *m, int light_ambient, int light_attenuation,
             ny >>= 0x1;
             nz >>= 0x1;
         }
+#ifdef USE_FLOATS
+        int length = (int)sqrtf((float)(nx * nx + ny * ny + nz * nz));
+#else
         int length = (int)sqrt((double)(nx * nx + ny * ny + nz * nz));
+#endif
         if (length <= 0) {
             length = 1;
         }
@@ -1810,23 +2083,83 @@ void model_calculate_normals(Model *m, int light_ambient, int light_attenuation,
             m->face_color_a[f] = model_mul_color_lightness(m->face_colors[f], lightness, m->face_infos[f]);
         }
     }
+#ifdef __PS2__
+    if (ps2_oob_face_count > 0) {
+        rs2_error("model_calculate_normals: skipped %d/%d faces with out-of-range vertex indices (vertex_count=%d)\n",
+                  ps2_oob_face_count, m->face_count, m->vertex_count);
+    }
+    if (ps2_cn_log) {
+        // Fires only if the per-face loop actually finished ALL faces, not just f==0 - if the freeze
+        // is really in a later iteration rather than right after face0, this checkpoint simply never
+        // appears, which is itself the answer. call# included so a freeze here can be placed against
+        // how far into the whole scene build this specific model was.
+        char ps2_cn_msg_loop[48];
+        snprintf(ps2_cn_msg_loop, sizeof(ps2_cn_msg_loop), "calculate_normals: loop done call#%d", ps2_cn_call_num);
+        ps2_scene_checkpoint(ps2_crash_client, ps2_cn_msg_loop);
+    }
+#endif
     if (apply_lighting) {
         model_apply_lighting(m, light_ambient, attenuation, lightsrc_x, lightsrc_y, lightsrc_z, !use_allocator);
     } else {
         m->vertex_normal_original = rs2_malloc(use_allocator, m->vertex_count * sizeof(VertexNormal *));
+#ifdef __PS2__
+        if (!m->vertex_normal_original) {
+            rs2_error("model_calculate_normals: OOM allocating vertex_normal_original array (vertex_count=%d)\n", m->vertex_count);
+            ps2_scene_checkpoint(ps2_crash_client, "calculate_normals: OOM on vertex_normal_original array");
+            return;
+        }
+#endif
         for (int v = 0; v < m->vertex_count; v++) {
             m->vertex_normal_original[v] = rs2_malloc(use_allocator, sizeof(VertexNormal));
+#ifdef __PS2__
+            if (!m->vertex_normal_original[v]) {
+                rs2_error("model_calculate_normals: OOM allocating vertex_normal_original[%d] (vertex_count=%d)\n", v, m->vertex_count);
+                ps2_scene_checkpoint(ps2_crash_client, "calculate_normals: OOM on vertex_normal_original[v]");
+                return;
+            }
+#endif
             *m->vertex_normal_original[v] = *m->vertex_normal[v];
         }
     }
+#ifdef __PS2__
+    if (ps2_cn_log) {
+        // Brackets model_apply_lighting()/vertex_normal_original against the bounds calc below - the
+        // per-face loop now provably finishes (see "per-face loop done" above), so whatever's left is
+        // in exactly one of these two remaining steps.
+        ps2_scene_checkpoint(ps2_crash_client, apply_lighting ? "calculate_normals: apply_lighting done"
+                                                                : "calculate_normals: vertex_normal_original done");
+    }
+#endif
     if (apply_lighting) {
         model_calculate_bounds_cylinder(m);
     } else {
         model_calculate_bounds_aabb(m);
     }
+#ifdef __PS2__
+    if (ps2_cn_log) {
+        char ps2_cn_msg_done[48];
+        snprintf(ps2_cn_msg_done, sizeof(ps2_cn_msg_done), "calculate_normals: done call#%d", ps2_cn_call_num);
+        ps2_scene_checkpoint(ps2_crash_client, ps2_cn_msg_done);
+    }
+#endif
 }
 
 void model_calculate_bounds_cylinder(Model *m) {
+#ifdef __PS2__
+    // 2026-09-14: switched from "first 5 calls only" to "every 20th call" - same reasoning as
+    // model_calculate_normals()'s own gate: a real scene calls this far more than 5 times, so the old
+    // gate went silent almost immediately and whatever text was last drawn just sat there frozen
+    // regardless of whether the game kept working or genuinely hung later. Own local static counter
+    // since this is called from several places, not just model_calculate_normals().
+    static int ps2_bc_call_num = 0;
+    ps2_bc_call_num++;
+    bool ps2_bc_log = ps2_bc_call_num <= 10 || (ps2_bc_call_num % 4) == 1;
+    if (ps2_bc_log) {
+        char ps2_bc_msg[48];
+        snprintf(ps2_bc_msg, sizeof(ps2_bc_msg), "bounds_cylinder: enter call#%d vc=%d", ps2_bc_call_num, m->vertex_count);
+        ps2_scene_checkpoint(ps2_crash_client, ps2_bc_msg);
+    }
+#endif
     m->max_y = 0;
     m->radius = 0;
     m->min_y = 0;
@@ -1845,9 +2178,26 @@ void model_calculate_bounds_cylinder(Model *m) {
             m->radius = radius_sqr;
         }
     }
+#ifdef USE_FLOATS
+    m->radius = (int)(sqrtf((float)m->radius) + 0.99f);
+    m->min_depth = (int)(sqrtf((float)(m->radius * m->radius + m->max_y * m->max_y)) + 0.99f);
+    m->max_depth = m->min_depth + (int)(sqrtf((float)(m->radius * m->radius + m->min_y * m->min_y)) + 0.99f);
+#else
     m->radius = (int)(sqrt((double)m->radius) + 0.99);
     m->min_depth = (int)(sqrt((double)(m->radius * m->radius + m->max_y * m->max_y)) + 0.99);
     m->max_depth = m->min_depth + (int)(sqrt((double)(m->radius * m->radius + m->min_y * m->min_y)) + 0.99);
+#endif
+#ifdef __PS2__
+    // 2026-09-14: checkpoint density inside this function trimmed back down to just entry + this one
+    // completion marker - real-hardware bisection proved the whole function (loop, sqrt/cast lines,
+    // everything) completes cleanly with the AdEL/AdES exception handler active and silent throughout,
+    // so the fine-grained per-line/per-iteration checkpoints that found that out have done their job.
+    if (ps2_bc_log) {
+        char ps2_bc_msg_done[48];
+        snprintf(ps2_bc_msg_done, sizeof(ps2_bc_msg_done), "bounds_cylinder: done call#%d", ps2_bc_call_num);
+        ps2_scene_checkpoint(ps2_crash_client, ps2_bc_msg_done);
+    }
+#endif
 }
 
 void model_create_label_references(Model *m, bool use_allocator) {
@@ -2188,8 +2538,13 @@ void model_calculate_bounds_y(Model *m) {
         }
     }
 
+#ifdef USE_FLOATS
+    m->min_depth = (int)(sqrtf((float)(m->radius * m->radius + m->max_y * m->max_y)) + 0.99f);
+    m->max_depth = m->min_depth + (int)(sqrtf((float)(m->radius * m->radius + m->min_y * m->min_y)) + 0.99f);
+#else
     m->min_depth = (int)(sqrt(m->radius * m->radius + m->max_y * m->max_y) + 0.99);
     m->max_depth = m->min_depth + (int)(sqrt(m->radius * m->radius + m->min_y * m->min_y) + 0.99);
+#endif
 }
 
 void model_calculate_bounds_aabb(Model *m) {
@@ -2227,9 +2582,15 @@ void model_calculate_bounds_aabb(Model *m) {
             m->radius = radius_sqr;
         }
     }
+#ifdef USE_FLOATS
+    m->radius = (int)sqrtf((float)m->radius);
+    m->min_depth = (int)sqrtf((float)(m->radius * m->radius + m->max_y * m->max_y));
+    m->max_depth = m->min_depth + (int)sqrtf((float)(m->radius * m->radius + m->min_y * m->min_y));
+#else
     m->radius = (int)sqrt((double)m->radius);
     m->min_depth = (int)sqrt((double)(m->radius * m->radius + m->max_y * m->max_y));
     m->max_depth = m->min_depth + (int)sqrt((double)(m->radius * m->radius + m->min_y * m->min_y));
+#endif
 }
 
 int model_mul_color_lightness(int hsl, int scalar, int face_infos) {
@@ -2251,10 +2612,36 @@ int model_mul_color_lightness(int hsl, int scalar, int face_infos) {
 }
 
 void model_apply_lighting(Model *m, int light_ambient, int light_attenuation, int lightsrc_x, int lightsrc_y, int lightsrc_z, bool _free) {
+#ifdef __PS2__
+    int ps2_oob_face_count = 0;
+#endif
     for (int f = 0; f < m->face_count; f++) {
         int a = m->face_indices_a[f];
         int b = m->face_indices_b[f];
         int c = m->face_indices_c[f];
+#ifdef __PS2__
+        // 2026-09-14: same unchecked-index hazard as model_calculate_normals() above (this function
+        // has its own separate loop over the same face_indices_a/b/c data, so that fix doesn't cover
+        // this one) - a/b/c index m->vertex_normal[] (sized vertex_count) with no validation. Counted,
+        // not logged per-face - see the matching comment in model_calculate_normals() for why
+        // (rs2_error() is real, unconditional USB/BDM I/O; logging every bad face would reintroduce
+        // the observer-effect trap already fixed once this session).
+        if (a < 0 || a >= m->vertex_count || b < 0 || b >= m->vertex_count || c < 0 || c >= m->vertex_count) {
+            ps2_oob_face_count++;
+            continue;
+        }
+#endif
+#ifdef __PS2__
+        // n->w is a per-vertex face-touch count (incremented once per referencing face in
+        // model_calculate_normals()'s own loop) - a vertex no face ever legitimately touches (or
+        // whose only touching faces were all skipped by the bounds check above) leaves n->w at 0,
+        // making light_attenuation * n->w a real, reachable divide-by-zero below - independent of the
+        // OOB-index fix above, this can happen with otherwise well-formed data. Checked per-vertex
+        // (not just for `a`) since b or c can each independently be the untouched one.
+        if (m->vertex_normal[a]->w == 0 || m->vertex_normal[b]->w == 0 || m->vertex_normal[c]->w == 0) {
+            continue;
+        }
+#endif
         if (!m->face_infos) {
             int color = m->face_colors[f];
             VertexNormal *n = m->vertex_normal[a];
@@ -2280,6 +2667,12 @@ void model_apply_lighting(Model *m, int light_ambient, int light_attenuation, in
             m->face_color_c[f] = model_mul_color_lightness(color, lightness, info);
         }
     }
+#ifdef __PS2__
+    if (ps2_oob_face_count > 0) {
+        rs2_error("model_apply_lighting: skipped %d/%d faces with out-of-range vertex indices (vertex_count=%d)\n",
+                  ps2_oob_face_count, m->face_count, m->vertex_count);
+    }
+#endif
     if (_free) {
         if (m->vertex_normal) {
             for (int v = 0; v < m->vertex_count; v++) {

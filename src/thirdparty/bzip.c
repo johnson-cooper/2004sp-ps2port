@@ -30,6 +30,45 @@
 */
 
 #include "bzip.h"
+#ifdef __PS2__
+// Only for the real-hardware diagnostics below (rs2_now()/rs2_log() from platform.h,
+// ps2_scene_checkpoint() from client.h - the same on-screen+log checkpoint helper world_build()
+// already reuses, see world.c). This vendored file otherwise has zero project dependencies; this is
+// a deliberate, narrow exception purely for diagnosing a real-hardware-only hang, not a general
+// coupling. Safe from a circular-include standpoint the same way world.c already established:
+// client.h does not include bzip.h/bzip.c.
+#include "../platform.h"
+#include "../client.h"
+
+// Keep this path deliberately narrower than PS2_CHECKPOINTS_ENABLED: only the loc-decode caller
+// passes a Client*, while startup archives and land data pass NULL.  The bzip checkpoints are a
+// bounded diagnostic set (setup, table decode, BWT completion, and a 1 Hz heartbeat), not the
+// dense per-object diagnostics that made the global switch unsafe on hardware.
+static void ps2_diag_checkpoint(void *diagnostic_client, const char *label) {
+    if (diagnostic_client) {
+        ps2_scene_checkpoint((Client *)diagnostic_client, label);
+    }
+}
+
+// There is no host OS for exit() to return to on bare PS2 hardware.  A decode
+// error must leave a visible breadcrumb and a harmless empty payload instead
+// of taking the existing desktop-only bzip_fatal() path, which looks exactly
+// like a silent hang on the console.
+static void ps2_bzip_error(void *diagnostic_client, int8_t *file_data, int dst_capacity, int retval) {
+    char label[96];
+    snprintf(label, sizeof(label), "bzip error code %d", retval);
+    ps2_diag_checkpoint(diagnostic_client, label);
+    if (file_data && dst_capacity > 0) {
+        memset(file_data, 0, dst_capacity);
+    }
+}
+
+// Only one bunzip stream is active in this client.  Keep this diagnostic guard
+// outside bunzip_data so observing state corruption does not change that
+// structure's layout or accidentally hide an overwrite.
+static int ps2_bwt_input_pos_guard;
+static int ps2_bwt_input_count_guard;
+#endif
 
 const char BZIP_HEADER[] = {'B', 'Z', 'h', '1'};
 
@@ -51,7 +90,25 @@ static uint32_t get_bits(bunzip_data *bd, uint8_t bits_wanted) {
        one byte at a time to enforce endianness and avoid unaligned access.) */
     while (bd->inbufBitCount < bits_wanted) {
         /* If we need to read more data from file into byte buffer, do so */
-        if (bd->inbufPos == bd->inbufCount) {
+        // A valid reader arrives here with pos == count.  Treat pos > count as
+        // the same corrupt/truncated-input condition instead of indexing past
+        // the in-memory compressed stream forever.
+        if (bd->inbufPos >= bd->inbufCount) {
+            if (bd->in_fd == -1) {
+                // in_fd==-1 means "the whole compressed stream is already in `inbuf`, there is no
+                // real file behind this" (see start_bunzip's own doc comment) - and in this codebase
+                // it's the ONLY mode ever used (bzip_decompress(), the sole caller of start_bunzip(),
+                // always passes -1; grepping the whole project confirms nothing ever exercises the
+                // file-descriptor path below). Exhausting `inbuf` here means truncated/corrupt input,
+                // full stop - there is no more data to fetch, from a file or otherwise. The generic
+                // branches below unconditionally called read()/_read()/ReadFile() on this literal -1
+                // regardless, which is at best meaningless and at worst platform-defined behavior for
+                // an invalid descriptor - not something to rely on being fast/safe on every libc this
+                // project targets. Go straight to the same "unexpected EOF" signal without ever
+                // reaching a real (or not-so-real) I/O call.
+                longjmp(bd->jmpbuf, RETVAL_UNEXPECTED_INPUT_EOF);
+            }
+
             #ifdef NXDK
             if (!ReadFile((HANDLE)bd->in_fd, bd->inbuf, IOBUF_SIZE, (LPDWORD)&bd->inbufCount, NULL) || bd->inbufCount == 0) {
             #elif defined(_WIN32)
@@ -99,12 +156,25 @@ static int get_next_block(bunzip_data *bd) {
     dbufSize = bd->dbufSize;
     selectors = bd->selectors;
 
+#ifdef __PS2__
+    ps2_diag_checkpoint(bd->diagnostic_client, "bzip: next block header enter");
+#endif
+
     /* Reset longjmp I/O error handling */
 #if !defined(__wasm) || defined(__EMSCRIPTEN__)
     i = setjmp(bd->jmpbuf);
 
     if (i) {
         return i;
+    }
+#endif
+
+#ifdef __PS2__
+    {
+        char ps2_header_msg[96];
+        snprintf(ps2_header_msg, sizeof(ps2_header_msg), "bzip: next hdr pos=%d/%d bits=%u",
+                 bd->inbufPos, bd->inbufCount, (unsigned int)bd->inbufBitCount);
+        ps2_diag_checkpoint(bd->diagnostic_client, ps2_header_msg);
     }
 #endif
 
@@ -122,6 +192,9 @@ static int get_next_block(bunzip_data *bd) {
     if ((i != 0x314159) || (j != 0x265359)) {
         return RETVAL_NOT_BZIP_DATA;
     }
+#ifdef __PS2__
+    ps2_diag_checkpoint(bd->diagnostic_client, "bzip: get_next_block entered");
+#endif
 
     /* We can add support for blockRandomised if anybody complains.  There was
        some code for this in busybox 1.0.0-pre3, but nobody ever noticed that
@@ -316,7 +389,44 @@ static int get_next_block(bunzip_data *bd) {
     /* Loop through compressed symbols. */
     runPos = dbufCount = symCount = selector = 0;
 
+#ifdef __PS2__
+    {
+        char ps2_bzip_msg[96];
+        snprintf(ps2_bzip_msg, sizeof(ps2_bzip_msg), "bzip: tables built (symTotal=%u groups=%u sel=%u), decoding",
+                 (unsigned int)symTotal, (unsigned int)groupCount, (unsigned int)nSelectors);
+        ps2_diag_checkpoint(bd->diagnostic_client, ps2_bzip_msg);
+    }
+    // Real-hardware liveness heartbeat, take 3 - and a real lesson learned from the first two: a
+    // 15ms-or-250ms WALL-CLOCK threshold, checked every single iteration via a report action that
+    // itself does a real boot.log fopen/fwrite/fclose AND a full GS screen draw+flip, is a classic
+    // observer-effect trap once that report action costs more than the threshold - each report
+    // pushes the elapsed-time check over the limit for the NEXT iteration too, so the heartbeat ends
+    // up firing on nearly every iteration, and its own cost (empirically ~17ms/iteration, matching
+    // exactly what was measured) becomes the entire "slowness" being observed. That's what actually
+    // happened here: iters=1668 in 29035ms was this instrumentation measuring itself, not the
+    // decoder - the real per-iteration cost of a few bit-shifts and array lookups cannot plausibly
+    // be 17ms even on slow EE hardware. Fixed by checking the clock only every 2000 iterations
+    // (cheap - a counter comparison, not a rs2_now() call, on the other 1999) and using a full 1000ms
+    // threshold, so the report's own cost is negligible relative to the interval it's measuring
+    // rather than comparable to (or larger than) it.
+    int64_t ps2_hb_start = rs2_now();
+    int64_t ps2_hb_last_report = ps2_hb_start;
+    uint32_t ps2_hb_iters = 0;
+#endif
     for (;;) {
+#ifdef __PS2__
+        ps2_hb_iters++;
+        if (ps2_hb_iters % 2000 == 0) {
+            int64_t ps2_hb_now = rs2_now();
+            if (ps2_hb_now - ps2_hb_last_report >= 1000) {
+                char ps2_hb_msg[96];
+                snprintf(ps2_hb_msg, sizeof(ps2_hb_msg), "bzip: decoding iters=%u dbufCount=%u elapsed=%dms",
+                         (unsigned int)ps2_hb_iters, (unsigned int)dbufCount, (int)(ps2_hb_now - ps2_hb_start));
+                ps2_diag_checkpoint(bd->diagnostic_client, ps2_hb_msg);
+                ps2_hb_last_report = ps2_hb_now;
+            }
+        }
+#endif
         /* Determine which huffman coding group to use. */
         if (!(symCount--)) {
             symCount = GROUP_SIZE - 1;
@@ -341,7 +451,7 @@ static int get_next_block(bunzip_data *bd) {
            j=get_bits(bd,hufGroup->maxLen);
          */
         while (bd->inbufBitCount < hufGroup->maxLen) {
-            if (bd->inbufPos == bd->inbufCount) {
+            if (bd->inbufPos >= bd->inbufCount) {
                 j = get_bits(bd, (uint8_t)hufGroup->maxLen);
                 goto got_huff_bits;
             }
@@ -577,6 +687,18 @@ static int read_bunzip(bunzip_data *bd, int8_t *outbuf, int len) {
         }
 
         /* Decompression of this block completed successfully */
+#ifdef __PS2__
+        if (bd->inbufPos != ps2_bwt_input_pos_guard || bd->inbufCount != ps2_bwt_input_count_guard) {
+            char ps2_input_changed_msg[96];
+            snprintf(ps2_input_changed_msg, sizeof(ps2_input_changed_msg),
+                     "bzip: input changed %d/%d -> %d/%d",
+                     ps2_bwt_input_pos_guard, ps2_bwt_input_count_guard,
+                     bd->inbufPos, bd->inbufCount);
+            ps2_diag_checkpoint(bd->diagnostic_client, ps2_input_changed_msg);
+        }
+        ps2_diag_checkpoint(bd->diagnostic_client, "bzip: BWT walk complete, block done");
+        ps2_diag_checkpoint(bd->diagnostic_client, "bzip: BWT finalizing CRC");
+#endif
         bd->writeCRC = ~bd->writeCRC;
 
         bd->totalCRC =
@@ -587,10 +709,16 @@ static int read_bunzip(bunzip_data *bd, int8_t *outbuf, int len) {
             bd->totalCRC = bd->headerCRC + 1;
             return RETVAL_LAST_BLOCK;
         }
+#ifdef __PS2__
+        ps2_diag_checkpoint(bd->diagnostic_client, "bzip: BWT CRC verified");
+#endif
     }
 
     /* Refill the intermediate buffer by huffman-decoding next block of input */
     /* (previous is just a convenient unused temp variable here) */
+#ifdef __PS2__
+    ps2_diag_checkpoint(bd->diagnostic_client, "bzip: reading next block header");
+#endif
     previous = get_next_block(bd);
 
     if (previous) {
@@ -598,7 +726,21 @@ static int read_bunzip(bunzip_data *bd, int8_t *outbuf, int len) {
         return (previous != RETVAL_LAST_BLOCK) ? previous : gotcount;
     }
 
+#ifdef __PS2__
+    {
+        char ps2_gnb_msg[80];
+        snprintf(ps2_gnb_msg, sizeof(ps2_gnb_msg),
+                 "bzip: get_next_block returned OK (writeCount=%u), BWT walk",
+                 (unsigned int)bd->writeCount);
+        ps2_diag_checkpoint(bd->diagnostic_client, ps2_gnb_msg);
+    }
+#endif
+
     bd->writeCRC = 0xffffffffUL;
+#ifdef __PS2__
+    ps2_bwt_input_pos_guard = bd->inbufPos;
+    ps2_bwt_input_count_guard = bd->inbufCount;
+#endif
     pos = bd->writePos;
     current = bd->writeCurrent;
 
@@ -675,31 +817,132 @@ static int start_bunzip(bunzip_data **bdp, int in_fd, uint8_t *inbuf, int len) {
     return RETVAL_OK;
 }
 
+#ifndef __PS2__
 static void bzip_fatal(int retval) {
     fprintf(stderr, "bzip error: %s\n", bunzip_errors[-retval]);
     exit(1);
 }
+#endif
 
+#ifdef __PS2__
+void bzip_decompress(int8_t *file_data, int8_t *archive_data, int archive_size, int offset, void *diagnostic_client, int dst_capacity) {
+#else
 void bzip_decompress(int8_t *file_data, int8_t *archive_data, int archive_size,
                      int offset) {
+#endif
     uint8_t *headered = malloc(archive_size + 4);
+    if (!headered) {
+        // This malloc's result was never checked before being written into via memcpy() below - a
+        // NULL-pointer write, not a NULL-pointer read. On a platform with gigabytes of free host RAM
+        // (desktop, or PCSX2 running on a modern machine) this allocation essentially never fails, so
+        // the bug was invisible there. On the PS2's fixed 32MB EE RAM, by the time this runs (after
+        // world_new()'s arrays, 9 land-square decompressions, and whatever else has accumulated),
+        // this project's own history (component_unpack/animframe OOM chases, see memory) shows heap
+        // pressure right at this kind of boundary is a real, not hypothetical, failure mode. Writing
+        // to address 0 on real hardware can corrupt low memory that's actually mapped to something
+        // load-bearing (exception vectors, kernel structures) rather than cleanly faulting - which
+        // can manifest as exactly a silent freeze instead of a crash, unlike a well-behaved OS process
+        // that just segfaults. Fail loudly and exit cleanly instead, matching the existing pattern
+        // used for client_build_scene()'s own scratch-buffer allocation check.
+        fprintf(stderr, "bzip_decompress: malloc(%d) for headered buffer failed - out of memory\n", archive_size + 4);
+#ifdef __PS2__
+        ps2_bzip_error(diagnostic_client, file_data, dst_capacity, RETVAL_OUT_OF_MEMORY);
+#else
+        bzip_fatal(RETVAL_OUT_OF_MEMORY);
+#endif
+        return;
+    }
     memcpy(headered, BZIP_HEADER, 4);
     memcpy(headered + 4, archive_data + offset, archive_size);
 
-    bunzip_data *bd;
+#ifdef __PS2__
+    // Bisecting bzip_decompress()'s own setup, before any of it reaches the main decode loop's
+    // heartbeat below - 10 real minutes with zero new heartbeat output means execution never even
+    // gets there, so the earlier stages (this malloc/memcpy, start_bunzip()'s own bd/dbuf mallocs
+    // and header check, get_next_block()'s symbol-map/selector/Huffman-table setup) need their own
+    // checkpoints to find out which one it's actually stuck in. Uses the same ps2_scene_checkpoint()
+    // helper world_build() already reuses (readable on-screen text + log, tolerates a NULL Client
+    // by logging only) instead of ps2_boot_progress()'s bare percentage bar, which (a) shows no
+    // readable value a person can distinguish from a photo and (b) was firing for every
+    // bzip_decompress() call in the program, including the title-screen archive loads that already
+    // worked fine - a real, if minor, visual regression on unrelated working code, now fixed by
+    // gating all of this on `diagnostic_client` actually being non-NULL (only client_build_scene()'s
+    // land/loc calls pass one; jagfile.c's/midi.c's calls pass NULL and get log-only behavior).
+    ps2_diag_checkpoint(diagnostic_client, "bzip: headered buffer ready");
+#endif
+
+    bunzip_data *bd = NULL;
     int retval;
 
     if ((retval = start_bunzip(&bd, -1, headered, archive_size + 4)) < 0) {
         free(headered);
+        if (bd) {
+            free(bd->dbuf);
+        }
+        free(bd);
+#ifdef __PS2__
+        ps2_bzip_error(diagnostic_client, file_data, dst_capacity, retval);
+        return;
+#else
+        bzip_fatal(retval);
+#endif
+    }
+#ifdef __PS2__
+    bd->diagnostic_client = diagnostic_client;
+    ps2_diag_checkpoint(diagnostic_client, "bzip: start_bunzip returned OK");
+#endif
+
+    // start_bunzip() arms bd->jmpbuf with ITS OWN setjmp() so a truncated/corrupt header
+    // read (inside start_bunzip's one get_bits(bd, 32) call) can longjmp out cleanly - but
+    // start_bunzip has already returned by the time we get here, so that saved jmpbuf now
+    // points at a dead stack frame. Every read_bunzip() call below can itself call get_bits()
+    // deep inside get_next_block(), and get_bits() longjmp()s to bd->jmpbuf whenever the
+    // input buffer runs out (src/thirdparty/bzip.c's get_bits(), the "unexpected input EOF"
+    // path) - for a genuinely truncated/corrupt compressed block (not proven impossible: this
+    // is exactly the kind of data-desync a decompression bug elsewhere could produce, and mapsquare
+    // loc data is far more variable than land data, which never seems to trigger this), that
+    // longjmp would jump to a setjmp whose enclosing function has already terminated -
+    // undefined behavior per the C standard, not a "maybe fine in practice" corner case. UB from
+    // a stale stack frame is exactly the class of bug that can differ between an emulator
+    // recompiling this code for x86_64 and the real R5900 executing the actual compiled MIPS
+    // stack layout - it can silently "work" on one and hang/misbehave on the other, with no
+    // relation to which is "more correct." Re-arming the jmpbuf here, in a frame that stays
+    // alive for the entire decompression loop below, makes every subsequent longjmp target a
+    // live, valid frame instead of a dead one - turning "undefined" into "a clean, reported
+    // decompression error" regardless of what real data ever triggers it.
+#if !defined(__wasm) || defined(__EMSCRIPTEN__)
+    if ((retval = setjmp(bd->jmpbuf)) != 0) {
+        free(headered);
         free(bd->dbuf);
         free(bd);
+#ifdef __PS2__
+        ps2_bzip_error(diagnostic_client, file_data, dst_capacity, retval);
+        return;
+#else
         bzip_fatal(retval);
+#endif
     }
+#endif
 
     int write_offset = 0;
+#ifdef __PS2__
+    // Keep read_bunzip() on its original fixed-size (IOBUF_SIZE) output contract.  It has
+    // resumable BWT/run-length state, and although its snapshot code nominally accepts an
+    // arbitrary len, the scene regression appeared only after the capacity hardening started
+    // passing a short final len.  Decode a possible final chunk into this small staging buffer,
+    // then copy only the bytes the decoder actually produced after checking their real size.
+    int8_t final_chunk[IOBUF_SIZE];
+#endif
 
     while (1) {
-        retval = read_bunzip(bd, file_data + write_offset, IOBUF_SIZE);
+        int chunk = IOBUF_SIZE;
+#ifdef __PS2__
+        int remaining = dst_capacity - write_offset;
+        int8_t *out = remaining >= IOBUF_SIZE ? file_data + write_offset : final_chunk;
+#else
+        int8_t *out = file_data + write_offset;
+#endif
+        retval = read_bunzip(bd, out, chunk);
 
         /* finished */
         if (retval == -1) {
@@ -714,10 +957,33 @@ void bzip_decompress(int8_t *file_data, int8_t *archive_data, int archive_size,
             free(headered);
             free(bd->dbuf);
             free(bd);
+#ifdef __PS2__
+            ps2_bzip_error(diagnostic_client, file_data, dst_capacity, retval);
+            return;
+#else
             bzip_fatal(retval);
+#endif
+        }
+#ifdef __PS2__
+        // A short successful read is the final block.  The old loop advanced by the
+        // requested chunk and made one extra call solely to receive -1; using retval here
+        // both preserves the exact byte count and prevents a partial last chunk overrunning
+        // the caller's real allocation.
+        if (retval < chunk) {
+            if (retval > remaining) {
+                rs2_error("bzip_decompress: decompressed output exceeds dst_capacity=%d at offset=%d (final chunk=%d) - stopping before overrun\n",
+                          dst_capacity, write_offset, retval);
+                ps2_diag_checkpoint(diagnostic_client, "bzip: dst_capacity exceeded, stopping early");
+            } else if (out == final_chunk && retval > 0) {
+                memcpy(file_data + write_offset, final_chunk, retval);
+            }
+            free(bd->dbuf);
+            free(bd);
+            free(headered);
             return;
         }
+#endif
 
-        write_offset += IOBUF_SIZE;
+        write_offset += chunk;
     }
 }
