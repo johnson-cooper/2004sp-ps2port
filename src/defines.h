@@ -72,19 +72,20 @@
 // users and avoids the extra permanent pool that made the dense Lumbridge rebuild regress.
 #define PIX3D_POOL_COUNT 1
 #define DISABLE_FLAMES
-// Camera-centred software traversal. Five tiles is an 11x11 live draw window; full height/collision
-// state remains available outside it for gameplay and pathing.
-#define PS2_RENDER_RADIUS 5
-// Materialise only a 32x32 terrain window around the scene centre. The complete 104x104 decoded
-// height/collision arrays remain resident; Ground/underlay/overlay objects are the bounded part.
-#define PS2_TERRAIN_MIN_TILE 32
-#define PS2_TERRAIN_MAX_TILE 64
+// Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
+// state remains available outside it for movement, pathing and server-side gameplay.
+#define PS2_RENDER_RADIUS 4
+// Keep only a 24x24 materialised terrain working set around scene centre. The complete 104x104
+// decoded height/collision arrays remain resident; this only bounds Ground/underlay/overlay graphics.
+#define PS2_TERRAIN_MIN_TILE 36
+#define PS2_TERRAIN_MAX_TILE 60
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
 #define PS2_3D_RENDER_HEIGHT 334
-// Simulation/networking stay at 50 Hz; expensive software draw/present is intentionally decimated.
-#define PS2_RENDER_DIVISOR 4
+// Simulation/networking stay at 50 Hz. Present the expensive software 3D view at 10 Hz for now;
+// gameplay remains responsive while we establish a stable memory/performance floor.
+#define PS2_RENDER_DIVISOR 5
 // Static locations remain off while the gameplay-first loc streamer/filter is implemented. When
 // restored, examine-only decorative locs should not receive render/model residency on PS2.
 #define PS2_DEFER_STATIC_LOCATIONS 1
