@@ -1,5 +1,10 @@
 #pragma once
 
+// Used by gl11.h to distinguish entry/client.c (which has already included client.h/clientstream.h)
+// from world3d.c (which reaches client.h transitively through gl11.h). This lets the PS2 client use
+// a lazy scene-minlevel policy without rewriting world3d.c's real function definition.
+#define RS2_CLIENTSTREAM_H_INCLUDED 1
+
 #include <stdbool.h>
 #include <stdint.h>
 
