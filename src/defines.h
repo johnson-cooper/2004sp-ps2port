@@ -99,10 +99,9 @@
 // Terrain textures are replaced by the map's existing vertex-lit floor colours.
 // This preserves height, light and biome tint while avoiding textured terrain work.
 #define PS2_UNTEXTURED_TERRAIN 1
-// Diagnostic clear behind the now-enabled real terrain pass. If scene geometry is absent, the
-// viewport stays grass green; if terrain is being rasterised as black, black polygons will visibly
-// overwrite this background. This distinguishes scene/culling failure from colour/raster failure.
-#define PS2_FLAT_TERRAIN 1
+// Render the map's existing height/lighting/ground colours, but keep textures and static
+// locations disabled. This is the first isolated real-hardware terrain restoration step.
+#define PS2_FLAT_TERRAIN 0
 // Restore the normal land-data load and terrain scene build. Static locations remain independently
 // deferred above, so this stage exercises heights, floor colours and ground geometry without the
 // known-heavy tree/building/location model path.
@@ -165,6 +164,7 @@
 #define K_HOME 36
 #define K_LEFT 37
 #define K_UP 38
+#define K_RIGHT 39
 #define K_DOWN 40
 
 #define K_ASTERISK 42
@@ -210,7 +210,7 @@
 #define LIGHTRED 0xff9040 // 16748608
 #define DARKRED 0x800000  // 8388608
 #define DARKBLUE 0x80     // 128
-#define ORANGE1 0xffb000  // 16748608
+#define ORANGE1 0xffb000  // 16756736
 #define ORANGE2 0xff7000  // 16740352
 #define ORANGE3 0xff3000  // 16723968
 #define GREEN1 0xc0ff00   // 12648192
@@ -219,7 +219,7 @@
 
 // other
 #define PROGRESS_RED 0x8c1111              // 9179409
-#define OPTIONS_MENU 0x5d5447              // 6112583
+#define OPTIONS_MENU 0x5d5447              // 6116423
 #define SCROLLBAR_TRACK 0x23201b           // 2301979
 #define SCROLLBAR_GRIP_FOREGROUND 0x4d4233 // 5063219
 #define SCROLLBAR_GRIP_HIGHLIGHT 0x766654  // 7759444
