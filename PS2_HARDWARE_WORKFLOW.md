@@ -2,6 +2,14 @@
 
 This file is the standing workflow for the PlayStation 2 port. Read it before making or testing PS2-specific changes, including in future development sessions.
 
+## Current integration status
+
+- Active development branch: `ps2-hardware-integration`
+- Branch starting point: `main` commit `673657249ef18526e6c33a3d4381953c132c2782`
+- Last real-hardware-known-good integration commit: **TBD / not yet established on this fresh branch**
+- Immediate target: establish a hardened, reproducible stripped-world baseline on real PS2 before restoring game systems.
+- After the baseline is accepted, restore missing systems gradually and update this section as milestones are proven on hardware.
+
 ## Source of truth
 
 - GitHub is the source of truth for tracked source code.
