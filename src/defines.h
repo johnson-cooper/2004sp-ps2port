@@ -65,11 +65,11 @@
 #endif
 
 #if defined(__PS2__)
-// The EE has 32 MiB total RAM. Keep one expanded texture slot for this isolated restoration test;
-// the LRU can still regenerate terrain textures as needed without increasing permanent pool memory.
+// Textured terrain is live again. Restore the original PS2 five-slot low-memory texel cache so
+// different floor textures do not continuously evict and regenerate the single active slot.
 #define MODEL_MAX_DEPTH 600
 #define MODEL_DEPTH_FACE_COUNT 80
-#define PIX3D_POOL_COUNT 1
+#define PIX3D_POOL_COUNT 5
 #define DISABLE_FLAMES
 // The normal World3D traversal is camera-centred. Keep it tiny while terrain is being restored;
 // the local player is submitted separately once its renderer is re-enabled.
