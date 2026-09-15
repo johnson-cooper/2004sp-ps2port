@@ -23,8 +23,18 @@ function Replace-Exact([string]$Path, [string]$Old, [string]$New, [string]$Label
 }
 
 Replace-Exact 'src/clientstream.c' @'
+int clientstream_available(ClientStream *stream, int len) {
+    if (stream->bufLen >= len) {
+        return 1;
+    }
+
 #ifdef __PS2__
 '@ @'
+int clientstream_available(ClientStream *stream, int len) {
+    if (stream->bufLen >= len) {
+        return 1;
+    }
+
 #ifdef __PS2__
     // Keep the linear receive window inside its physical 5 KB backing buffer.
     if (len < 0 || len > (int)sizeof(stream->buf)) {
