@@ -65,9 +65,8 @@
 #endif
 
 #if defined(__PS2__)
-// The EE has 32 MiB total RAM. Texels are a reloadable LRU cache, so keep the
-// permanent cache intentionally tiny: one expanded texture slot. Terrain is untextured below,
-// and pix3d_get_texels() evicts/regenerates this slot for the remaining textured models.
+// The EE has 32 MiB total RAM. Keep one expanded texture slot for this isolated restoration test;
+// the LRU can still regenerate terrain textures as needed without increasing permanent pool memory.
 #define MODEL_MAX_DEPTH 600
 #define MODEL_DEPTH_FACE_COUNT 80
 #define PIX3D_POOL_COUNT 1
@@ -98,9 +97,9 @@
 // Drop the cached stone frame panels after the title screen.  The live scene,
 // chat and sidebar targets remain; only decorative chrome is removed.
 #define PS2_SIMPLE_UI 1
-// Terrain textures are replaced by the map's existing vertex-lit floor colours.
-// This preserves height, light and biome tint while avoiding textured terrain work.
-#define PS2_UNTEXTURED_TERRAIN 1
+// Restore the original textured terrain path for this isolated hardware test. This matches the
+// pre-optimization renderer while static locations, the local player and heavier UI remain disabled.
+#define PS2_UNTEXTURED_TERRAIN 0
 // Render the map's existing height/lighting/ground colours, but keep textures and static
 // locations disabled. This is the first isolated real-hardware terrain restoration step.
 #define PS2_FLAT_TERRAIN 0
