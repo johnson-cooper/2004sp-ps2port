@@ -4,28 +4,43 @@
 
 #include "linklist.h"
 
-LinkList *linklist_new(void) {
-    // A LinkList used to perform two heap allocations: one for the list object and
-    // one for its sentinel. The client creates tens of thousands of empty ground-
-    // item lists, so the allocator metadata/fragmentation from that second tiny
-    // allocation is significant on a 32 MiB PS2. Keep the exact same public layout
-    // and semantics, but place the sentinel immediately after LinkList in one block.
-    LinkList *list = calloc(1, sizeof(LinkList) + sizeof(Linkable));
+static bool linklist_ensure_sentinel(LinkList *list) {
     if (!list) {
-        return NULL;
+        return false;
     }
-    list->sentinel = (Linkable *)(list + 1);
+    if (list->sentinel) {
+        return true;
+    }
+
+    list->sentinel = calloc(1, sizeof(Linkable));
+    if (!list->sentinel) {
+        return false;
+    }
     list->sentinel->next = list->sentinel;
     list->sentinel->prev = list->sentinel;
-    return list;
+    return true;
+}
+
+LinkList *linklist_new(void) {
+    // Keep an empty list genuinely cheap. The client creates one ground-item list
+    // for every tile on all four levels (43,264 lists), while almost every one is
+    // empty. Allocate only the tiny list/cursor object here; materialise its
+    // sentinel the first time a node is actually inserted.
+    return calloc(1, sizeof(LinkList));
 }
 
 void linklist_free(LinkList *list) {
-    // sentinel is part of the same allocation as list (see linklist_new()).
+    if (!list) {
+        return;
+    }
+    free(list->sentinel);
     free(list);
 }
 
 void linklist_add_tail(LinkList *list, Linkable *node) {
+    if (!node || !linklist_ensure_sentinel(list)) {
+        return;
+    }
     if (node->prev) {
         linkable_unlink(node);
     }
@@ -37,6 +52,9 @@ void linklist_add_tail(LinkList *list, Linkable *node) {
 }
 
 void linklist_add_head(LinkList *list, Linkable *node) {
+    if (!node || !linklist_ensure_sentinel(list)) {
+        return;
+    }
     if (node->prev) {
         linkable_unlink(node);
     }
@@ -48,6 +66,9 @@ void linklist_add_head(LinkList *list, Linkable *node) {
 }
 
 Linkable *linklist_remove_head(LinkList *list) {
+    if (!list || !list->sentinel) {
+        return NULL;
+    }
     Linkable *node = list->sentinel->next;
     if (node == list->sentinel) {
         return NULL;
@@ -57,6 +78,12 @@ Linkable *linklist_remove_head(LinkList *list) {
 }
 
 Linkable *linklist_head(LinkList *list) {
+    if (!list || !list->sentinel) {
+        if (list) {
+            list->cursor = NULL;
+        }
+        return NULL;
+    }
     Linkable *node = list->sentinel->next;
     if (node == list->sentinel) {
         list->cursor = NULL;
@@ -67,6 +94,12 @@ Linkable *linklist_head(LinkList *list) {
 }
 
 Linkable *linklist_tail(LinkList *list) {
+    if (!list || !list->sentinel) {
+        if (list) {
+            list->cursor = NULL;
+        }
+        return NULL;
+    }
     Linkable *node = list->sentinel->prev;
     if (node == list->sentinel) {
         list->cursor = NULL;
@@ -77,6 +110,9 @@ Linkable *linklist_tail(LinkList *list) {
 }
 
 Linkable *linklist_next(LinkList *list) {
+    if (!list || !list->sentinel || !list->cursor) {
+        return NULL;
+    }
     Linkable *node = list->cursor;
     if (node == list->sentinel) {
         list->cursor = NULL;
@@ -87,6 +123,9 @@ Linkable *linklist_next(LinkList *list) {
 }
 
 Linkable *linklist_prev(LinkList *list) {
+    if (!list || !list->sentinel || !list->cursor) {
+        return NULL;
+    }
     Linkable *node = list->cursor;
     if (node == list->sentinel) {
         list->cursor = NULL;
@@ -97,6 +136,9 @@ Linkable *linklist_prev(LinkList *list) {
 }
 
 void linklist_clear(LinkList *list) {
+    if (!list || !list->sentinel) {
+        return;
+    }
     while (true) {
         Linkable *node = list->sentinel->next;
         if (node == list->sentinel) {
