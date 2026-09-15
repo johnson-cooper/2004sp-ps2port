@@ -1,5 +1,8 @@
 #include <stdbool.h>
 #include <stdint.h>
+#ifdef __PS2__
+#include <malloc.h>
+#endif
 
 int bump_allocator_used(void);
 int bump_allocator_capacity(void);
