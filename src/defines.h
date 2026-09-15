@@ -78,9 +78,11 @@
 #define PS2_RENDER_RADIUS 6
 #define PS2_TERRAIN_MIN_TILE 24
 #define PS2_TERRAIN_MAX_TILE 72
-// The interface remains a readable 512x334 surface; only software 3D uses this target.
-#define PS2_3D_RENDER_WIDTH 192
-#define PS2_3D_RENDER_HEIGHT 125
+// Restore the software 3D target to the engine's native 512x334 projection for this hardware test.
+// The rasterizer still projects with a fixed 512 focal scale (`<< 9`); using a 192x125 target with
+// that unchanged projection narrows/clips the scene dramatically and can leave the viewport black.
+#define PS2_3D_RENDER_WIDTH 512
+#define PS2_3D_RENDER_HEIGHT 334
 // Keep simulation/network ticks at 50 Hz and cap expensive software rendering
 // and the full-screen GIF upload at 25 Hz.
 // Keep GS pressure low while the texture-upload presenter is being isolated.
