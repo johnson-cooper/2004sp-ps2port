@@ -5,15 +5,23 @@
 #include "linklist.h"
 
 LinkList *linklist_new(void) {
-    LinkList *list = calloc(1, sizeof(LinkList));
-    list->sentinel = calloc(1, sizeof(Linkable));
+    // A LinkList used to perform two heap allocations: one for the list object and
+    // one for its sentinel. The client creates tens of thousands of empty ground-
+    // item lists, so the allocator metadata/fragmentation from that second tiny
+    // allocation is significant on a 32 MiB PS2. Keep the exact same public layout
+    // and semantics, but place the sentinel immediately after LinkList in one block.
+    LinkList *list = calloc(1, sizeof(LinkList) + sizeof(Linkable));
+    if (!list) {
+        return NULL;
+    }
+    list->sentinel = (Linkable *)(list + 1);
     list->sentinel->next = list->sentinel;
     list->sentinel->prev = list->sentinel;
     return list;
 }
 
 void linklist_free(LinkList *list) {
-    free(list->sentinel);
+    // sentinel is part of the same allocation as list (see linklist_new()).
     free(list);
 }
 
