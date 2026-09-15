@@ -5,6 +5,9 @@
 
 Ground *ground_new(int level, int x, int z) {
     Ground *ground = calloc(1, sizeof(Ground));
+    if (!ground) {
+        return NULL;
+    }
     ground->link = (Linkable){0};
     ground->occludeLevel = ground->level = level;
     ground->x = x;
@@ -13,12 +16,13 @@ Ground *ground_new(int level, int x, int z) {
 }
 
 void ground_free(Ground *ground) {
-    if (ground->link.next) {
-        free(ground->link.next);
+    if (!ground) {
+        return;
     }
-    if (ground->link.prev) {
-        free(ground->link.prev);
-    }
+
+    // link.next/link.prev are intrusive-list links to other objects; they are not allocations owned
+    // by this Ground. Freeing them here can double-free/corrupt neighbouring queue nodes during a
+    // scene reset. The owning list is responsible for unlinking; Ground owns only its attachments.
     free(ground->underlay);
     if (ground->overlay) {
         tileoverlay_free(ground->overlay);
@@ -31,7 +35,7 @@ void ground_free(Ground *ground) {
         ground->locs[loc] = NULL;
     }
 
-    if (ground && ground->bridge) {
+    if (ground->bridge) {
         ground_free(ground->bridge);
     }
     free(ground);
