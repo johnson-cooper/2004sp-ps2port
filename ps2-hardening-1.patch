@@ -1,0 +1,131 @@
+diff --git a/src/clientstream.c b/src/clientstream.c
+--- a/src/clientstream.c
++++ b/src/clientstream.c
+@@
+ int clientstream_available(ClientStream *stream, int len) {
+     if (stream->bufLen >= len) {
+         return 1;
+     }
+ 
+ #ifdef __PS2__
++    // The receive buffer is a linear 5 KB window.  Once callers have consumed a prefix,
++    // bufPos can be non-zero while unread bytes remain.  The old opportunistic-drain code
++    // could then request more bytes than actually fit at the physical tail, overwriting the
++    // fields after buf[].  Compact first when the requested packet cannot fit in the tail and
++    // never ask lwIP to receive more than the real remaining capacity.
++    if (len < 0 || len > (int)sizeof(stream->buf)) {
++        rs2_error("PS2NET invalid buffered length=%d capacity=%u\n", len, (unsigned)sizeof(stream->buf));
++        stream->closed = true;
++        return 0;
++    }
++
++    int needed = len - stream->bufLen;
++    int tail = (int)sizeof(stream->buf) - stream->bufPos - stream->bufLen;
++    if (tail < needed && stream->bufPos > 0) {
++        memmove(stream->buf, stream->buf + stream->bufPos, stream->bufLen);
++        stream->bufPos = 0;
++        tail = (int)sizeof(stream->buf) - stream->bufLen;
++    }
++
++    if (tail <= 0) {
++        return 0;
++    }
++
+@@
+-    int want = (int)sizeof(stream->buf) - stream->bufPos - stream->bufLen;
+-    if (want < len - stream->bufLen) {
+-        want = len - stream->bufLen;
+-    }
++    int want = tail;
+     errno = 0;
+     int64_t recv_t0 = rs2_now();
+     int bytes = recv(stream->socket, (char *)stream->buf + stream->bufPos + stream->bufLen, want, MSG_DONTWAIT);
+diff --git a/src/world3d.c b/src/world3d.c
+--- a/src/world3d.c
++++ b/src/world3d.c
+@@
+ bool world3d_add_loc2(World3D *world3d, int x, int z, int y, int level, int tileX, int tileZ, int tileSizeX, int tileSizeZ, Model *model, Entity *entity, int bitset, int8_t info, int yaw, bool temporary) {
+     if (!model && !entity) {
+         return false;
+     }
++    if (level < 0 || level >= world3d->maxLevel || tileSizeX <= 0 || tileSizeZ <= 0) {
++        return false;
++    }
++    if (temporary && world3d->temporaryLocCount >= (int)(sizeof(world3d->temporaryLocs) / sizeof(world3d->temporaryLocs[0]))) {
++#ifdef __PS2__
++        rs2_error("world3d_add_loc2: temporary location capacity exhausted (%d)\n", world3d->temporaryLocCount);
++#endif
++        return false;
++    }
+     for (int tx = tileX; tx < tileX + tileSizeX; tx++) {
+@@
+-                            if (matrix[pitchLevel][(yawLevel + 1) % 31][x + dx + 25 + 1][z + dz + 25 + 1]) {
++                            if (matrix[pitchLevel][(yawLevel + 1) % 32][x + dx + 25 + 1][z + dz + 25 + 1]) {
+@@
+-                            if (matrix[pitchLevel + 1][(yawLevel + 1) % 31][x + dx + 25 + 1][z + dz + 25 + 1]) {
++                            if (matrix[pitchLevel + 1][(yawLevel + 1) % 32][x + dx + 25 + 1][z + dz + 25 + 1]) {
+diff --git a/src/model.c b/src/model.c
+--- a/src/model.c
++++ b/src/model.c
+@@
+-            if (m->pick_aabb) {
+-                _Model.picked_bitsets[_Model.picked_count++] = key;
++            if (m->pick_aabb) {
++                if (_Model.picked_count < 1000) {
++                    _Model.picked_bitsets[_Model.picked_count++] = key;
++                }
+             } else {
+                 hasInput = true;
+             }
+@@
+-                if (depth_average < MODEL_MAX_DEPTH) {
+-                    _Model.tmp_depth_faces[depth_average][_Model.tmp_depth_face_count[depth_average]++] = f;
++                if (depth_average >= 0 && depth_average < MODEL_MAX_DEPTH &&
++                    _Model.tmp_depth_face_count[depth_average] < MODEL_DEPTH_FACE_COUNT) {
++                    _Model.tmp_depth_faces[depth_average][_Model.tmp_depth_face_count[depth_average]++] = f;
+                 }
+             } else {
+                 if (hasInput && model_point_within_triangle(_Model.mouse_x, _Model.mouse_y, _Model.vertex_screen_y[a], _Model.vertex_screen_y[b], _Model.vertex_screen_y[c], xa, xb, xc)) {
+-                    _Model.picked_bitsets[_Model.picked_count++] = bitset;
++                    if (_Model.picked_count < 1000) {
++                        _Model.picked_bitsets[_Model.picked_count++] = bitset;
++                    }
+                     hasInput = false;
+                 }
+@@
+-                    if (depth_average < MODEL_MAX_DEPTH) {
+-                        _Model.tmp_depth_faces[depth_average][_Model.tmp_depth_face_count[depth_average]++] = f;
++                    if (depth_average >= 0 && depth_average < MODEL_MAX_DEPTH &&
++                        _Model.tmp_depth_face_count[depth_average] < MODEL_DEPTH_FACE_COUNT) {
++                        _Model.tmp_depth_faces[depth_average][_Model.tmp_depth_face_count[depth_average]++] = f;
+                     }
+@@
+                 int priority_depth = faces[i];
+                 int depth_average = m->face_priorities[priority_depth];
+-                int priority_face_count = _Model.tmp_priority_face_count[depth_average]++;
++                if (depth_average < 0 || depth_average >= 12) {
++                    continue;
++                }
++                int priority_face_count = _Model.tmp_priority_face_count[depth_average];
++                if (priority_face_count >= 2000) {
++                    continue;
++                }
++                _Model.tmp_priority_face_count[depth_average] = priority_face_count + 1;
+                 _Model.tmp_priority_faces[depth_average][priority_face_count] = priority_depth;
+diff --git a/src/world.c b/src/world.c
+--- a/src/world.c
++++ b/src/world.c
+@@
+ int noise(int x, int y) {
+-    int n = x + y * 57;
+-    int n1 = n << 13 ^ n;
+-    int n2 = n1 * (n1 * n1 * 15731 + 789221) + 1376312589 & INT_MAX;
+-    return n2 >> 19 & 0xff;
++    // The original Java client relies on defined 32-bit two's-complement wrapping here.
++    // Signed overflow is undefined in C and can change under optimization, so express the
++    // exact intended wrap with uint32_t arithmetic before applying the original INT_MAX mask.
++    uint32_t n = (uint32_t)x + (uint32_t)y * 57u;
++    uint32_t n1 = (n << 13) ^ n;
++    uint32_t n2 = n1 * (n1 * n1 * 15731u + 789221u) + 1376312589u;
++    return (int)((n2 & 0x7fffffffu) >> 19) & 0xff;
+ }
