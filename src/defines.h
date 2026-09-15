@@ -137,7 +137,7 @@
 #define K_BACKSPACE 8
 #define K_TAB 9
 
-#define K_ENTER 10
+#define K_ENTER 13
 
 #define K_CONTROL 17
 
