@@ -71,12 +71,14 @@
 #define MODEL_DEPTH_FACE_COUNT 80
 #define PIX3D_POOL_COUNT 1
 #define DISABLE_FLAMES
-// This radius is centred on the camera, not the player.  Six tiles excludes the local
-// The normal World3D traversal is camera-centred.  Keep it tiny; the local player is submitted
-// separately below so the third-person camera offset cannot force a much larger tile window.
+// The normal World3D traversal is camera-centred. Keep it tiny while terrain is being restored;
+// the local player is submitted separately once its renderer is re-enabled.
 #define PS2_RENDER_RADIUS 6
-#define PS2_TERRAIN_MIN_TILE 24
-#define PS2_TERRAIN_MAX_TILE 72
+// Keep initial terrain residency aligned with the existing PS2 32x32 active-area streamer. This
+// bounds Ground/overlay allocation and landscape construction in dense regions such as Lumbridge;
+// height/collision data still retain the complete decoded 104x104 scene.
+#define PS2_TERRAIN_MIN_TILE 32
+#define PS2_TERRAIN_MAX_TILE 64
 // Restore the software 3D target to the engine's native 512x334 projection for this hardware test.
 // The rasterizer still projects with a fixed 512 focal scale (`<< 9`); using a 192x125 target with
 // that unchanged projection narrows/clips the scene dramatically and can leave the viewport black.
