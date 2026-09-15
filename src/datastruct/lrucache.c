@@ -10,7 +10,21 @@ LruCache *lrucache_new(int size) {
     LruCache *cache = calloc(1, sizeof(LruCache));
     cache->capacity = size;
     cache->available = size;
+#ifdef __PS2__
+    // Desktop historically gives every LRU a 1024-bucket table. On a 32 MiB PS2 that is very
+    // expensive because hashtable_new() allocates one sentinel Linkable per bucket as a separate
+    // heap allocation. Most client caches are far smaller than 1024 entries (the PS2 player model
+    // cache is only 12), so scale the bucket table to the cache while keeping a power-of-two size
+    // required by hashtable_get()/put()'s key & (bucket_count - 1) indexing.
+    int buckets = 16;
+    int target = size > 0 ? size * 2 : 16;
+    while (buckets < target && buckets < 256) {
+        buckets <<= 1;
+    }
+    cache->hashtable = hashtable_new(buckets);
+#else
     cache->hashtable = hashtable_new(1024);
+#endif
     cache->history = doublylinklist_new();
     return cache;
 }
