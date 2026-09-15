@@ -65,62 +65,44 @@
 #endif
 
 #if defined(__PS2__)
-// Textured terrain is live again. Restore the original PS2 five-slot low-memory texel cache so
-// different floor textures do not continuously evict and regenerate the single active slot.
+// Gameplay-first 32 MiB profile. Prefer bounded geometry and entities over cosmetic fidelity.
 #define MODEL_MAX_DEPTH 600
 #define MODEL_DEPTH_FACE_COUNT 80
-#define PIX3D_POOL_COUNT 5
+// Terrain textures are disabled below, so a single texel slot is enough for the remaining UI/model
+// users and avoids the extra permanent pool that made the dense Lumbridge rebuild regress.
+#define PIX3D_POOL_COUNT 1
 #define DISABLE_FLAMES
-// The normal World3D traversal is camera-centred. Keep it tiny while terrain is being restored;
-// the local player is submitted separately once its renderer is re-enabled.
-#define PS2_RENDER_RADIUS 6
-// Keep initial terrain residency aligned with the existing PS2 32x32 active-area streamer. This
-// bounds Ground/overlay allocation and landscape construction in dense regions such as Lumbridge;
-// height/collision data still retain the complete decoded 104x104 scene.
+// Camera-centred software traversal. Five tiles is an 11x11 live draw window; full height/collision
+// state remains available outside it for gameplay and pathing.
+#define PS2_RENDER_RADIUS 5
+// Materialise only a 32x32 terrain window around the scene centre. The complete 104x104 decoded
+// height/collision arrays remain resident; Ground/underlay/overlay objects are the bounded part.
 #define PS2_TERRAIN_MIN_TILE 32
 #define PS2_TERRAIN_MAX_TILE 64
-// Restore the software 3D target to the engine's native 512x334 projection for this hardware test.
-// The rasterizer still projects with a fixed 512 focal scale (`<< 9`); using a 192x125 target with
-// that unchanged projection narrows/clips the scene dramatically and can leave the viewport black.
+// Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
+// smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
 #define PS2_3D_RENDER_HEIGHT 334
-// Keep simulation/network ticks at 50 Hz and cap expensive software rendering
-// and the full-screen GIF upload at 25 Hz.
-// Keep GS pressure low while the texture-upload presenter is being isolated.
-// Simulation/networking still run at the native update rate.
+// Simulation/networking stay at 50 Hz; expensive software draw/present is intentionally decimated.
 #define PS2_RENDER_DIVISOR 4
-// Start the 32 MiB build with terrain and dynamic entities only. Static map
-// locations are deferred until a proper incremental scene-loader is added.
-// This prevents their synchronous bzip/model build from blocking the boot.
+// Static locations remain off while the gameplay-first loc streamer/filter is implemented. When
+// restored, examine-only decorative locs should not receive render/model residency on PS2.
 #define PS2_DEFER_STATIC_LOCATIONS 1
-// In that terrain-and-entities-only profile, the 512x512 minimap and all of
-// its location icons provide no useful information but consume over 1 MiB.
+// The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
-// Drop the cached stone frame panels after the title screen.  The live scene,
-// chat and sidebar targets remain; only decorative chrome is removed.
 #define PS2_SIMPLE_UI 1
-// Restore the original textured terrain path for this isolated hardware test. This matches the
-// pre-optimization renderer while static locations, the local player and heavier UI remain disabled.
-#define PS2_UNTEXTURED_TERRAIN 0
-// Render the map's existing height/lighting/ground colours, but keep textures and static
-// locations disabled. This is the first isolated real-hardware terrain restoration step.
+// No terrain texture sampling/cache churn: preserve map heights, overlays and lighting using colour.
+#define PS2_UNTEXTURED_TERRAIN 1
 #define PS2_FLAT_TERRAIN 0
-// Restore the normal land-data load and terrain scene build. Static locations remain independently
-// deferred above, so this stage exercises heights, floor colours and ground geometry without the
-// known-heavy tree/building/location model path.
+// Real land decoding and bounded terrain construction are enabled.
 #define PS2_DEFER_SCENE_REBUILD 0
-// Allow REBUILD_NORMAL to reach the real land loader/scene path again. Local-player rendering,
-// static locations, terrain textures, minimap and heavier UI paths remain disabled separately.
 #define PS2_NULL_SCENE_REBUILD 0
-// The static-shell test proved that the PS2 compositor is sound.  Re-enable the normal UI layout,
-// but keep components that invoke software item/model rendering out of the hardware profile.
+// Keep the minimum gameplay UI; software 3D interface models remain blocked.
 #define PS2_NULL_UI 0
 #define PS2_SAFE_INTERFACE 1
-// Sidebar/tab composition still destabilises long real-hardware sessions.
-// Retain the chat-only baseline until its backing surfaces are made lazy.
 #define PS2_UI_PROFILE 1
-// The full local-avatar software path still destabilises retail EE hardware.
-// Keep it off until it has a dedicated low-detail/low-allocation renderer.
+// The normal pushPlayers() path still supplies dynamic players; this flag controls only the separate
+// direct local-avatar draw. Keep that duplicate path off until entity submission is fully culled.
 #define PS2_RENDER_LOCAL_PLAYER 0
 #elif defined(_arch_dreamcast) || defined(__NDS__)
 // NOTE: more extreme lowmem mode, making the game fully explorable on 32 MB
@@ -155,7 +137,7 @@
 #define K_BACKSPACE 8
 #define K_TAB 9
 
-#define K_ENTER 13
+#define K_ENTER 10
 
 #define K_CONTROL 17
 
