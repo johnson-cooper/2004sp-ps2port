@@ -102,15 +102,13 @@
 // Render the map's existing height/lighting/ground colours, but keep textures and static
 // locations disabled. This is the first isolated real-hardware terrain restoration step.
 #define PS2_FLAT_TERRAIN 0
-// A complete 104x104 rebuild is synchronous in the network packet handler.  Defer it in the
-// flat-terrain profile so login can reach the live packet/UI loop; terrain streaming is a later,
-// incremental job rather than a login-time stop-the-world operation.
-#define PS2_DEFER_SCENE_REBUILD 1
-// Diagnostic stage two: REBUILD_NORMAL must return promptly so the live packet loop can be
-// observed.  It still records the new base and ACKs the server, but deliberately skips the
-// legacy 104x104 stack relocation plus NPC/player relocation.  A real streamer replaces these
-// stop-the-world operations with bounded chunk updates.
-#define PS2_NULL_SCENE_REBUILD 1
+// Restore the normal land-data load and terrain scene build. Static locations remain independently
+// deferred above, so this stage exercises heights, floor colours and ground geometry without the
+// known-heavy tree/building/location model path.
+#define PS2_DEFER_SCENE_REBUILD 0
+// Allow REBUILD_NORMAL to reach the real land loader/scene path again. Local-player rendering,
+// static locations, terrain textures, minimap and heavier UI paths remain disabled separately.
+#define PS2_NULL_SCENE_REBUILD 0
 // The static-shell test proved that the PS2 compositor is sound.  Re-enable the normal UI layout,
 // but keep components that invoke software item/model rendering out of the hardware profile.
 #define PS2_NULL_UI 0
