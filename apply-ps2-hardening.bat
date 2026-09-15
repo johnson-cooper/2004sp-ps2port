@@ -12,37 +12,26 @@ if not exist "ps2.yaml" (
   exit /b 1
 )
 
-where git >nul 2>nul
-if errorlevel 1 (
-  echo ERROR: git.exe is required to apply the source patch.
+if not exist "apply-ps2-hardening.ps1" (
+  echo ERROR: apply-ps2-hardening.ps1 is missing.
   exit /b 1
 )
 
-git apply --reverse --check ps2-hardening-1.patch >nul 2>nul
-if not errorlevel 1 (
-  echo Hardening patch is already applied locally.
-  goto :buildinfo
-)
-
-echo Checking patch against the current checkout...
-git apply --check ps2-hardening-1.patch
+echo Applying exact, fail-safe hardening edits...
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0apply-ps2-hardening.ps1"
 if errorlevel 1 (
   echo.
-  echo ERROR: Patch does not apply cleanly. Do not force it.
-  echo Make sure you checked out ps2-audit-hardening-1 and your source
-  echo files do not contain unrelated local edits.
+  echo ERROR: Hardening edits were not applied completely.
+  echo No fuzzy patching was attempted. Read the error above.
   exit /b 1
 )
 
-echo Applying hardening patch locally...
-git apply ps2-hardening-1.patch
-if errorlevel 1 exit /b 1
-
-:buildinfo
 echo.
-echo Patch status:
-git diff --check
-if errorlevel 1 exit /b 1
+where git >nul 2>nul
+if not errorlevel 1 (
+  git diff --check
+  if errorlevel 1 exit /b 1
+)
 
 echo.
 echo Source hardening is ready for your LOCAL PS2Build build.
@@ -57,8 +46,7 @@ if errorlevel 1 (
   exit /b 0
 )
 
-echo Installed PS2Build detected. Its local help follows so the command
-echo comes from your installed version instead of being guessed here:
+echo Installed PS2Build detected. Its local help follows:
 echo ------------------------------------------------------------
 ps2build --help
 
