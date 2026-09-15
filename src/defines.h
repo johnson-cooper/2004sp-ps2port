@@ -99,9 +99,9 @@
 // Terrain textures are replaced by the map's existing vertex-lit floor colours.
 // This preserves height, light and biome tint while avoiding textured terrain work.
 #define PS2_UNTEXTURED_TERRAIN 1
-// Retain entity and item rendering but omit per-tile terrain rasterisation.  The viewport is
-// cleared to a grass-like flat colour each frame in this profile.
-#define PS2_FLAT_TERRAIN 1
+// Render the map's existing height/lighting/ground colours, but keep textures and static
+// locations disabled. This is the first isolated real-hardware terrain restoration step.
+#define PS2_FLAT_TERRAIN 0
 // A complete 104x104 rebuild is synchronous in the network packet handler.  Defer it in the
 // flat-terrain profile so login can reach the live packet/UI loop; terrain streaming is a later,
 // incremental job rather than a login-time stop-the-world operation.
