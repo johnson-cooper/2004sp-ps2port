@@ -38,7 +38,8 @@ static inline bool ps2_dynamic_scene_admit(Client *c, int sceneX, int sceneZ, in
     int localZ = c->local_player->pathing_entity.z >> 7;
     int dx = tileX - localX;
     int dz = tileZ - localZ;
-    if (dx < -6 || dx > 6 || dz < -6 || dz > 6) {
+    // Match PS2_RENDER_RADIUS: do not allocate an entity in a ring World3D will not traverse.
+    if (dx < -PS2_RENDER_RADIUS || dx > PS2_RENDER_RADIUS || dz < -PS2_RENDER_RADIUS || dz > PS2_RENDER_RADIUS) {
         return false;
     }
 
