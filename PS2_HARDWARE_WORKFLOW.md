@@ -6,8 +6,10 @@ This file is the standing workflow for the PlayStation 2 port. Read it before ma
 
 - Active development branch: `ps2-hardware-integration`
 - Branch starting point: `main` commit `673657249ef18526e6c33a3d4381953c132c2782`
-- Last real-hardware-known-good integration commit: `959aa7fbdad935574c5f64c63e992321169c8589` (confirmed working on real PS2 on 2026-09-15)
-- Immediate target: harden the proven stripped-world baseline, then restore missing game systems one small hardware-testable step at a time.
+- Last fully real-hardware-known-good integration commit: `959aa7fbdad935574c5f64c63e992321169c8589` (confirmed working on real PS2 on 2026-09-15; stripped-world baseline).
+- Terrain milestone: `fb83106daa4de4149bda6f6c36637000f378597a` completed the Lumbridge terrain build and reached the live world, but froze immediately after the first live frame. It is evidence that bounded terrain works, **not** a known-good gameplay checkpoint.
+- The subsequent five-slot textured-terrain cache experiment regressed to a world-loading crash and was rejected.
+- Current policy: gameplay-first 32 MiB profile — untextured colored terrain, bounded/lazy Ground residency, tight scene radius, capped nearby dynamic entities, minimum UI, minimap off, static locs deferred until filtered streaming is ready.
 - After each accepted hardware test, update the known-good commit here before starting the next restoration experiment.
 
 ## Source of truth
@@ -16,7 +18,7 @@ This file is the standing workflow for the PlayStation 2 port. Read it before ma
 - `main` is the stable/reference branch. Do **not** commit, merge, force-push, or otherwise modify `main` without Cooper's explicit approval.
 - PS2 hardware development happens on `ps2-hardware-integration` unless Cooper explicitly selects another branch.
 - ChatGPT should commit actual source changes directly to the GitHub development branch. Do not use `.patch` files or local patch-application scripts as the normal development workflow.
-- Keep commits small and attributable: ideally one hardware experiment, restoration step, or optimization per commit.
+- Keep commits small and attributable. When several changes are intentionally grouped into a memory/performance baseline, document exactly what is being tested.
 
 ## Local checkout
 
@@ -25,13 +27,13 @@ Cooper's local repository is primarily the build and real-hardware test workspac
 Normal loop:
 
 1. ChatGPT inspects the current GitHub development branch.
-2. ChatGPT makes a controlled source change and commits/pushes it to that branch.
-3. Cooper pulls that exact commit with GitHub Desktop.
+2. ChatGPT makes controlled source changes and commits/pushes them to that branch.
+3. Cooper pulls the exact requested commit with GitHub Desktop.
 4. The local working tree should normally be clean before the build.
 5. Cooper builds locally using the PS2Build environment and `ps2.yaml`.
 6. Cooper tests the resulting `build/bin/client.elf` on a real PS2.
 7. Cooper reports the result, including logs/screenshots/checkpoints/performance when available.
-8. A successful commit becomes the new hardware-known-good point. A failed commit is fixed or reverted before unrelated changes are introduced.
+8. A successful commit becomes the new hardware-known-good point. A failed commit is fixed/reverted before unrelated restoration work is stacked on it.
 
 Do not use GitHub Actions or an emulator result as a substitute for the real-hardware acceptance test.
 
@@ -54,49 +56,58 @@ Do not use GitHub Actions or an emulator result as a substitute for the real-har
 Unless a specific experiment requires otherwise:
 
 - Build locally from `ps2.yaml`.
-- Keep the EE optimization baseline at `-O1` until the correctness/UB audit and hardware restoration are sufficiently stable.
+- Keep the EE optimization baseline at `-O1` until correctness/UB and hardware restoration are sufficiently stable.
 - Preserve the established DEV9/NETMAN/SMAP and USB/BDM embedded-IRX configuration/order unless new real-hardware evidence justifies changing it.
 - Do not introduce `-O3`, LTO, `-ffast-math`, aggressive aliasing assumptions, or similar compiler experiments together with feature-restoration work. Compiler tuning gets its own isolated hardware test.
 
+## Gameplay-first memory policy
+
+The retail PS2 has 32 MiB total EE RAM. Gameplay state wins over cosmetic fidelity.
+
+- Keep terrain heights, collision and floor colours. Terrain textures are optional and currently disabled.
+- Keep terrain/scene residency bounded instead of eagerly materialising the full 104x104 map as `Ground` objects.
+- Cull dynamic render entities by distance before World3D insertion and enforce per-frame population caps. Network/update state may continue outside the render radius.
+- Prefer the local player and nearby interactable NPCs/players over distant entities and effects.
+- Keep the minimap disabled until its >1 MiB backing/cached assets can be made substantially cheaper or lazy.
+- Static loc loading must be streamed/bounded. Purely decorative locs whose only user-facing interaction is Examine should not consume PS2 model/render residency.
+- When filtering an Examine-only loc, preserve gameplay-relevant collision/pathing state separately when needed; do not make a blocking wall/object walk-through merely because its visual model was culled.
+- Essential/actionable locs (doors, stairs, ladders, trees/resources, banks, ranges, altars, gates, quest/interact objects, etc.) have priority over decorative scenery.
+- Effects, projectiles, ground decoration, overhead elements and cosmetic UI are lower priority and receive strict caps.
+- Avoid thousands of tiny heap allocations. Prefer bounded pools/arenas or contiguous metadata where lifetime permits.
+- Allocation failure must never become silent memory corruption. Add capacity checks and fail/skip optional rendering work safely.
+
 ## Restoration strategy
 
-Restore missing game systems gradually. Never re-enable a large collection of systems in one untestable change.
+Restore missing game systems gradually, but optimize each system for the gameplay-first profile rather than blindly restoring the desktop implementation.
 
-Current intended progression is approximately:
+Current intended progression:
 
-1. Harden and stabilize the current stripped-down world/scene path.
-2. Basic ground/terrain rendering.
-3. Terrain height variation / hills.
-4. Essential UI and viewport layers.
-5. Local player model and animation.
-6. Simple static locs and trees.
-7. Walls, buildings, and larger/multi-tile locs.
-8. NPCs, initially with controlled population limits.
-9. Other players/entities with controlled population limits.
-10. Ground items, projectiles, overhead elements, effects, and secondary scene systems.
-11. Increase draw distance, entity limits, model/texture quality, and presentation rate toward the best hardware balance.
+1. Stabilize untextured colored terrain + hills with bounded/lazy Ground residency.
+2. Restore the local player model with a strict low-memory model/cache path.
+3. Stabilize nearby player/NPC entity culling and population caps.
+4. Restore essential gameplay UI only.
+5. Restore actionable static locs through bounded streaming/filtering.
+6. Restore essential structural walls/buildings only where needed for understanding/navigation/gameplay.
+7. Restore resource trees/rocks/fishing/etc. and interactive scenery.
+8. Add ground items, projectiles and overhead elements under strict caps.
+9. Increase draw distance/entity limits/presentation rate only when measured headroom exists.
+10. Cosmetic scenery/textures/minimap are last and may remain disabled if they compromise stability.
 
-This order is a guide, not a reason to ignore dependencies discovered during testing. Break each category into smaller hardware-testable commits whenever possible.
+### Loc restoration rule
 
-Example for loc restoration:
+Do **not** re-enable the entire desktop static-loc scene in one step.
 
 ```text
-known-good
-  -> enable one simple loc model
+known-good terrain
+  -> load one bounded loc mapsquare/window
+  -> decode loc metadata without building every model
+  -> preserve collision/pathing
+  -> admit actionable locs
+  -> discard Examine-only decorative renderables
+  -> cap model/cache residency
   -> real PS2 test
-  -> enable static trees
+  -> add structural shell if memory allows
   -> real PS2 test
-  -> enable walls
-  -> real PS2 test
-  -> enable building models
-  -> real PS2 test
-  -> enable multi-tile locs
-  -> real PS2 test
-  -> restore/increase normal loc population
-  -> real PS2 test
-  -> optimize loc/model path
-  -> real PS2 test
-  -> new known-good
 ```
 
 ## Performance and memory rule
@@ -108,19 +119,7 @@ Every restored subsystem should answer four questions:
 3. What does it cost in EE/scene/model/cache memory?
 4. What does it cost in update/render/GS time?
 
-Prefer measurement over visual guesses. Maintain or add lightweight PS2 diagnostics for useful quantities such as:
-
-- free EE heap;
-- scene arena usage/high-water mark;
-- model/cache memory;
-- temporary loc count;
-- visible tiles/locs/models/entities;
-- update time;
-- scene/model time;
-- raster/draw time;
-- GS upload/present time;
-- update FPS and presented/render FPS;
-- network time.
+Prefer measurement over visual guesses. Maintain or add lightweight PS2 diagnostics for useful quantities such as free EE heap, scene arena usage/high-water mark, model/cache memory, temporary loc count, resident Ground count, visible tiles/locs/models/entities, culled entity counts, update time, scene/model time, raster/draw time, GS upload/present time, update FPS/presented FPS and network time.
 
 Do not keep expensive debug instrumentation permanently if it materially harms the hardware profile. Use focused diagnostics, gather evidence, then reduce/remove them when the issue is understood.
 
@@ -128,22 +127,21 @@ Do not keep expensive debug instrumentation permanently if it materially harms t
 
 A good PS2 test commit should have one clear question, for example:
 
-- `PS2: bound renderer depth buckets`
+- `PS2: make Ground residency lazy`
+- `PS2: cull dynamic entities before scene insertion`
 - `PS2: restore basic terrain height rendering`
 - `PS2: enable local player model`
-- `PS2: restore static tree locs`
+- `PS2: stream actionable locs only`
 - `PS2: reduce loc model cache pressure`
-
-Do not combine unrelated networking, rendering, memory, UI, and compiler changes in the same test commit unless they are inseparable.
 
 For every commit sent for hardware testing, record or communicate the exact commit SHA. Test that exact revision before proceeding.
 
 ## Known-good checkpoints and rollback
 
 - Keep track of the most recent real-hardware-known-good commit.
-- If a new commit causes a hang, corruption, major regression, or severe performance loss, stop stacking unrelated changes on it.
+- If a new commit causes a hang, corruption, major regression, or severe performance loss, stop stacking unrelated restoration changes on it.
 - Diagnose/fix the failing commit or return to the previous known-good point.
-- Do not mask a regression by simultaneously disabling another unrelated system.
+- Do not mask a regression by simultaneously disabling another unrelated system unless the explicit goal is to establish a new low-memory baseline and every bundled change is documented.
 
 ## Merge to main
 
