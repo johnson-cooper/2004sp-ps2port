@@ -13,6 +13,21 @@ NpcTypeData _NpcType = {0};
 
 static void npctype_decode(NpcType *npc, Packet *dat);
 
+static void npctype_free(NpcType *npc) {
+    if (!npc) return;
+    free(npc->name);
+    free(npc->desc);
+    free(npc->models);
+    free(npc->heads);
+    free(npc->recol_s);
+    free(npc->recol_d);
+    if (npc->op) {
+        for (int i = 0; i < 5; i++) free(npc->op[i]);
+        free(npc->op);
+    }
+    free(npc);
+}
+
 static NpcType *npctype_new(void) {
     NpcType *npc = calloc(1, sizeof(NpcType));
     npc->index = -1L;
@@ -51,10 +66,8 @@ void npctype_unpack(Jagfile *config) {
         offset += g2(idx);
     }
 
-    _NpcType.cache = calloc(20, sizeof(NpcType *));
-    for (int id = 0; id < 20; id++) {
-        _NpcType.cache[id] = npctype_new();
-    }
+    _NpcType.instances = calloc(_NpcType.count, sizeof(NpcType *));
+    _NpcType.invalid = npctype_new();
     _NpcType.modelCache = lrucache_new(30);
 
     packet_free(idx);
@@ -63,31 +76,29 @@ void npctype_unpack(Jagfile *config) {
 void npctype_free_global(void) {
     lrucache_free(_NpcType.modelCache);
     free(_NpcType.offsets);
-    for (int i = 0; i < 20; i++) {
-        free(_NpcType.cache[i]);
+    for (int i = 0; i < _NpcType.count; i++) {
+        npctype_free(_NpcType.instances[i]);
     }
-    free(_NpcType.cache);
+    free(_NpcType.instances);
+    npctype_free(_NpcType.invalid);
     packet_free(_NpcType.dat);
 }
 
 NpcType *npctype_get(int id) {
-    for (int i = 0; i < 20; i++) {
-        if (_NpcType.cache[i]->index == (int64_t)id) {
-            return _NpcType.cache[i];
-        }
-    }
-
-    _NpcType.cachePos = (_NpcType.cachePos + 1) % 20;
-    NpcType *npc = _NpcType.cache[_NpcType.cachePos] = npctype_new();
-    npc->index = id;
     if (id < 0 || id >= _NpcType.count) {
         // rev254 servers can reference npc type ids beyond what's in Client3's loaded npc.idx
         // (offsets[] only has _NpcType.count entries) - indexing it out of bounds here set
         // _NpcType.dat->pos to garbage, and decoding from that garbage offset segfaulted during
         // NPC_INFO processing. Fall back to npctype_new()'s built-in defaults instead.
         rs2_error("npctype_get: npc type id %d out of range (max %d), using defaults\n", id, _NpcType.count - 1);
-        return npc;
+        return _NpcType.invalid;
     }
+    if (_NpcType.instances[id]) {
+        return _NpcType.instances[id];
+    }
+    NpcType *npc = npctype_new();
+    npc->index = id;
+    _NpcType.instances[id] = npc;
     _NpcType.dat->pos = _NpcType.offsets[id];
     npctype_decode(npc, _NpcType.dat);
     return npc;
@@ -262,6 +273,9 @@ Model *npctype_get_headmodel(NpcType *npc) {
         model = models[0];
     } else {
         model = model_from_models(models, npc->heads_count, false);
+        for (int i = 0; i < npc->heads_count; i++) {
+            model_free(models[i]);
+        }
     }
     free(models);
 

@@ -1,6 +1,7 @@
 #include "playerentity.h"
 #include "datastruct/jstring.h"
 #include "datastruct/lrucache.h"
+#include "datastruct/linkable.h"
 #include "defines.h"
 #include "idktype.h"
 #include "model.h"
@@ -42,12 +43,54 @@ PlayerEntity *playerentity_new(void) {
 }
 
 void playerentity_init_global(void) {
+#ifdef __PS2__
+    // A 200-entry appearance cache is desktop-sized.  Each entry is a fully assembled and lit
+    // character mesh, so retain only the local player plus the nearest few appearances.
+    _PlayerEntity.modelCache = lrucache_new(12);
+#else
     _PlayerEntity.modelCache = lrucache_new(200);
+#endif
 }
 
 void playerentity_free_global(void) {
+    playerentity_clear_model_cache();
     lrucache_free(_PlayerEntity.modelCache);
 }
+
+void playerentity_clear_model_cache(void) {
+#ifdef __PS2__
+    // LruCache itself is ownership-neutral: eviction only unlinks a node.  That is correct for
+    // the scene arena caches, but appearance meshes below deliberately live on the heap so they
+    // must be reclaimed here (and before a replacement is inserted).
+    DoublyLinkable *node;
+    while ((node = doublylinklist_pop(_PlayerEntity.modelCache->history)) != NULL) {
+        linkable_unlink(&node->link);
+        Model *model = (Model *)node;
+        model_free_label_references(model);
+        model_free(model);
+    }
+    _PlayerEntity.modelCache->available = _PlayerEntity.modelCache->capacity;
+#else
+    lrucache_clear(_PlayerEntity.modelCache);
+#endif
+}
+
+#ifdef __PS2__
+static void playerentity_cache_model(int64_t hashCode, Model *model) {
+    LruCache *cache = _PlayerEntity.modelCache;
+    if (cache->available == 0) {
+        DoublyLinkable *node = doublylinklist_pop(cache->history);
+        if (node) {
+            linkable_unlink(&node->link);
+            Model *old = (Model *)node;
+            model_free_label_references(old);
+            model_free(old);
+            cache->available++;
+        }
+    }
+    lrucache_put(cache, hashCode, &model->link);
+}
+#endif
 
 void playerentity_read(PlayerEntity *entity, Packet *buf) {
     buf->pos = 0;
@@ -147,6 +190,11 @@ Model *playerentity_draw(PlayerEntity *entity, int loopCycle) {
     }
 
     Model *model = playerentity_get_sequencedmodel(entity);
+    if (!model) {
+        // Model data may arrive after the appearance packet, or the heap can temporarily be under
+        // pressure.  Returning no mesh is safe; letting World3D dereference it is a hard freeze.
+        return NULL;
+    }
     entity->pathing_entity.height = model->max_y;
     model->pick_aabb = true;
 
@@ -223,6 +271,10 @@ Model *playerentity_draw(PlayerEntity *entity, int loopCycle) {
 }
 
 Model *playerentity_get_sequencedmodel(PlayerEntity *entity) {
+#ifdef __PS2__
+    entity->ps2_model_state = 1; // appearance received; model lookup/build entered
+    entity->ps2_model_parts = 0;
+#endif
     int64_t hashCode = entity->appearanceHashcode;
     int primaryTransformId = -1;
     int secondaryTransformId = -1;
@@ -251,6 +303,11 @@ Model *playerentity_get_sequencedmodel(PlayerEntity *entity) {
     }
 
     Model *model = (Model *)lrucache_get(_PlayerEntity.modelCache, hashCode);
+#ifdef __PS2__
+    if (model) {
+        entity->ps2_model_state = 2; // cache hit
+    }
+#endif
     if (!model) {
         Model *models[12] = {0};
         int modelCount = 0;
@@ -280,11 +337,28 @@ Model *playerentity_get_sequencedmodel(PlayerEntity *entity) {
             }
         }
 
+#ifdef __PS2__
+        entity->ps2_model_parts = modelCount;
+#endif
+
+        // Cached player appearances survive for many ticks.  They must not consume the scene bump
+        // arena, which is reset only on a map rebuild and otherwise makes nearby players exhaust it.
+#ifdef __PS2__
+        model = model_from_models(models, modelCount, false);
+#else
         model = model_from_models(models, modelCount, true);
+#endif
         for (int part = 0; part < 12; part++) {
             if (models[part]) {
                 model_free(models[part]);
             }
+        }
+
+        if (!model) {
+#ifdef __PS2__
+            entity->ps2_model_state = -1; // no assembled mesh available
+#endif
+            return NULL;
         }
 
         for (int part = 0; part < 5; part++) {
@@ -298,8 +372,14 @@ Model *playerentity_get_sequencedmodel(PlayerEntity *entity) {
         }
 
         model_create_label_references(model, true);
+#ifdef __PS2__
+        model_calculate_normals(model, 64, 850, -30, -50, -30, true, false);
+        playerentity_cache_model(hashCode, model);
+        entity->ps2_model_state = 3; // assembled and cached
+#else
         model_calculate_normals(model, 64, 850, -30, -50, -30, true, true);
         lrucache_put(_PlayerEntity.modelCache, hashCode, &model->link);
+#endif
     }
 
     if (entity->lowmem) {
@@ -343,6 +423,9 @@ Model *playerentity_get_headmodel(PlayerEntity *entity) {
     }
 
     Model *tmp = model_from_models(models, modelCount, false);
+    for (int i = 0; i < modelCount; i++) {
+        model_free(models[i]);
+    }
     for (int part = 0; part < 5; part++) {
         if (entity->colors[part] != 0) {
             model_recolor(tmp, DESIGN_BODY_COLOR[part][0], DESIGN_BODY_COLOR[part][entity->colors[part]]);

@@ -45,8 +45,10 @@ typedef struct {
     int count;
     int *offsets;
     Packet *dat;
-    NpcType **cache;
-    int cachePos;
+    // Live NPC entities retain direct type pointers, so definitions must remain
+    // valid for the session rather than cycling through a 20-entry cache.
+    NpcType **instances;
+    NpcType *invalid;
     LruCache *modelCache; // = new LruCache(30);
 } NpcTypeData;
 

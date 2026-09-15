@@ -686,6 +686,8 @@ Model *objtype_get_headmodel(ObjType *obj, int gender) {
         Model *model2 = model_from_id(head2, false);
         Model *models[] = {model, model2};
         model = model_from_models(models, 2, false);
+        model_free(models[0]);
+        model_free(model2);
     }
 
     if (obj->recol_s) {

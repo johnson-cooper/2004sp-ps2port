@@ -210,6 +210,7 @@ void gameshell_run(Client *c) {
         bool ps2_render_frame = (++ps2_render_counter % PS2_RENDER_DIVISOR) == 0;
         if (ps2_render_frame) {
             client_draw(c);
+            ps2_heap_after_draw_kb = mallinfo().fordblks / 1024;
             gameshell_update_touch(c); // update mouse after client_draw_scene to fix model picking
         }
 #else
@@ -222,6 +223,7 @@ void gameshell_run(Client *c) {
 #ifdef __PS2__
         if (ps2_render_frame) {
             platform_update_surface();
+            ps2_heap_after_present_kb = mallinfo().fordblks / 1024;
         }
 #else
         platform_update_surface();

@@ -72,14 +72,20 @@
 #define MODEL_DEPTH_FACE_COUNT 80
 #define PIX3D_POOL_COUNT 1
 #define DISABLE_FLAMES
+// This radius is centred on the camera, not the player.  Six tiles excludes the local
+// The normal World3D traversal is camera-centred.  Keep it tiny; the local player is submitted
+// separately below so the third-person camera offset cannot force a much larger tile window.
 #define PS2_RENDER_RADIUS 6
 #define PS2_TERRAIN_MIN_TILE 24
 #define PS2_TERRAIN_MAX_TILE 72
-#define PS2_3D_RENDER_WIDTH 256
-#define PS2_3D_RENDER_HEIGHT 167
+// The interface remains a readable 512x334 surface; only software 3D uses this target.
+#define PS2_3D_RENDER_WIDTH 192
+#define PS2_3D_RENDER_HEIGHT 125
 // Keep simulation/network ticks at 50 Hz and cap expensive software rendering
 // and the full-screen GIF upload at 25 Hz.
-#define PS2_RENDER_DIVISOR 2
+// Keep GS pressure low while the texture-upload presenter is being isolated.
+// Simulation/networking still run at the native update rate.
+#define PS2_RENDER_DIVISOR 4
 // Start the 32 MiB build with terrain and dynamic entities only. Static map
 // locations are deferred until a proper incremental scene-loader is added.
 // This prevents their synchronous bzip/model build from blocking the boot.
@@ -93,6 +99,28 @@
 // Terrain textures are replaced by the map's existing vertex-lit floor colours.
 // This preserves height, light and biome tint while avoiding textured terrain work.
 #define PS2_UNTEXTURED_TERRAIN 1
+// Retain entity and item rendering but omit per-tile terrain rasterisation.  The viewport is
+// cleared to a grass-like flat colour each frame in this profile.
+#define PS2_FLAT_TERRAIN 1
+// A complete 104x104 rebuild is synchronous in the network packet handler.  Defer it in the
+// flat-terrain profile so login can reach the live packet/UI loop; terrain streaming is a later,
+// incremental job rather than a login-time stop-the-world operation.
+#define PS2_DEFER_SCENE_REBUILD 1
+// Diagnostic stage two: REBUILD_NORMAL must return promptly so the live packet loop can be
+// observed.  It still records the new base and ACKs the server, but deliberately skips the
+// legacy 104x104 stack relocation plus NPC/player relocation.  A real streamer replaces these
+// stop-the-world operations with bounded chunk updates.
+#define PS2_NULL_SCENE_REBUILD 1
+// The static-shell test proved that the PS2 compositor is sound.  Re-enable the normal UI layout,
+// but keep components that invoke software item/model rendering out of the hardware profile.
+#define PS2_NULL_UI 0
+#define PS2_SAFE_INTERFACE 1
+// Sidebar/tab composition still destabilises long real-hardware sessions.
+// Retain the chat-only baseline until its backing surfaces are made lazy.
+#define PS2_UI_PROFILE 1
+// The full local-avatar software path still destabilises retail EE hardware.
+// Keep it off until it has a dedicated low-detail/low-allocation renderer.
+#define PS2_RENDER_LOCAL_PLAYER 0
 #elif defined(_arch_dreamcast) || defined(__NDS__)
 // NOTE: more extreme lowmem mode, making the game fully explorable on 32 MB
 // -2 MB RAM, may cause some models to be invisible

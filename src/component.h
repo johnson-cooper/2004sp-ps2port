@@ -142,6 +142,9 @@ typedef struct {
     Pix24 *activeGraphic;
     Model *model;
     Model *activeModel;
+    // Dynamic packet models are owned by this component; archive/cache models
+    // remain shared and must never be freed here.
+    bool modelOwned;
 #ifdef __PS2__
     // lazy decode: component_unpack() stores raw sprite/model ids here instead of eagerly calling
     // component_get_image()/component_get_model() for every interface component at login - most
@@ -198,3 +201,4 @@ void component_ensure_graphic(Component *com);
 void component_ensure_model(Component *com);
 void component_ensure_invslot_sprite(Component *com, int slot);
 #endif
+void component_set_dynamic_model(Component *com, Model *model);

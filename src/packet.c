@@ -45,6 +45,15 @@ void packet_init_global(void) {
 
 Packet *packet_new(int8_t *src, int length) {
     Packet *packet = calloc(1, sizeof(Packet));
+    if (!packet) {
+        // Every caller of packet_new() across the codebase unconditionally dereferences its return
+        // value with zero NULL check - this was the single unguarded allocation, protecting all of
+        // them at once. Not proven to be the live cause of any specific bug, but a real gap: fixed
+        // as defensive hardening the same way every other unchecked malloc/calloc found this session
+        // was fixed, regardless of whether it's currently reachable.
+        rs2_error("packet_new: calloc(%d) failed - out of memory\n", (int)sizeof(Packet));
+        return NULL;
+    }
     packet->link = (DoublyLinkable){(Linkable){0}, NULL, NULL};
     packet->data = src;
     packet->length = length;
@@ -105,7 +114,7 @@ void packet_release(Packet *packet) {
     // synchronized (cacheMid) {
     packet->pos = 0;
 
-    if (packet->length == 100 && _Packet.cacheMinCount < 1000) {
+    if (packet->length == 1000 && _Packet.cacheMinCount < 1000) {
         linklist_add_tail(_Packet.cacheMin, &packet->link.link);
         _Packet.cacheMinCount++;
     } else if (packet->length == 5000 && _Packet.cacheMidCount < 250) {
@@ -114,6 +123,10 @@ void packet_release(Packet *packet) {
     } else if (packet->length == 30000 && _Packet.cacheMaxCount < 50) {
         linklist_add_tail(_Packet.cacheMax, &packet->link.link);
         _Packet.cacheMaxCount++;
+    } else {
+        // A released packet must never become unreachable merely because its
+        // cache is full (or because it has a non-cache capacity).
+        packet_free(packet);
     }
     // }
 }
@@ -328,8 +341,24 @@ int gsmart(Packet *packet) {
 }
 
 int gsmarts(Packet *packet) {
+    // Real bounds-check gap: a caller checking only `packet->pos >= packet->length` before calling
+    // this (world_load_locations() does exactly that) only guarantees ONE more valid byte at `pos` -
+    // if that byte's peeked value is >= 128, the code below falls through to g2() (reads TWO bytes,
+    // pos and pos+1), which is one byte past the buffer whenever pos is exactly the last valid index.
+    // g1()/g2() do no bounds checking of their own, so this was a real, if narrow, out-of-bounds read
+    // for a truncated/corrupt stream that happens to end on a byte >= 128 - fixed here, once, instead
+    // of requiring every caller to duplicate the peek-ahead logic themselves.
+    if (packet->pos >= packet->length) {
+        return 0;
+    }
     int peek = packet->data[packet->pos] & 0xff;
-    return peek < 128 ? g1(packet) : g2(packet) - 0x8000;
+    if (peek < 128) {
+        return g1(packet);
+    }
+    if (packet->pos + 1 >= packet->length) {
+        return 0;
+    }
+    return g2(packet) - 0x8000;
 }
 
 void rsaenc(Packet *packet, const char *mod, const char *exp) {

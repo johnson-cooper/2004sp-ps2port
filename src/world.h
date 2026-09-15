@@ -5,6 +5,7 @@
 
 #include "collisionmap.h"
 #include "defines.h"
+#include "platform.h"
 #include "world3d.h"
 
 // name and packaging confirmed 100% in rs2/mapview applet strings
@@ -48,5 +49,14 @@ void clearLandscape(World *world, int startX, int startZ, int endX, int endZ);
 void world_load_ground(World *world, int originX, int originZ, int xOffset, int zOffset, int8_t *src, int src_len);
 void world_load_locations(World *world, World3D *scene, LinkList *locs, CollisionMap **collision, int8_t *src, int src_len, int xOffset, int zOffset);
 void world_add_loc2(World *world, int level, int x, int z, World3D *scene, LinkList *locs, CollisionMap *collision, int locId, int shape, int rotation);
+#ifdef __PS2__
+// Real-hardware-only diagnostics: world_build() has several large, distinct stages (per-level
+// lighting, per-level landscape/tile blending, per-level drawlevels, model normal-merging, bridges,
+// occluder generation) that were previously invisible as one opaque call between two checkpoints in
+// client_build_scene(). `c` is used only to reuse client.c's existing on-screen checkpoint drawing
+// (ps2_scene_checkpoint) - passing NULL is safe (falls back to log-only).
+void world_build(World *world, World3D *scene, CollisionMap **collision, Client *c);
+#else
 void world_build(World *world, World3D *scene, CollisionMap **collision);
+#endif
 int world_get_drawlevel(World *world, int level, int stx, int stz);

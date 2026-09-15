@@ -1543,7 +1543,16 @@ void model_draw2(Model *m, bool projected, bool hasInput, int bitset) {
     for (int i = 0; i < m->max_depth && i < MODEL_MAX_DEPTH; i++) {
         _Model.tmp_depth_face_count[i] = 0;
     }
-    for (int f = 0; f < m->face_count; f++) {
+#ifdef __PS2__
+    // The EE software renderer performs vertex projection, face classification, depth bucketing
+    // and triangle rasterisation in C.  A player avatar can combine many source meshes; preserve
+    // its silhouette with a bounded face sample instead of letting one nearby player consume an
+    // entire frame.  All other models retain the normal stride of one.
+    const int face_stride = m->ps2_face_stride > 1 ? m->ps2_face_stride : 1;
+#else
+    const int face_stride = 1;
+#endif
+    for (int f = 0; f < m->face_count; f += face_stride) {
         if (!m->face_infos || m->face_infos[f] != -1) {
             int a = m->face_indices_a[f];
             int b = m->face_indices_b[f];

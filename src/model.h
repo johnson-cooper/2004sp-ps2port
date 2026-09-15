@@ -77,6 +77,12 @@ typedef struct Model {
     int *label_vertices_index_count;
     int *label_faces_index_count;
 
+#ifdef __PS2__
+    // Hardware profile LOD: 1 draws every face; larger values keep every Nth face.  Kept on the
+    // model rather than globally so only explicitly budgeted meshes lose detail.
+    int ps2_face_stride;
+#endif
+
     // TODO this is wasted memory on static models: maybe create a DynamicModel?
     void (*free_faces)(struct Model *m); // frees partially copied model data
 } Model;

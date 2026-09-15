@@ -118,6 +118,9 @@ Model *idktype_get_headmodel(IdkType *idk) {
     }
 
     Model *model = model_from_models(models, count, false);
+    for (int i = 0; i < count; i++) {
+        model_free(models[i]);
+    }
     for (int i = 0; i < 6 && idk->recol_s[i] != 0; i++) {
         model_recolor(model, idk->recol_s[i], idk->recol_d[i]);
     }

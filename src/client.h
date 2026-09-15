@@ -487,6 +487,16 @@ void client_draw_chatback(Client *c);
 void client_draw_minimap(Client *c);
 void client_draw_scene(Client *c);
 void client_update_game(Client *c);
+
+#ifdef __PS2__
+// Live renderer heap telemetry is sampled by gameshell around client_draw() and
+// platform_update_surface(), then displayed by client_draw_scene() on the next
+// presented frame.  Keep it global rather than duplicating allocator probes in
+// the GS backend: this identifies whether RAM is lost in CPU drawing or during
+// the texture-upload/present path.
+extern int ps2_heap_after_draw_kb;
+extern int ps2_heap_after_present_kb;
+#endif
 void client_try_reconnect(Client *c);
 void client_logout(Client *c);
 void reset_interface_animation(int id);

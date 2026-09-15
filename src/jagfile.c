@@ -63,7 +63,11 @@ static Jagfile *jagfile_parse(int8_t *src, int length) {
         jagfile->is_compressed_whole = false;
     } else {
         int8_t *data = calloc(unpacked_size, sizeof(int8_t));
+#ifdef __PS2__
+        bzip_decompress(data, src, packed_size, 6, NULL, unpacked_size);
+#else
         bzip_decompress(data, src, packed_size, 6);
+#endif
         jagfile->data = data;
         packet_free(packet);
         packet = packet_new(jagfile->data, unpacked_size);
@@ -106,7 +110,11 @@ static int8_t *jagfile_read_index(Jagfile *jagfile, int id) {
     if (jagfile->is_compressed_whole) {
         memcpy(dest, jagfile->data + jagfile->file_offset[id], jagfile->file_unpacked_size[id]);
     } else {
+#ifdef __PS2__
+        bzip_decompress(dest, jagfile->data, jagfile->file_packed_size[id], jagfile->file_offset[id], NULL, jagfile->file_unpacked_size[id]);
+#else
         bzip_decompress(dest, jagfile->data, jagfile->file_packed_size[id], jagfile->file_offset[id]);
+#endif
     }
     return dest;
 }

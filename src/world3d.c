@@ -16,6 +16,9 @@
 #include "world3d.h"
 #include "allocator.h"
 #include "gl11.h"
+#ifdef __PS2__
+#include "client.h"
+#endif
 
 SceneData _World3D = {.lowMemory = true};
 extern Pix2D _Pix2D;
@@ -116,6 +119,24 @@ void world3d_free(World3D *world3d, int maxTileZ, int maxLevel, int maxTileX) {
 }
 
 void world3d_add_occluder(int level, int type, int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
+    // `levelOccluders[level]` is a fixed 500-slot array (world3d.h) and this was writing/incrementing
+    // `levelOccluderCount[level]` with no capacity check at all. A dense, tall multi-level scene
+    // (exactly what world_build()'s occluder-merge pass over a busy town/building square can produce)
+    // can legitimately generate more than 500 occluders for one level - the 501st write silently
+    // overruns into `levelOccluders[level + 1]` (or, on the last level, into `activeOccluderCount`/
+    // `activeOccluders`, both read every frame by world3d_update_activeoccluders()), corrupting
+    // whatever SceneData field follows in memory rather than crashing where the real mistake is. This
+    // is exactly the class of "corruption now, fault somewhere unrelated later" bug that can look like
+    // a real-hardware-only hang: the same static struct layout is used on PCSX2 and hardware, but a
+    // stray non-NULL Occlude* landing in the wrong slot is far more likely to be silently tolerated by
+    // an emulated read than by the real EE, where it can point at anything.
+    if (_World3D.levelOccluderCount[level] >= 500) {
+        rs2_error("world3d_add_occluder: level %d occluder capacity (500) exceeded (type=%d tiles x=%d..%d z=%d..%d) - "
+                  "dropping this occluder instead of corrupting adjacent scene data\n",
+                  level, type, minX / 128, maxX / 128, minZ / 128, maxZ / 128);
+        return;
+    }
+
     Occlude *occluder = calloc(1, sizeof(Occlude));
     occluder->minTileX = minX / 128;
     occluder->maxTileX = maxX / 128;
@@ -325,6 +346,13 @@ void world3d_set_tile(World3D *world3d, int level, int x, int z, int shape, int 
 
 void world3d_add_grounddecoration(World3D *world3d, Model *model, int tileLevel, int tileX, int tileZ, int y, int bitset, int8_t info) {
     GroundDecor *decor = calloc(1, sizeof(GroundDecor));
+    if (!decor) {
+#ifdef __PS2__
+        rs2_error("world3d_add_grounddecoration: out of EE heap\n");
+        ps2_report_oom("OOM: ground decoration");
+#endif
+        return;
+    }
     decor->model = model;
     decor->x = tileX * 128 + 64;
     decor->z = tileZ * 128 + 64;
@@ -339,6 +367,13 @@ void world3d_add_grounddecoration(World3D *world3d, Model *model, int tileLevel,
 
 void world3d_add_objstack(World3D *world3d, int stx, int stz, int y, int level, int bitset, Model *topObj, Model *middleObj, Model *bottomObj) {
     GroundObject *stack = calloc(1, sizeof(GroundObject));
+    if (!stack) {
+#ifdef __PS2__
+        rs2_error("world3d_add_objstack: out of EE heap\n");
+        ps2_report_oom("OOM: object stack");
+#endif
+        return;
+    }
     stack->topObj = topObj;
     stack->x = stx * 128 + 64;
     stack->z = stz * 128 + 64;
@@ -369,6 +404,13 @@ void world3d_add_wall(World3D *world3d, int level, int tileX, int tileZ, int y, 
     }
 
     Wall *wall = calloc(1, sizeof(Wall));
+    if (!wall) {
+#ifdef __PS2__
+        rs2_error("world3d_add_wall: out of EE heap\n");
+        ps2_report_oom("OOM: wall");
+#endif
+        return;
+    }
     wall->bitset = bitset;
     wall->info = info;
     wall->x = tileX * 128 + 64;
@@ -392,6 +434,13 @@ void world3d_set_walldecoration(World3D *world3d, int level, int tileX, int tile
     }
 
     Decor *decor = calloc(1, sizeof(Decor));
+    if (!decor) {
+#ifdef __PS2__
+        rs2_error("world3d_set_walldecoration: out of EE heap\n");
+        ps2_report_oom("OOM: wall decoration");
+#endif
+        return;
+    }
     decor->bitset = bitset;
     decor->info = info;
     decor->x = tileX * 128 + offsetX + 64;
@@ -467,6 +516,13 @@ bool world3d_add_loc2(World3D *world3d, int x, int z, int y, int level, int tile
         }
     }
     Location *loc = rs2_calloc(!temporary, 1, sizeof(Location));
+    if (!loc) {
+#ifdef __PS2__
+        rs2_error("world3d_add_loc2: out of scene allocator\n");
+        ps2_report_oom("OOM: scene location");
+#endif
+        return false;
+    }
     loc->bitset = bitset;
     loc->info = info;
     loc->level = level;
@@ -798,7 +854,11 @@ int world3d_get_info(World3D *world3d, int level, int x, int z, int bitset) {
 }
 
 void world3d_build_models(World3D *world3d, int lightAmbient, int lightAttenuation, int lightSrcX, int lightSrcY, int lightSrcZ) {
+#ifdef USE_FLOATS
+    int lightMagnitude = (int)sqrtf((float)(lightSrcX * lightSrcX + lightSrcY * lightSrcY + lightSrcZ * lightSrcZ));
+#else
     int lightMagnitude = (int)sqrt(lightSrcX * lightSrcX + lightSrcY * lightSrcY + lightSrcZ * lightSrcZ);
+#endif
     int attenuation = lightAttenuation * lightMagnitude >> 8;
 
     for (int level = 0; level < world3d->maxLevel; level++) {
@@ -1096,22 +1156,31 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.eyeTileZ = eyeZ / 128;
     _World3D.topLevel = topLevel;
 
-    _World3D.minDrawTileX = _World3D.eyeTileX - 25;
+#ifdef __PS2__
+    // Preserve the fixed 104x104 coordinate space, but submit only the nearby
+    // 17x17 terrain window. This removes about 89% of the original 51x51
+    // software-raster workload on the EE.
+    const int drawRadius = PS2_RENDER_RADIUS;
+#else
+    const int drawRadius = 25;
+#endif
+
+    _World3D.minDrawTileX = _World3D.eyeTileX - drawRadius;
     if (_World3D.minDrawTileX < 0) {
         _World3D.minDrawTileX = 0;
     }
 
-    _World3D.minDrawTileZ = _World3D.eyeTileZ - 25;
+    _World3D.minDrawTileZ = _World3D.eyeTileZ - drawRadius;
     if (_World3D.minDrawTileZ < 0) {
         _World3D.minDrawTileZ = 0;
     }
 
-    _World3D.maxDrawTileX = _World3D.eyeTileX + 25;
+    _World3D.maxDrawTileX = _World3D.eyeTileX + drawRadius;
     if (_World3D.maxDrawTileX > world3d->maxTileX) {
         _World3D.maxDrawTileX = world3d->maxTileX;
     }
 
-    _World3D.maxDrawTileZ = _World3D.eyeTileZ + 25;
+    _World3D.maxDrawTileZ = _World3D.eyeTileZ + drawRadius;
     if (_World3D.maxDrawTileZ > world3d->maxTileZ) {
         _World3D.maxDrawTileZ = world3d->maxTileZ;
     }
@@ -1144,7 +1213,7 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
 
     for (int level = world3d->minLevel; level < world3d->maxLevel; level++) {
         Ground ***tiles = world3d->levelTiles[level];
-        for (int dx = -25; dx <= 0; dx++) {
+        for (int dx = -drawRadius; dx <= 0; dx++) {
             int rightTileX = _World3D.eyeTileX + dx;
             int leftTileX = _World3D.eyeTileX - dx;
 
@@ -1152,7 +1221,7 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
                 continue;
             }
 
-            for (int dz = -25; dz <= 0; dz++) {
+            for (int dz = -drawRadius; dz <= 0; dz++) {
                 int forwardTileZ = _World3D.eyeTileZ + dz;
                 int backwardTileZ = _World3D.eyeTileZ - dz;
                 Ground *tile;
@@ -1198,14 +1267,14 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
 
     for (int level = world3d->minLevel; level < world3d->maxLevel; level++) {
         Ground ***tiles = world3d->levelTiles[level];
-        for (int dx = -25; dx <= 0; dx++) {
+        for (int dx = -drawRadius; dx <= 0; dx++) {
             int rightTileX = _World3D.eyeTileX + dx;
             int leftTileX = _World3D.eyeTileX - dx;
             if (rightTileX < _World3D.minDrawTileX && leftTileX >= _World3D.maxDrawTileX) {
                 continue;
             }
 
-            for (int dz = -25; dz <= 0; dz++) {
+            for (int dz = -drawRadius; dz <= 0; dz++) {
                 int forwardTileZ = _World3D.eyeTileZ + dz;
                 int backgroundTileZ = _World3D.eyeTileZ - dz;
                 Ground *tile;
@@ -1320,6 +1389,7 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
             if (tile->bridge) {
                 Ground *bridge = tile->bridge;
 
+#if !defined(__PS2__) || !PS2_FLAT_TERRAIN
                 if (!bridge->underlay) {
                     if (bridge->overlay && !world3d_tile_visible(world3d, 0, tileX, tileZ)) {
                         world3d_draw_tileoverlay(tileX, tileZ, bridge->overlay, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw);
@@ -1327,6 +1397,7 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
                 } else if (!world3d_tile_visible(world3d, 0, tileX, tileZ)) {
                     world3d_draw_tileunderlay(world3d, bridge->underlay, 0, tileX, tileZ, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw);
                 }
+#endif
 
                 Wall *wall = bridge->wall;
                 if (wall) {
@@ -1344,6 +1415,13 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
                             _free = true;
                         }
 
+                        if (!model) {
+                            // A player/NPC appearance can legitimately be unavailable while its
+                            // asset is loading or after a recoverable allocation failure.  Never
+                            // turn that missing mesh into a null dereference in the world renderer.
+                            continue;
+                        }
+
                         model_draw(model, loc->yaw, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw, loc->x - _World3D.eyeX, loc->y - _World3D.eyeY, loc->z - _World3D.eyeZ, loc->bitset);
                         if (_free) {
                             entity_draw_free(loc->entity, model, loopCycle);
@@ -1352,7 +1430,12 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
                 }
             }
 
+            // In the PS2 flat-terrain profile, retain the entity/item pass below even though
+            // the expensive underlay/overlay geometry was intentionally not rasterised.
             bool tileDrawn = false;
+#if defined(__PS2__) && PS2_FLAT_TERRAIN
+            tileDrawn = true;
+#else
             if (!tile->underlay) {
                 if (tile->overlay && !world3d_tile_visible(world3d, occludeLevel, tileX, tileZ)) {
                     tileDrawn = true;
@@ -1362,6 +1445,7 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
                 tileDrawn = true;
                 world3d_draw_tileunderlay(world3d, tile->underlay, occludeLevel, tileX, tileZ, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw);
             }
+#endif
 
             int direction = 0;
             int frontWallTypes = 0;
@@ -1630,6 +1714,10 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
                 if (!model) {
                     model = entity_draw(farthest->entity, loopCycle);
                     _free = true;
+                }
+
+                if (!model) {
+                    continue;
                 }
 
                 if (!world3d_loc_visible(world3d, occludeLevel, farthest->minSceneTileX, farthest->maxSceneTileX, farthest->minSceneTileZ, farthest->maxSceneTileZ, model->max_y)) {

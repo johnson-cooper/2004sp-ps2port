@@ -22,6 +22,14 @@ void lrucache_free(LruCache *cache) {
 }
 
 DoublyLinkable *lrucache_get(LruCache *cache, int64_t key) {
+    // 2026-09-14: this function was heavily instrumented during a real-hardware bisection that
+    // ultimately found no corruption anywhere in the hashtable/LRU data structures it touches (see
+    // hashtable.c's hashtable_get() history comment) - the apparent "hangs" tracked with how many
+    // ps2_scene_checkpoint() draws were stacked in a tight sequence, a false-freeze trap this project
+    // has separate confirmed precedent for (loctype.c, right before its lrucache_put() call). All
+    // diagnostic checkpoints removed now that they've served their purpose; loctype_get_model()'s own
+    // "dynamic cache lookup done" checkpoint (right after its lrucache_get() call) already shows
+    // whether this function completes, with far less overhead than duplicating that here.
     DoublyLinkable *node = (DoublyLinkable *)hashtable_get(cache->hashtable, key);
     if (node) {
         doublylinklist_push(cache->history, node);

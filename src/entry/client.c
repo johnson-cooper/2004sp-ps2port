@@ -70,6 +70,16 @@
 // Flip to 1 for one targeted bisection session if a genuine new hang ever needs this technique again.
 #define PS2_CHECKPOINTS_ENABLED 0
 
+#ifdef __PS2__
+static unsigned long ps2_live_update_count = 0;
+static int ps2_live_stage = 0;
+static int ps2_heap_tick_begin_kb = 0;
+static int ps2_heap_after_packets_kb = 0;
+static int ps2_heap_after_logic_kb = 0;
+int ps2_heap_after_draw_kb = 0;
+int ps2_heap_after_present_kb = 0;
+#endif
+
 extern int DESIGN_BODY_COLOR_LENGTH[];
 extern int *DESIGN_BODY_COLOR[];
 extern int DESIGN_HAIR_COLOR[];
@@ -5090,6 +5100,9 @@ static void client_scenemap_free(Client *c) {
 
 void client_update_game(Client *c) {
 #ifdef __PS2__
+    ps2_live_update_count++;
+    ps2_live_stage = 1; // entered game update
+    ps2_heap_tick_begin_kb = mallinfo().fordblks / 1024;
     // Present an explicit marker before each major section of only the first
     // three live updates.  If one section blocks, its marker remains visible
     // on the TV.  This is a temporary bisection aid, deliberately bounded so
@@ -5123,16 +5136,24 @@ void client_update_game(Client *c) {
     // an EE tick immediately after login.  Keep the game responsive and let the
     // normal 50 Hz update loop drain it progressively on the 32 MiB target.
 #ifdef __PS2__
-    const int packet_budget = 1;
+    // During map construction one packet at a time prevents a burst of interface/zone work from
+    // monopolising the EE.  Once the world is live, however, PLAYER_INFO arrives continuously;
+    // a budget of one can permanently starve queued inventory/interface packets behind it.
+    const int packet_budget = c->scene_state == 2 ? 3 : 1;
 #else
     const int packet_budget = 5;
 #endif
     for (int i = 0; i < packet_budget && client_read(c); i++) {
     }
 #ifdef __PS2__
+    ps2_live_stage = 2; // packet handling returned
+    ps2_heap_after_packets_kb = mallinfo().fordblks / 1024;
     _TickPhase.packets_ms += rs2_now() - phase_t0;
 #endif
 
+    #ifdef __PS2__
+    ps2_live_stage = 3; // entering non-network game logic
+    #endif
     if (c->ingame) {
         for (int wave = 0; wave < c->wave_count; wave++) {
             if (c->wave_delay[wave] <= 0) {
@@ -5456,6 +5477,8 @@ void client_update_game(Client *c) {
         // }
     }
 #ifdef __PS2__
+    ps2_live_stage = 4; // game logic and outbound send returned
+    ps2_heap_after_logic_kb = mallinfo().fordblks / 1024;
     if (runtime_trace) {
         ps2_runtime_checkpoint(c, "DONE");
         runtime_trace_updates_left--;
@@ -5954,6 +5977,18 @@ bool client_read(Client *c) {
         drawStringCenter(c->font_plain12, 256, 150, "Loading - please wait.", WHITE);
         pixmap_draw(c->area_viewport, 4, 4);
 
+#if defined(__PS2__) && PS2_NULL_SCENE_REBUILD
+        // This is intentionally a no-scene diagnostic, not a production map loader.  The screen
+        // above proved that the residual coordinate/entity relocation below can still block the
+        // single network thread after all map decode/build work has been deferred.  Completing the
+        // protocol acknowledgement here lets us distinguish that work from networking or display.
+        c->scene_state = 2;
+        _World.levelBuilt = c->currentLevel;
+        p1isaac(c->out, 134); // MAP_BUILD_COMPLETE
+        c->packet_type = -1;
+        return true;
+#endif
+
         // rev254 no longer sends a per-region CRC list in this packet (see the revision-254 audit) -
         // the client is expected to already have the full map pack locally and computes the needed
         // mapsquare grid itself from the center zone, matching the reference client's own algorithm.
@@ -5973,6 +6008,19 @@ bool client_read(Client *c) {
                 c->sceneCenterZoneZ, minMapsquareX, maxMapsquareX, minMapsquareZ, maxMapsquareZ);
 #endif
 
+        // The regular client opens/decompresses every map square synchronously here, then does a
+        // second synchronous build on the following PLAYER_INFO packet.  That blocks all later
+        // interface/inventory packets.  The PS2 flat-terrain profile deliberately starts live
+        // gameplay with no static map scene; an incremental terrain/loc streamer owns this later.
+#if defined(__PS2__) && PS2_DEFER_SCENE_REBUILD
+        client_scenemap_free(c);
+        c->sceneMapLandData = NULL;
+        c->sceneMapLocData = NULL;
+        c->sceneMapIndex = NULL;
+        c->sceneMapLandDataIndexLength = NULL;
+        c->sceneMapLocDataIndexLength = NULL;
+        c->sceneMapIndexLength = 0;
+#else
         client_scenemap_free(c);
         c->sceneMapLandData = calloc(regions, sizeof(int8_t *));
         c->sceneMapLocData = calloc(regions, sizeof(int8_t *));
@@ -6099,6 +6147,7 @@ bool client_read(Client *c) {
                 i++;
             }
         }
+#endif
 
 #if defined(__PS2__) && PS2_CHECKPOINTS_ENABLED
         // Checkpoint: if this line's flip is the LAST thing ever visible on a frozen screen (instead
@@ -6208,7 +6257,7 @@ bool client_read(Client *c) {
             c->packet_type = -1;
             return true;
         }
-        _Component.instances[com]->model = playerentity_get_headmodel(c->local_player);
+        component_set_dynamic_model(_Component.instances[com], playerentity_get_headmodel(c->local_player));
         c->packet_type = -1;
         return true;
     }
@@ -6312,6 +6361,10 @@ bool client_read(Client *c) {
     }
     if (c->packet_type == 98 || c->packet_type == 218 || c->packet_type == 8 || c->packet_type == 114 || c->packet_type == 37 || c->packet_type == 115 || c->packet_type == 120 || c->packet_type == 30 || c->packet_type == 88 || c->packet_type == 70) {
         // OBJ_COUNT, P_LOCMERGE, OBJ_REVEAL, MAP_ANIM, MAP_PROJANIM, OBJ_DEL, OBJ_ADD, LOC_ANIM, LOC_DEL, LOC_ADD_CHANGE
+#if defined(__PS2__) && PS2_NULL_SCENE_REBUILD
+        c->packet_type = -1;
+        return true;
+#endif
         // Zone Protocol
         readZonePacket(c, c->in, c->packet_type);
         c->packet_type = -1;
@@ -6409,6 +6462,7 @@ bool client_read(Client *c) {
         }
         if (index != -1) {
             if (!c->sceneMapLocData[index] || c->sceneMapLocDataIndexLength[index] != length) {
+                free(c->sceneMapLocData[index]);
                 c->sceneMapLocData[index] = calloc(length, sizeof(int8_t));
             }
             gdata(c->in, c->packet_size - 6, offset, c->sceneMapLocData[index]);
@@ -6577,7 +6631,7 @@ bool client_read(Client *c) {
             return true;
         }
         NpcType *npc = npctype_get(npcId);
-        _Component.instances[com]->model = npctype_get_headmodel(npc);
+        component_set_dynamic_model(_Component.instances[com], npctype_get_headmodel(npc));
         c->packet_type = -1;
         return true;
     }
@@ -6689,6 +6743,11 @@ bool client_read(Client *c) {
         // UPDATE_ZONE_FULL_FOLLOWS
         c->baseX = g1(c->in);
         c->baseZ = g1(c->in);
+#if defined(__PS2__) && PS2_NULL_SCENE_REBUILD
+        // Preserve the zone base but do not apply object/loc work to an intentionally empty scene.
+        c->packet_type = -1;
+        return true;
+#endif
         for (int x = c->baseX; x < c->baseX + 8; x++) {
             for (int z = c->baseZ; z < c->baseZ + 8; z++) {
                 if (c->level_obj_stacks[c->currentLevel][x][z]) {
@@ -6722,6 +6781,7 @@ bool client_read(Client *c) {
         }
         if (index != -1) {
             if (!c->sceneMapLandData[index] || c->sceneMapLandDataIndexLength[index] != length) {
+                free(c->sceneMapLandData[index]);
                 c->sceneMapLandData[index] = calloc(length, sizeof(int8_t));
             }
             gdata(c->in, c->packet_size - 6, offset, c->sceneMapLandData[index]);
@@ -6756,11 +6816,14 @@ bool client_read(Client *c) {
             c->privateMessageCount = (c->privateMessageCount + 1) % 100;
             char *uncompressed = wordpack_unpack(c->in, c->packet_size - 13);
             wordfilter_filter(uncompressed);
+            char *sender = jstring_format_name(jstring_from_base37(from));
             if (staffModLevel > 1) {
-                client_add_message(c, 7, uncompressed, jstring_format_name(jstring_from_base37(from)));
+                client_add_message(c, 7, uncompressed, sender);
             } else {
-                client_add_message(c, 3, uncompressed, jstring_format_name(jstring_from_base37(from)));
+                client_add_message(c, 3, uncompressed, sender);
             }
+            free(sender);
+            free(uncompressed);
             // } catch (@Pc(2752) Exception ex) {
             // 	signlink.reporterror("cde1");
             // }
@@ -6788,7 +6851,7 @@ bool client_read(Client *c) {
             c->packet_type = -1;
             return true;
         }
-        _Component.instances[com]->model = model_from_id(model, false);
+        component_set_dynamic_model(_Component.instances[com], model_from_id(model, false));
         c->packet_type = -1;
         return true;
     }
@@ -6892,7 +6955,7 @@ bool client_read(Client *c) {
             return true;
         }
         ObjType *obj = objtype_get(objId);
-        _Component.instances[com]->model = objtype_get_interfacemodel(obj, 50, false);
+        component_set_dynamic_model(_Component.instances[com], objtype_get_interfacemodel(obj, 50, false));
         _Component.instances[com]->xan = obj->xan2d;
         _Component.instances[com]->yan = obj->yan2d;
         _Component.instances[com]->zoom = obj->zoom2d * 100 / zoom;
@@ -7043,6 +7106,10 @@ bool client_read(Client *c) {
         // UPDATE_ZONE_PARTIAL_ENCLOSED
         c->baseX = g1(c->in);
         c->baseZ = g1(c->in);
+#if defined(__PS2__) && PS2_NULL_SCENE_REBUILD
+        c->packet_type = -1;
+        return true;
+#endif
         while (c->in->pos < c->packet_size) {
             int opcode = g1(c->in);
             readZonePacket(c, c->in, opcode);
@@ -7109,7 +7176,9 @@ bool client_read(Client *c) {
         if (c->scene_state == 1) {
             c->scene_state = 2;
             _World.levelBuilt = c->currentLevel;
+#if !defined(__PS2__) || !PS2_DEFER_SCENE_REBUILD
             client_build_scene(c);
+#endif
         }
         if (_Client.lowmem && c->scene_state == 2 && _World.levelBuilt != c->currentLevel) {
 #ifndef __PS2__
@@ -7130,8 +7199,12 @@ bool client_read(Client *c) {
 #endif
         }
         if (c->currentLevel != c->minimap_level && c->scene_state == 2) {
+#if defined(__PS2__) && PS2_DISABLE_MINIMAP
+            c->minimap_level = c->currentLevel;
+#else
             c->minimap_level = c->currentLevel;
             createMinimap(c, c->currentLevel);
+#endif
         }
         c->packet_type = -1;
         return true;
@@ -7427,6 +7500,7 @@ void getPlayerExtended2(Client *c, PlayerEntity *player, int index, int mask, Pa
                 } else {
                     client_add_message(c, 2, uncompressed, player->name);
                 }
+                free(uncompressed);
                 // } catch (Exception ex) {
                 // 	signlink.reporterror("cde2");
                 // }
@@ -7520,7 +7594,7 @@ static void client_clear_caches(void) {
     lrucache_clear(_NpcType.modelCache);
     lrucache_clear(_ObjType.modelCache);
     lrucache_clear(_ObjType.iconCache);
-    lrucache_clear(_PlayerEntity.modelCache);
+    playerentity_clear_model_cache();
     lrucache_clear(_SpotAnimType.modelCache);
     bump_allocator_reset();
 }
@@ -9496,12 +9570,44 @@ void client_draw(Client *c) {
         virtual_keyboard_draw(c);
     }
 
+#if !defined(__PS2__) || (!PS2_NULL_UI && !PS2_SAFE_INTERFACE)
     if (!c->shell->has_keyboard) {
         virtual_cursor_draw(c);
     }
+#endif
 
     gl_end_frame();
 }
+
+#if defined(__PS2__) && PS2_NULL_UI
+/*
+ * The normal interface tree includes inventory icons and model widgets.  Those
+ * widgets drive the same software model/icon path that is currently unsafe on
+ * hardware, so keep a deliberately boring shell alive while the 3D and packet
+ * paths are being validated.  It is redrawn every frame because the PS2
+ * presenter owns the display buffer, rather than relying on a retained UI.
+ */
+static void client_draw_ps2_safe_ui(Client *c) {
+    pixmap_bind(c->area_chatback);
+    _Pix3D.line_offset = c->area_chatback_offsets;
+    pix2d_fill_rect(0, 0, 0xe5e5e5, c->area_chatback->width, c->area_chatback->height);
+    pix2d_fill_rect(0, 77, 0xc0c0c0, c->area_chatback->width, 1);
+    drawString(c->font_plain12, 4, 18, "PS2 safe UI - interface models disabled", BLACK);
+    drawString(c->font_plain12, 4, 92, "Chat input disabled while profiling", DARKBLUE);
+    pixmap_draw(c->area_chatback, 17, 357);
+
+    pixmap_bind(c->area_sidebar);
+    _Pix3D.line_offset = c->area_sidebar_offsets;
+    pix2d_fill_rect(0, 0, 0x252a33, c->area_sidebar->width, c->area_sidebar->height);
+    drawString(c->font_plain12, 10, 22, "PS2 safe UI", WHITE);
+    drawString(c->font_plain12, 10, 40, "Inventory/icons", WHITE);
+    drawString(c->font_plain12, 10, 54, "temporarily off", WHITE);
+    pixmap_draw(c->area_sidebar, 553, 205);
+
+    pixmap_bind(c->area_viewport);
+    _Pix3D.line_offset = c->area_viewport_offsets;
+}
+#endif
 
 void client_draw_game(Client *c) {
     if (c->redraw_background) {
@@ -9544,7 +9650,20 @@ void client_draw_game(Client *c) {
 
     if (c->scene_state == 2) {
         client_draw_scene(c);
+#if defined(__PS2__) && PS2_NULL_UI
+        client_draw_ps2_safe_ui(c);
+        return;
+#endif
     }
+
+#if defined(__PS2__) && PS2_UI_PROFILE == 1
+    // Keep the chat path live for this bisection, but eliminate every other
+    // normal UI composition pass.  The static-shell profile already proved
+    // these areas can be painted; this identifies a dynamic pass, if any.
+    c->redraw_sidebar = false;
+    c->redraw_sideicons = false;
+    c->redraw_privacy_settings = false;
+#endif
 
     if (c->menu_visible && c->menu_area == 1) {
         c->redraw_sidebar = true;
@@ -9630,8 +9749,10 @@ void client_draw_game(Client *c) {
 #endif
 
     if (c->scene_state == 2) {
+#if !defined(__PS2__) || PS2_UI_PROFILE == 0
         client_draw_minimap(c);
         pixmap_draw(c->area_mapback, 550, 4);
+#endif
     }
 
     if (c->flashing_tab != -1) {
@@ -10625,23 +10746,38 @@ static void draw3DEntityElements(Client *c) {
 }
 
 #ifdef __PS2__
-// The 3D renderer writes a quarter as many pixels as the normal viewport. The
-// UI continues to use the 512x334 target after this nearest-neighbour upscale,
-// so its fixed coordinates and input paths remain untouched.
+static void ps2_draw_local_player(Client *c, int loopCycle) {
+    PlayerEntity *player = c->local_player;
+    if (!player || !playerentity_is_visible(player)) {
+        return;
+    }
+
+    // The player can sit well outside the tiny camera-centred terrain window.  Submit it directly
+    // instead of enlarging World3D's entire traversal.  Lowmem avoids the per-frame animated-model
+    // clone; the cached pose remains adequate for this hardware-first profile.
+    player->lowmem = true;
+    player->y = getHeightmapY(c, c->currentLevel, player->pathing_entity.x, player->pathing_entity.z);
+    Model *model = entity_draw(&player->pathing_entity.entity, loopCycle);
+    if (!model) {
+        return;
+    }
+    model_draw(model, player->pathing_entity.yaw, _World3D.sinEyePitch, _World3D.cosEyePitch,
+               _World3D.sinEyeYaw, _World3D.cosEyeYaw,
+               player->pathing_entity.x - _World3D.eyeX, player->y - _World3D.eyeY,
+               player->pathing_entity.z - _World3D.eyeZ, LOCAL_PLAYER_INDEX << 14);
+}
+
+// The 3D renderer uses a deliberately smaller target while the UI continues to
+// use the readable 512x334 surface.  Nearest-neighbour expansion keeps fixed UI
+// coordinates and input paths untouched without assuming an integer scale factor.
 static void ps2_upscale_viewport_3d(Client *c) {
     const int *src = c->area_viewport_3d->pixels;
     int *dst = c->area_viewport->pixels;
-    for (int y = 0; y < PS2_3D_RENDER_HEIGHT; y++) {
-        const int *src_row = src + y * PS2_3D_RENDER_WIDTH;
-        int *dst_row0 = dst + (y * 2) * 512;
-        int *dst_row1 = dst_row0 + 512;
-        for (int x = 0; x < PS2_3D_RENDER_WIDTH; x++) {
-            int pixel = src_row[x];
-            int dx = x * 2;
-            dst_row0[dx] = pixel;
-            dst_row0[dx + 1] = pixel;
-            dst_row1[dx] = pixel;
-            dst_row1[dx + 1] = pixel;
+    for (int y = 0; y < 334; y++) {
+        const int *src_row = src + (y * PS2_3D_RENDER_HEIGHT / 334) * PS2_3D_RENDER_WIDTH;
+        int *dst_row = dst + y * 512;
+        for (int x = 0; x < 512; x++) {
+            dst_row[x] = src_row[x * PS2_3D_RENDER_WIDTH / 512];
         }
     }
 }
@@ -10677,8 +10813,14 @@ static void ps2_draw_large_status(Client *c, const char *status) {
 }
 
 static void ps2_draw_large_world_time(Client *c, uint64_t world_ms) {
-    char status[32];
-    sprintf(status, "3D %lums", (unsigned long)world_ms);
+    char status[128];
+    // P/U have repeatedly matched B in the stable live loop.  Keep the compact
+    // form within the magnified 180-pixel strip so the renderer/presenter
+    // boundary is visible instead of being clipped off-screen.
+    sprintf(status, "T%lu H%d D%d G%d", ps2_live_update_count,
+            ps2_heap_tick_begin_kb, ps2_heap_after_draw_kb, ps2_heap_after_present_kb);
+    // Keep this packet/send trace legible in the fixed 180-pixel magnified strip.
+    (void)world_ms;
     ps2_draw_large_status(c, status);
 }
 
@@ -10805,6 +10947,11 @@ void client_draw_scene(Client *c) {
     _Model.mouse_y = c->shell->mouse_y - 4;
 #endif
     pix2d_clear();
+#if defined(__PS2__) && PS2_FLAT_TERRAIN
+    // The normal terrain pass is omitted below; give entities a stable, grass-like background
+    // without spending time transforming/rasterising hundreds of terrain triangles.
+    pix2d_fill_rect(0, 0, 0x496d3a, PS2_3D_RENDER_WIDTH, PS2_3D_RENDER_HEIGHT);
+#endif
 
     gl_start_drawscene();
 
@@ -10812,6 +10959,11 @@ void client_draw_scene(Client *c) {
     char buf[MAX_STR];
     uint64_t last = rs2_now();
     world3d_draw(c->scene, c->cameraX, c->cameraY, c->cameraZ, level, c->cameraYaw, c->cameraPitch, _Client.loop_cycle);
+#ifdef __PS2__
+#if PS2_RENDER_LOCAL_PLAYER
+    ps2_draw_local_player(c, _Client.loop_cycle);
+#endif
+#endif
     uint64_t world_ms = rs2_now() - last;
     if (_Custom.show_performance) {
         sprintf(buf, "World3D: %lu ms", world_ms);
@@ -11185,6 +11337,11 @@ void pushPlayers(Client *c) {
         if (i == -1) {
             player = c->local_player;
             id = LOCAL_PLAYER_INDEX << 14;
+#ifdef __PS2__
+            // See ps2_draw_local_player(): do not make the camera-centred tile traversal chase
+            // the local player across a large radius just to draw this one dynamic model.
+            continue;
+#endif
         } else {
             player = c->players[c->player_ids[i]];
             id = c->player_ids[i] << 14;
@@ -11574,7 +11731,9 @@ void client_update_interface_content(Client *c, Component *component) {
             strcpy(component->text, "");
             component->buttonType = 0;
         } else {
-            strcpy(component->text, jstring_format_name(jstring_from_base37(c->ignoreName37[clientCode])));
+            char *ignore_name = jstring_format_name(jstring_from_base37(c->ignoreName37[clientCode]));
+            strcpy(component->text, ignore_name);
+            free(ignore_name);
             component->buttonType = 1;
         }
     } else if (clientCode == 503) {
@@ -11598,6 +11757,10 @@ void client_update_interface_content(Client *c, Component *component) {
             }
 
             Model *model = model_from_models(models, modelCount, false);
+            for (int part = 0; part < modelCount; part++) {
+                model_free(models[part]);
+            }
+            free(models);
             for (int part = 0; part < 5; part++) {
                 if (c->design_colors[part] != 0) {
                     model_recolor(model, DESIGN_BODY_COLOR[part][0], DESIGN_BODY_COLOR[part][c->design_colors[part]]);
@@ -11610,7 +11773,7 @@ void client_update_interface_content(Client *c, Component *component) {
             model_create_label_references(model, false);
             model_apply_transform(model, _SeqType.instances[c->local_player->pathing_entity.seqStandId]->frames[0]);
             model_calculate_normals(model, 64, 850, -30, -50, -30, true, false);
-            component->model = model;
+            component_set_dynamic_model(component, model);
         }
     } else if (clientCode == 324) {
 #ifdef __PS2__
@@ -11815,6 +11978,11 @@ static void client_draw_interface(Client *c, Component *com, int x, int y, int s
                 client_draw_scrollbar(c, childX + child->width, childY, child->scrollPosition, child->scroll, child->height);
             }
         } else if (child->type == 2) {
+#if defined(__PS2__) && PS2_SAFE_INTERFACE
+            // Inventory icons are generated by rendering object models into a
+            // Pix24.  Do not enter that renderer in the hardware-safe UI pass.
+            continue;
+#endif
             int slot = 0;
 
             for (int row = 0; row < child->height; row++) {
@@ -12035,6 +12203,11 @@ static void client_draw_interface(Client *c, Component *com, int x, int y, int s
                 pix24_draw(image, childX, childY);
             }
         } else if (child->type == 6) {
+#if defined(__PS2__) && PS2_SAFE_INTERFACE
+            // Component type 6 is a live 3D model (equipment preview, prayer
+            // tab artwork, etc.).  It shares the unsafe software model path.
+            continue;
+#endif
             int tmpX = _Pix3D.center_x;
             int tmpY = _Pix3D.center_y;
 

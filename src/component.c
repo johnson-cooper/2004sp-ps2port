@@ -52,9 +52,9 @@ void component_free_global(void) {
                 free(_Component.instances[i]->invSlotObjId);
                 free(_Component.instances[i]->invSlotObjCount);
             }
-            // if (_Component.instances[i]->model) {
-            //     model_free(_Component.instances[i]->model);
-            // }
+            if (_Component.instances[i]->modelOwned) {
+                model_free(_Component.instances[i]->model);
+            }
             // if (_Component.instances[i]->activeModel) {
             //     model_free(_Component.instances[i]->activeModel);
             // }
@@ -433,6 +433,18 @@ Pix24 *component_get_image(Jagfile *media, char *sprite, int spriteId) {
 #endif
 
     return image;
+}
+
+void component_set_dynamic_model(Component *com, Model *model) {
+    if (com->modelOwned && com->model && com->model != model) {
+        model_free(com->model);
+    }
+    com->model = model;
+    com->modelOwned = model != NULL;
+#ifdef __PS2__
+    // A packet-provided model supersedes any lazily decoded archive model.
+    com->modelId = -1;
+#endif
 }
 
 Model *component_get_model(int id) {

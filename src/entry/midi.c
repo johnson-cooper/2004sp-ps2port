@@ -39,7 +39,11 @@ void set_midi(const char *name, int crc, int length, bool fade) {
     // const int uncompressed_length = g4(packet);
     printf("uncompressed %d compressed %d arg %d\n", uncompressed_length, len, length);
     int8_t *uncompressed = malloc(uncompressed_length);
+#ifdef __PS2__
+    bzip_decompress(uncompressed, data, uncompressed_length, 4, NULL);
+#else
     bzip_decompress(uncompressed, data, uncompressed_length, 4);
+#endif
     TinyMidiLoader = tml_load_memory(uncompressed, uncompressed_length);
     free(data);
     // packet_free(packet);
