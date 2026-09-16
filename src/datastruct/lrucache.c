@@ -7,15 +7,27 @@
 #include "lrucache.h"
 
 LruCache *lrucache_new(int size) {
+#ifdef __PS2__
+    // playerentity.c is the sole 12-entry LRU user in the current client. Those entries are
+    // complete assembled/lit player meshes backed by the normal EE heap (not the scene arena),
+    // and real-hardware traces show the live world repeatedly falling below 50 KiB free. Keep
+    // only three appearances resident on PS2. playerentity_cache_model() owns and frees evicted
+    // meshes, so reducing this capacity is safe and trades some rebuild work for substantial
+    // heap headroom. Other LRUs keep their existing capacities/ownership semantics.
+    if (size == 12) {
+        size = 3;
+    }
+#endif
+
     LruCache *cache = calloc(1, sizeof(LruCache));
     cache->capacity = size;
     cache->available = size;
 #ifdef __PS2__
     // Desktop historically gives every LRU a 1024-bucket table. On a 32 MiB PS2 that is very
     // expensive because hashtable_new() allocates one sentinel Linkable per bucket as a separate
-    // heap allocation. Most client caches are far smaller than 1024 entries (the PS2 player model
-    // cache is only 12), so scale the bucket table to the cache while keeping a power-of-two size
-    // required by hashtable_get()/put()'s key & (bucket_count - 1) indexing.
+    // heap allocation. Most client caches are far smaller than 1024 entries, so scale the bucket
+    // table to the cache while keeping a power-of-two size required by hashtable_get()/put()'s
+    // key & (bucket_count - 1) indexing.
     int buckets = 16;
     int target = size > 0 ? size * 2 : 16;
     while (buckets < target && buckets < 256) {
