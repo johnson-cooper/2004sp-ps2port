@@ -10,9 +10,28 @@
 #endif
 
 #ifdef __PS2__
+#include <malloc.h>
+#include <stdint.h>
+
 // Declared directly (not via client.h) so this file - shared by every platform, not just PS2 -
 // doesn't pull in the whole Client struct. See client.h's own declaration comment for the rationale.
 extern void ps2_report_oom(const char *msg);
+
+// ReleasePlusPlus uses the gap between newlib's current program break and the live EE stack as a
+// second, independent RAM signal. mallinfo().fordblks (our H/D/G overlay) only reports free blocks
+// already owned by malloc; it does NOT include address space malloc can still acquire with sbrk().
+// Keep a 512 KiB stack guard exactly like the reference implementation so this remains conservative.
+extern void *sbrk(int incr);
+static int ps2_ram_gap_bytes(void) {
+    void *heap_end = sbrk(0);
+    uintptr_t heap_ptr = (uintptr_t)heap_end;
+    uintptr_t stack_local = (uintptr_t)&heap_end;
+    uintptr_t stack_top = stack_local > heap_ptr ? stack_local : (uintptr_t)0x02000000u;
+    const uintptr_t guard_bytes = 512u * 1024u;
+    uintptr_t guarded_top = stack_top > guard_bytes ? stack_top - guard_bytes : stack_top;
+    uintptr_t gap = guarded_top > heap_ptr ? guarded_top - heap_ptr : 0;
+    return (int)gap;
+}
 #endif
 
 typedef struct {
@@ -36,11 +55,24 @@ static BumpAllocator alloc = {0};
 static void *bump_alloc(int size);
 
 int bump_allocator_used(void) {
+#ifdef __PS2__
+    // TEMPORARY HARDWARE TELEMETRY: custom.c renders this as the first value of "LRU: A / B".
+    // For this bisection A is the guarded sbrk->stack gap, not scene-arena usage.
+    return ps2_ram_gap_bytes();
+#else
     return alloc.used;
+#endif
 }
 
 int bump_allocator_capacity(void) {
+#ifdef __PS2__
+    // TEMPORARY HARDWARE TELEMETRY: the second "LRU" value is malloc-owned bytes. Combined with
+    // H/D/G (fordblks), this distinguishes true EE-RAM exhaustion from a small malloc free-list.
+    struct mallinfo info = mallinfo();
+    return info.uordblks > 0 ? info.uordblks : 0;
+#else
     return alloc.capacity;
+#endif
 }
 
 bool bump_allocator_init(int capacity) {
@@ -51,11 +83,8 @@ bool bump_allocator_init(int capacity) {
     // the synchronous build/live scene is retaining substantially more normal-heap memory than the
     // temporary World arrays alone account for.
     //
-    // For this one-variable hardware test reserve 4 MiB instead. That returns another full MiB to
-    // libc while leaving the exact zero-Ground scene path unchanged. If the post-load H/D/G floor
-    // rises by roughly that amount and runtime becomes stable, memory partitioning is confirmed as
-    // the immediate failure mechanism. We can then move scene-owned allocations into the arena and
-    // choose its production capacity from measured high-water instead of keeping this clamp blindly.
+    // Reserve 4 MiB. Hardware has proven this exact allocation layout can enter the world; changing
+    // it again would contaminate the current 2x2-terrain memory diagnosis.
     if (capacity == (6 << 20)) {
         capacity = 4 << 20;
     }
