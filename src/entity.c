@@ -46,17 +46,18 @@ void entity_draw_free(Entity *entity, Model *m, int loopCycle) {
 
 Model *entity_draw(Entity *entity, int loopCycle) {
 #ifdef __PS2__
-    // Real-hardware isolation: keep PLAYER_INFO/NPC_INFO parsing, pathing,
-    // scene insertion, collision, and all other gameplay state live, but do not
-    // build/draw any dynamic entity mesh. The Lumbridge freeze has ranged from
-    // ~T130 to >T2500 while the last packet cadence remains 123/87/123, so tick
-    // lifetime is not a useful proxy for one specific packet or animation. If
-    // this build still freezes, the remaining failure is upstream of dynamic
-    // player/NPC/projectile/spotanim model construction and the renderer can be
-    // removed from the active suspect set. world3d already treats a NULL model
-    // as a legitimate unavailable entity and skips the draw/free path.
-    (void)entity;
-    (void)loopCycle;
+    // Real-hardware bisection after the all-dynamic-entities-disabled build ran
+    // for 10+ minutes in the same Lumbridge position without freezing. Restore
+    // only player meshes here. NPCs, projectiles, and standalone spotanims stay
+    // suppressed while their networking/pathing/scene state remains live.
+    //
+    // If this freezes, the player model build/render/free path is sufficient to
+    // reproduce the fault. If it stays stable, the next isolated test is NPC
+    // rendering, which is the stronger suspect in this Lumbridge scene (~21 NPCs
+    // versus ~2 players in the previous hardware telemetry).
+    if (strcmp(entity->type, "player") == 0) {
+        return playerentity_draw((PlayerEntity *)entity, loopCycle);
+    }
     return NULL;
 #else
     Model *model = NULL;
