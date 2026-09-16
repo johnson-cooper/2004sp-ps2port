@@ -19,52 +19,13 @@
 #include "allocator.h"
 #include "clientstream.h"
 
-// platform/ps2.c detects the actual mounted cache device after the BDM USB stack
-// is live. The old global rs2_log file sink can disable itself during earlier
-// network bring-up, before USB exists, so runtime PERF telemetry uses this
-// already-resolved prefix directly instead of depending on that early sink.
-const char *ps2_cache_prefix(void);
-
-static void ps2_runtime_log_line(const char *line) {
-    static int selected_path = -1;
-    static bool created[4] = {false, false, false, false};
-
-    char detected_path[64];
-    snprintf(detected_path, sizeof(detected_path), "%sboot.log", ps2_cache_prefix());
-    const char *paths[4] = {detected_path, "mass0:/boot.log", "mass:/boot.log", "boot.log"};
-
-    // Once a path works, prefer it on later reports. If it disappears, fall
-    // back to probing again instead of permanently disabling logging.
-    if (selected_path >= 0) {
-        FILE *file = fopen(paths[selected_path], created[selected_path] ? "a" : "w");
-        if (file) {
-            created[selected_path] = true;
-            fputs(line, file);
-            fflush(file);
-            fclose(file);
-            return;
-        }
-        selected_path = -1;
-    }
-
-    for (int i = 0; i < 4; i++) {
-        FILE *file = fopen(paths[i], created[i] ? "a" : "w");
-        if (!file) {
-            continue;
-        }
-        created[i] = true;
-        selected_path = i;
-        fputs(line, file);
-        fflush(file);
-        fclose(file);
-        return;
-    }
-}
-
-// Real-hardware crash diagnostic. USB/BDM file I/O is intentionally kept at
-// the previously-stable ~2 second cadence. A 500ms version repeatedly froze
-// real hardware before the first log line, so sub-second state is shown on the
-// normal viewport instead of adding more synchronous mass-storage traffic.
+// Keep the timing accumulators because they are useful for profiling in an
+// attached debugger, but never persist them from the live game loop. rs2_log()
+// itself writes boot.log on PS2, and the old reporter then opened/wrote the same
+// file a second time via ps2_runtime_log_line(). The 500 ms experiment made that
+// synchronous USB/BDM traffic freeze real hardware almost immediately; this
+// build removes the periodic storage I/O completely so the logger cannot be the
+// thing we are diagnosing.
 typedef struct {
     int64_t frame_ms;
     int64_t update_ms;
@@ -74,56 +35,19 @@ typedef struct {
     int64_t window_start;
 } PerfAccum;
 static PerfAccum _Perf = {0};
-// Self-measurement: rs2_log() does vprintf()+fflush(stdout) per call (platform.c), and the report
-// below used to be 15 lines in one call - if PCSX2's console has real per-line cost (GUI repaint,
-// or fflush itself being expensive over however PS2 stdout is actually wired up), that cost happens
-// BETWEEN perf windows, invisible to every timer inside them - it would look exactly like the
-// bursty "fast then frozen" pattern being reported, and would explain why fixing recv() batching
-// changed nothing (if the real cost was never in recv() at all). Can't time a print during its own
-// call, so this stores the duration and reports it deferred by one window instead.
-static int64_t _last_log_ms = 0;
 
-static void perf_report_if_due(Client *c) {
+static void perf_reset_if_due(void) {
     int64_t now = rs2_now();
     if (_Perf.window_start == 0) {
         _Perf.window_start = now;
         return;
     }
-    int64_t elapsed = now - _Perf.window_start;
-    if (elapsed < 2000 || _Perf.frame_count == 0) {
+    if (now - _Perf.window_start < 2000 || _Perf.frame_count == 0) {
         return;
     }
-    double fps = _Perf.frame_count * 1000.0 / (double)elapsed;
-    int64_t log_t0 = rs2_now();
-    char report[768];
-    snprintf(report, sizeof(report),
-             "PERF fps=%.1f frame=%.1f update=%.1f netwait=%.1f netcall=%.1f pkt=%.1f npcpos=%.1f getplr=%.1f plr=%.1f npc=%.1f chat=%.1f mrgl=%.1f draw=%.1f gs=%.1f ramKB=%d arenaKB=%d/%d lastlogms=%d cycle=%d last=%d,%d,%d cur=%d psize=%d players=%d npcs=%d out=%d idle=%d scene=%d waves=%d hb=%d\n",
-             fps,
-             (double)_Perf.frame_ms / _Perf.frame_count,
-             (double)_Perf.update_ms / _Perf.frame_count,
-             (double)clientstream_net_wait_ms() / _Perf.frame_count,
-             (double)clientstream_net_call_ms() / _Perf.frame_count,
-             (double)client_tick_packets_ms() / _Perf.frame_count,
-             (double)client_tick_getnpcpos_ms() / _Perf.frame_count,
-             (double)client_tick_getplayer_ms() / _Perf.frame_count,
-             (double)client_tick_players_ms() / _Perf.frame_count,
-             (double)client_tick_npcs_ms() / _Perf.frame_count,
-             (double)client_tick_chats_ms() / _Perf.frame_count,
-             (double)client_tick_mergelocs_ms() / _Perf.frame_count,
-             (double)_Perf.draw_ms / _Perf.frame_count,
-             (double)_Perf.gs_upload_ms / _Perf.frame_count,
-             mallinfo().fordblks / 1024,
-             bump_allocator_used() / 1024, bump_allocator_capacity() / 1024,
-             (int)_last_log_ms,
-             c->scene_cycle,
-             c->last_packet_type0, c->last_packet_type1, c->last_packet_type2,
-             c->packet_type, c->packet_size,
-             c->player_count, c->npc_count,
-             c->out ? c->out->pos : -1,
-             c->idle_net_cycles, c->scene_state, c->wave_count, c->heartbeatTimer);
-    rs2_log("%s", report);
-    ps2_runtime_log_line(report);
-    _last_log_ms = rs2_now() - log_t0;
+
+    // Reset the same counters the old report consumed, but do no printf,
+    // fopen/fwrite/fflush/fclose, or other I/O here.
     clientstream_net_wait_reset();
     clientstream_net_call_reset();
     client_tick_phase_reset();
@@ -132,23 +56,45 @@ static void perf_report_if_due(Client *c) {
 }
 
 static void ps2_draw_live_packet_state(Client *c) {
-    if (!c || !c->ingame || !c->area_viewport || !c->font_plain11) {
+    if (!c || !c->ingame || !c->area_viewport || !c->font_bold12) {
         return;
     }
 
-    // This is deliberately just a software-pixmap annotation. It does NOT call
-    // platform_update_surface() and performs no file I/O, avoiding the two
-    // diagnostic mechanisms that have already produced false hardware hangs.
-    char status[160];
-    snprintf(status, sizeof(status),
-             "PKT %d,%d,%d C%d/%d P%d N%d O%d I%d H%d S%d",
+    // The plain 1x line was unreadable from a real CRT photo. Render the compact
+    // state into a small scratch strip in the existing software viewport, then
+    // copy it 2x with nearest-neighbour scaling. No extra GS present and no file
+    // I/O: the normal platform_update_surface() below presents it once per frame.
+    const int source_x = 4;
+    const int source_y = 2;
+    const int source_w = 180;
+    const int source_h = 18;
+    const int dest_x = 4;
+    const int dest_y = 290;
+
+    char status[96];
+    snprintf(status, sizeof(status), "L%d/%d/%d P%d N%d S%d",
              c->last_packet_type0, c->last_packet_type1, c->last_packet_type2,
-             c->packet_type, c->packet_size,
-             c->player_count, c->npc_count,
-             c->out ? c->out->pos : -1,
-             c->idle_net_cycles, c->heartbeatTimer, c->scene_state);
+             c->player_count, c->npc_count, c->scene_state);
+
     pixmap_bind(c->area_viewport);
-    drawString(c->font_plain11, 5, 325, status, YELLOW);
+    pix2d_fill_rect(source_x, source_y, BLACK, source_w, source_h);
+    drawString(c->font_bold12, source_x + 2, source_y + 13, status, YELLOW);
+
+    int *pixels = c->area_viewport->pixels;
+    for (int y = 0; y < source_h; y++) {
+        const int *src = pixels + (source_y + y) * 512 + source_x;
+        int *dst0 = pixels + (dest_y + y * 2) * 512 + dest_x;
+        int *dst1 = dst0 + 512;
+        for (int x = 0; x < source_w; x++) {
+            const int pixel = src[x];
+            const int dx = x * 2;
+            dst0[dx] = pixel;
+            dst0[dx + 1] = pixel;
+            dst1[dx] = pixel;
+            dst1[dx + 1] = pixel;
+        }
+    }
+
     pixmap_draw(c->area_viewport, 4, 4);
 }
 #endif
@@ -310,7 +256,7 @@ void gameshell_run(Client *c) {
         _Perf.gs_upload_ms += gs_t3 - draw_t2;
         _Perf.frame_ms += gs_t3 - frame_t0;
         _Perf.frame_count++;
-        perf_report_if_due(c);
+        perf_reset_if_due();
 #endif
     }
     if (c->shell->state == -1) {
@@ -320,7 +266,7 @@ void gameshell_run(Client *c) {
 
 void gameshell_destroy(Client *c) {
     c->shell->state = -1;
-    // rs2_sleep(5000); // NOTE really this long?
+    // rs2_sleep(5000); // NOTE: original
     // gameshell_shutdown(c);
 }
 
@@ -434,18 +380,14 @@ void key_released(GameShell *shell, int code, int ch) {
         // ALT
         ch = 7;
     } else if (code == 8) {
-        // BACKSPACE
         ch = 8;
     } else if (code == 127) {
-        // DELETE
         ch = 8;
     } else if (code == 9) {
         ch = 9;
     } else if (code == 10) {
-        // ENTER
         ch = 10;
-    } else if (code == 13) { // needed for windows?
-        // ENTER
+    } else if (code == 13) {
         ch = 13;
 #ifdef __EMSCRIPTEN__
     } else if (code >= 112 && code <= 123) {
