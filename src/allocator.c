@@ -45,19 +45,16 @@ int bump_allocator_capacity(void) {
 
 bool bump_allocator_init(int capacity) {
 #ifdef __PS2__
-    // The zero-Ground scene build proved that normal-heap headroom, not terrain residency, is the
-    // immediate world-entry constraint: reducing the requested 6 MiB arena to 5 MiB let hardware
-    // enter Lumbridge, but libc then sat at only ~50-60 KiB free and failed around T2857. That means
-    // the synchronous build/live scene is retaining substantially more normal-heap memory than the
-    // temporary World arrays alone account for.
-    //
-    // For this one-variable hardware test reserve 4 MiB instead. That returns another full MiB to
-    // libc while leaving the exact zero-Ground scene path unchanged. If the post-load H/D/G floor
-    // rises by roughly that amount and runtime becomes stable, memory partitioning is confirmed as
-    // the immediate failure mechanism. We can then move scene-owned allocations into the arena and
-    // choose its production capacity from measured high-water instead of keeping this clamp blindly.
+    // The synchronous zero-Ground build is stable with a 4 MiB scene arena, but the first real
+    // persistent terrain tile leaves libc at only ~20-50 KiB free. A 4x4 terrain patch then fails
+    // before/during world entry. The arena telemetry is still far below its reservation, so for this
+    // one-variable hardware test trade another 1 MiB of unused arena reservation back to the normal
+    // EE heap while keeping the proven one-tile terrain configuration unchanged. If H/D/G rises by
+    // roughly 1 MiB and the tile remains stable, the next test can retry 4x4 with this partition.
+    // Longer term, persistent terrain allocations should be made scene-owned instead of competing
+    // with the tiny libc heap, but first keep the hardware bisection to one memory variable at a time.
     if (capacity == (6 << 20)) {
-        capacity = 4 << 20;
+        capacity = 3 << 20;
     }
 #endif
 #ifdef __3DS__
