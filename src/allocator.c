@@ -45,18 +45,19 @@ int bump_allocator_capacity(void) {
 
 bool bump_allocator_init(int capacity) {
 #ifdef __PS2__
-    // The client currently requests a 6 MiB scene arena before login. Real-hardware endurance after
-    // the player-cache ownership fixes leaves only ~380-420 KiB in libc's normal heap, while
-    // client_build_scene() immediately constructs a temporary World whose decode/blend arrays alone
-    // require about 440 KiB (plus a 100 KiB bzip scratch buffer). That explains why merely enabling
-    // the zero-Ground scene build can freeze before world entry even though terrain residency is zero.
+    // The zero-Ground scene build proved that normal-heap headroom, not terrain residency, is the
+    // immediate world-entry constraint: reducing the requested 6 MiB arena to 5 MiB let hardware
+    // enter Lumbridge, but libc then sat at only ~50-60 KiB free and failed around T2857. That means
+    // the synchronous build/live scene is retaining substantially more normal-heap memory than the
+    // temporary World arrays alone account for.
     //
-    // For this hardware test, reserve 5 MiB instead. This returns a full MiB to libc without changing
-    // any scene-build code or terrain residency, letting us test the normal-heap-starvation hypothesis
-    // directly. If confirmed, the production fix should move the temporary World/scratch allocations
-    // into the scene arena, then re-evaluate the final arena size from measured terrain high-water.
+    // For this one-variable hardware test reserve 4 MiB instead. That returns another full MiB to
+    // libc while leaving the exact zero-Ground scene path unchanged. If the post-load H/D/G floor
+    // rises by roughly that amount and runtime becomes stable, memory partitioning is confirmed as
+    // the immediate failure mechanism. We can then move scene-owned allocations into the arena and
+    // choose its production capacity from measured high-water instead of keeping this clamp blindly.
     if (capacity == (6 << 20)) {
-        capacity = 5 << 20;
+        capacity = 4 << 20;
     }
 #endif
 #ifdef __3DS__
