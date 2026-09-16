@@ -109,9 +109,13 @@ void npctype_unpack(Jagfile *config) {
     _NpcType.instances = calloc(_NpcType.count, sizeof(NpcType *));
     _NpcType.invalid = npctype_new();
 #ifdef __PS2__
-    // These entries are persistent across live frames, so they cannot live in the
-    // scene bump arena. Keep a bounded heap-backed working set on the 32 MiB PS2.
-    _NpcType.modelCache = lrucache_new(16);
+    // Persistent NPC meshes must remain heap-backed (the arena-lifetime fix), but the previous
+    // 16-entry working set can consume nearly all remaining EE heap once a busy area has exposed
+    // enough distinct NPC types. Hardware has now frozen with only ~50 KiB free, and the earlier
+    // deferred-scene build also eventually died after a longer residency. Keep four hot NPC types;
+    // ownership-aware eviction above immediately reclaims older meshes instead of letting the
+    // persistent cache grow until there is no headroom for per-frame clones.
+    _NpcType.modelCache = lrucache_new(4);
 #else
     _NpcType.modelCache = lrucache_new(30);
 #endif
