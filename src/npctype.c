@@ -317,8 +317,24 @@ Model *npctype_get_sequencedmodel(NpcType *npc, int primaryTransformId, int seco
         }
 
 #ifdef __PS2__
+        // These raw label arrays belong to this heap-backed cache model. Creating the
+        // animation lookup tables replaces them with label_vertices/label_faces and
+        // intentionally NULLs the raw pointers, so retain/free the old owners here
+        // instead of leaking them on every NPC cache miss/eviction cycle.
+        int *raw_vertex_labels = model->vertex_labels;
+        int *raw_face_labels = model->face_labels;
         model_create_label_references(model, false);
+        free(raw_vertex_labels);
+        free(raw_face_labels);
+
+        // apply_lighting() similarly discards face_colors once an untextured model has
+        // been fully lit. model_free() cannot reclaim an array after that pointer has
+        // been cleared, so release it exactly when lighting consumed it.
+        int *raw_face_colors = model->face_colors;
         model_calculate_normals(model, npc->ambient + 64, npc->contrast + 850, -30, -50, -30, true, false);
+        if (!model->face_colors) {
+            free(raw_face_colors);
+        }
         npctype_cache_model_ps2(npc->index, model);
 #else
         model_create_label_references(model, true);
