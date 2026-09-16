@@ -103,6 +103,12 @@ void tileoverlay_free(TileOverlay *overlay) {
 }
 
 TileOverlay *tileoverlay_new(int tileX, int shape, int southeastColor2, int southeastY, int northeastColor1, int rotation, int southwestColor1, int northwestY, int foregroundRgb, int southwestColor2, int textureId, int northwestColor2, int backgroundRgb, int northeastY, int northeastColor2, int northwestColor1, int southwestY, int tileZ, int southeastColor1) {
+    // Terrain overlays are optional render data. Reject malformed cache data before indexing the
+    // static shape tables, and never expose a partially constructed overlay after allocation failure.
+    if (shape < 0 || shape >= 13) {
+        return NULL;
+    }
+
     TileOverlay *overlay = tileoverlay_persistent_calloc(1, sizeof(TileOverlay));
     if (!overlay) {
         return NULL;
@@ -133,7 +139,8 @@ TileOverlay *tileoverlay_new(int tileX, int shape, int southeastColor2, int sout
     if (!overlay->vertexX || !overlay->vertexY || !overlay->vertexZ || !primaryColors || !secondaryColors) {
         free(primaryColors);
         free(secondaryColors);
-        return overlay;
+        tileoverlay_free(overlay);
+        return NULL;
     }
 
     int sceneX = tileX * ONE;
@@ -283,7 +290,8 @@ TileOverlay *tileoverlay_new(int tileX, int shape, int southeastColor2, int sout
         (textureId != -1 && !overlay->triangleTextureIds)) {
         free(primaryColors);
         free(secondaryColors);
-        return overlay;
+        tileoverlay_free(overlay);
+        return NULL;
     }
 
     int index = 0;
