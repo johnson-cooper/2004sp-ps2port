@@ -1,5 +1,6 @@
 #include <stdlib.h>
 
+#include "allocator.h"
 #include "tileoverlay.h"
 
 TileOverlayData _TileOverlay = {0};
@@ -68,7 +69,25 @@ int SHAPE_PATHS_SIZES[] = {
     24  // TRAPEZIUM_SHAPE
 };
 
+static void *tileoverlay_persistent_calloc(size_t count, size_t size) {
+#ifdef __PS2__
+    // TileOverlay and its geometry arrays live exactly as long as the materialized scene terrain.
+    // Keep them out of the tiny libc heap; bump_allocator_reset() reclaims the whole generation.
+    return rs2_calloc(true, count, size);
+#else
+    return calloc(count, size);
+#endif
+}
+
 void tileoverlay_free(TileOverlay *overlay) {
+    if (!overlay) {
+        return;
+    }
+#ifdef __PS2__
+    // All persistent TileOverlay storage is scene-arena owned on PS2. Individual free() calls would
+    // hand bump-arena pointers to libc and corrupt the heap; the scene reset reclaims these together.
+    return;
+#else
     free(overlay->vertexX);
     free(overlay->vertexY);
     free(overlay->vertexZ);
@@ -80,10 +99,14 @@ void tileoverlay_free(TileOverlay *overlay) {
     free(overlay->triangleVertexC);
     free(overlay->triangleTextureIds);
     free(overlay);
+#endif
 }
 
 TileOverlay *tileoverlay_new(int tileX, int shape, int southeastColor2, int southeastY, int northeastColor1, int rotation, int southwestColor1, int northwestY, int foregroundRgb, int southwestColor2, int textureId, int northwestColor2, int backgroundRgb, int northeastY, int northeastColor2, int northwestColor1, int southwestY, int tileZ, int southeastColor1) {
-    TileOverlay *overlay = calloc(1, sizeof(TileOverlay));
+    TileOverlay *overlay = tileoverlay_persistent_calloc(1, sizeof(TileOverlay));
+    if (!overlay) {
+        return NULL;
+    }
     overlay->flat = true;
 
     if (southwestY != southeastY || southwestY != northeastY || southwestY != northwestY) {
@@ -102,11 +125,16 @@ TileOverlay *tileoverlay_new(int tileX, int shape, int southeastColor2, int sout
 
     int *points = SHAPE_POINTS[shape];
     overlay->vertexCount = SHAPE_POINTS_SIZES[shape];
-    overlay->vertexX = calloc(overlay->vertexCount, sizeof(int));
-    overlay->vertexY = calloc(overlay->vertexCount, sizeof(int));
-    overlay->vertexZ = calloc(overlay->vertexCount, sizeof(int));
+    overlay->vertexX = tileoverlay_persistent_calloc(overlay->vertexCount, sizeof(int));
+    overlay->vertexY = tileoverlay_persistent_calloc(overlay->vertexCount, sizeof(int));
+    overlay->vertexZ = tileoverlay_persistent_calloc(overlay->vertexCount, sizeof(int));
     int *primaryColors = calloc(overlay->vertexCount, sizeof(int));
     int *secondaryColors = calloc(overlay->vertexCount, sizeof(int));
+    if (!overlay->vertexX || !overlay->vertexY || !overlay->vertexZ || !primaryColors || !secondaryColors) {
+        free(primaryColors);
+        free(secondaryColors);
+        return overlay;
+    }
 
     int sceneX = tileX * ONE;
     int sceneZ = tileZ * ONE;
@@ -239,15 +267,23 @@ TileOverlay *tileoverlay_new(int tileX, int shape, int southeastColor2, int sout
 
     int *paths = SHAPE_PATHS[shape];
     overlay->triangleCount = SHAPE_PATHS_SIZES[shape] / 4;
-    overlay->triangleVertexA = calloc(overlay->triangleCount, sizeof(int));
-    overlay->triangleVertexB = calloc(overlay->triangleCount, sizeof(int));
-    overlay->triangleVertexC = calloc(overlay->triangleCount, sizeof(int));
-    overlay->triangleColorA = calloc(overlay->triangleCount, sizeof(int));
-    overlay->triangleColorB = calloc(overlay->triangleCount, sizeof(int));
-    overlay->triangleColorC = calloc(overlay->triangleCount, sizeof(int));
+    overlay->triangleVertexA = tileoverlay_persistent_calloc(overlay->triangleCount, sizeof(int));
+    overlay->triangleVertexB = tileoverlay_persistent_calloc(overlay->triangleCount, sizeof(int));
+    overlay->triangleVertexC = tileoverlay_persistent_calloc(overlay->triangleCount, sizeof(int));
+    overlay->triangleColorA = tileoverlay_persistent_calloc(overlay->triangleCount, sizeof(int));
+    overlay->triangleColorB = tileoverlay_persistent_calloc(overlay->triangleCount, sizeof(int));
+    overlay->triangleColorC = tileoverlay_persistent_calloc(overlay->triangleCount, sizeof(int));
 
     if (textureId != -1) {
-        overlay->triangleTextureIds = calloc(overlay->triangleCount, sizeof(int));
+        overlay->triangleTextureIds = tileoverlay_persistent_calloc(overlay->triangleCount, sizeof(int));
+    }
+
+    if (!overlay->triangleVertexA || !overlay->triangleVertexB || !overlay->triangleVertexC ||
+        !overlay->triangleColorA || !overlay->triangleColorB || !overlay->triangleColorC ||
+        (textureId != -1 && !overlay->triangleTextureIds)) {
+        free(primaryColors);
+        free(secondaryColors);
+        return overlay;
     }
 
     int index = 0;
