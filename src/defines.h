@@ -75,9 +75,9 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// One persistent center tile is proven to load and render on hardware with the 4 MiB arena layout.
-// Grow only to a 2x2 center patch now; the previous 4x4 jump failed during world entry. This keeps the
-// allocation layout fixed and measures the terrain-residency threshold independently.
+// Keep the exact 2x2 materialized terrain working set that reproduced the hardware crash. This test
+// changes only whether its underlay/overlay triangles enter the software rasterizer, allowing us to
+// decide whether a VU1/GS terrain path targets the actual failing subsystem or merely hides a heap bug.
 #define PS2_TERRAIN_MIN_TILE 51
 #define PS2_TERRAIN_MAX_TILE 53
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
@@ -93,11 +93,12 @@
 // The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
 #define PS2_SIMPLE_UI 1
-// No terrain texture sampling/cache churn: preserve map heights, overlays and lighting using colour.
+// Keep the terrain resident but skip only its underlay/overlay rasterization. world3d_draw_tile()
+// deliberately continues the player/NPC/item/wall/entity pass in this mode, making it a clean test
+// of the EE software terrain rasterizer before we invest in the VU1 Path1 implementation.
 #define PS2_UNTEXTURED_TERRAIN 1
-#define PS2_FLAT_TERRAIN 0
-// Keep synchronous scene/land construction enabled. Static locations and the minimap remain disabled;
-// this hardware test changes only persistent terrain residency from one tile to a 2x2 center patch.
+#define PS2_FLAT_TERRAIN 1
+// Keep synchronous scene/land construction enabled. Static locations and the minimap remain disabled.
 #define PS2_DEFER_SCENE_REBUILD 0
 #define PS2_NULL_SCENE_REBUILD 0
 // Keep the minimum gameplay UI; software 3D interface models remain blocked.
@@ -198,12 +199,12 @@
 #define LIGHTRED 0xff9040 // 16748608
 #define DARKRED 0x800000  // 8388608
 #define DARKBLUE 0x80     // 128
-#define ORANGE1 0xffb000  // 16756736
-#define ORANGE2 0xff7000  // 16740352
-#define ORANGE3 0xff3000  // 16724736
-#define GREEN1 0xc0ff00   // 12648192
-#define GREEN2 0x80ff00   // 8453888
-#define GREEN3 0x40ff00   // 4259584
+#define ORANGE1 0xffb000      // 16756736
+#define ORANGE2 0xff7000      // 16740352
+#define ORANGE3 0xff3000      // 16724736
+#define GREEN1 0xc0ff00       // 12648192
+#define GREEN2 0x80ff00       // 8453888
+#define GREEN3 0x40ff00       // 4259584
 
 // other
 #define PROGRESS_RED 0x8c1111              // 9179409
