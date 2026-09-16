@@ -61,12 +61,12 @@ void lrucache_free(LruCache *cache) {
 
 DoublyLinkable *lrucache_get(LruCache *cache, int64_t key) {
 #ifdef __PS2__
-    // objtype.c is the only 50-entry LRU user. Its cached interface/ground-item models are built
-    // with use_allocator=true, so the model and its arrays live in the resettable scene bump arena.
-    // Keeping those pointers in a process-lifetime LRU can hand a later OBJ_ADD/icon request a model
-    // whose arena storage has already been reset/reused. For this hardware bisection, leave the
-    // constructor/allocation layout completely unchanged but make that one cache non-resident.
-    // Callers still build and receive the model normally; only cross-call reuse is disabled.
+    // Hardware test: objtype.c is the only 50-entry LRU user. client_clear_caches() already clears
+    // this cache before bump_allocator_reset(), so cross-scene stale arena pointers are not the
+    // remaining question. Keep writes/evictions/history maintenance fully active, but force reads
+    // to miss. This preserves the same model-build frequency as the previous stable test while
+    // separating "reusing a cached object Model" from "touching the LRU/hash data structures".
+    // If this stays stable, lookup/reuse is implicated; if it regresses, put/eviction bookkeeping is.
     if (cache && cache->capacity == 50) {
         return NULL;
     }
@@ -88,15 +88,6 @@ DoublyLinkable *lrucache_get(LruCache *cache, int64_t key) {
 }
 
 void lrucache_put(LruCache *cache, int64_t key, DoublyLinkable *value) {
-#ifdef __PS2__
-    // Pair with the 50-entry get() bypass above. The arena-backed model remains owned by the current
-    // scene/caller and is reclaimed by the arena reset; do not publish its pointer into a longer-lived
-    // cache. This intentionally changes no allocation made by lrucache_new(), which matters because
-    // real-hardware world entry has proven sensitive to startup heap layout.
-    if (cache && cache->capacity == 50) {
-        return;
-    }
-#endif
     if (cache->available == 0) {
         DoublyLinkable *node = doublylinklist_pop(cache->history);
         linkable_unlink(&node->link);
