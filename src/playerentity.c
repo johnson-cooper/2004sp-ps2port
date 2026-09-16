@@ -14,6 +14,12 @@
 // meshes, so they are intentionally removed. Player animation and full face submission are restored;
 // renderer safety belongs in model_draw2(), not in player-specific geometry destruction.
 #ifdef __PS2__
+// Include the declaration before installing the call-site rewrite below. playerentity_impl.inc
+// reaches model.h through its normal header graph; if the function-like macro is already active at
+// that point it rewrites the declaration itself into invalid C. model.h is #pragma once, so this
+// early include makes the later transitive include a no-op while calls inside the implementation
+// still get rewritten to use the normal heap.
+#include "model.h"
 #define model_create_label_references(model, use_allocator) model_create_label_references((model), false)
 #endif
 
