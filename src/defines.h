@@ -95,15 +95,11 @@
 // No terrain texture sampling/cache churn: preserve map heights, overlays and lighting using colour.
 #define PS2_UNTEXTURED_TERRAIN 1
 #define PS2_FLAT_TERRAIN 0
-// Keep the synchronous terrain build disabled for this isolation series. The previous hardware run
-// reached the live game with ~1.15 MiB heap free, proving terrain construction is a major memory
-// consumer but not the only crash source.
+// Keep the synchronous terrain build disabled for one more isolation step. With dynamic entities now
+// stable, restore REBUILD_NORMAL relocation and live zone OBJ/LOC mutations first so scene mutation
+// can be validated independently before the bounded terrain build is switched back on.
 #define PS2_DEFER_SCENE_REBUILD 1
-// Complete the isolation by suppressing REBUILD_NORMAL's residual 104x104 relocation and all live
-// zone OBJ/LOC mutations against an intentionally unbuilt scene. Networking, PLAYER_INFO/NPC_INFO,
-// entity simulation/rendering and UI remain live. If this stabilises, the remaining runtime crash is
-// in zone/scene mutation; if it still crashes, focus next on entity packet bounds/model rendering.
-#define PS2_NULL_SCENE_REBUILD 1
+#define PS2_NULL_SCENE_REBUILD 0
 // Keep the minimum gameplay UI; software 3D interface models remain blocked.
 #define PS2_NULL_UI 0
 #define PS2_SAFE_INTERFACE 1
@@ -264,7 +260,7 @@
 #define BODY_RECOLOR_YELLOW 10145
 #define BODY_RECOLOR_PURPLE 58654
 #define BODY_RECOLOR_ORANGE 5027
-#define BODY_RECOLOR_ROSE 1457
+#define BODY_RECOLOR_ROSE 1341
 #define BODY_RECOLOR_LIME 16565
 #define BODY_RECOLOR_CYAN 34991
 #define BODY_RECOLOR_EMERALD 25486
