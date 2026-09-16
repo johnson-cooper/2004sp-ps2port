@@ -75,10 +75,10 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// A 4x4 materialised patch regressed world entry while the otherwise-identical zero-Ground build was
-// stable. Reduce this to exactly one scene-center tile so hardware can distinguish aggregate terrain
-// heap pressure from a bug triggered by the first persistent Ground/underlay/overlay itself.
-#define PS2_TERRAIN_MIN_TILE 52
+// One persistent center tile is proven to load and render on hardware with the 4 MiB arena layout.
+// Grow only to a 2x2 center patch now; the previous 4x4 jump failed during world entry. This keeps the
+// allocation layout fixed and measures the terrain-residency threshold independently.
+#define PS2_TERRAIN_MIN_TILE 51
 #define PS2_TERRAIN_MAX_TILE 53
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
@@ -97,7 +97,7 @@
 #define PS2_UNTEXTURED_TERRAIN 1
 #define PS2_FLAT_TERRAIN 0
 // Keep synchronous scene/land construction enabled. Static locations and the minimap remain disabled;
-// this hardware test changes only persistent terrain residency from 4x4 down to one center tile.
+// this hardware test changes only persistent terrain residency from one tile to a 2x2 center patch.
 #define PS2_DEFER_SCENE_REBUILD 0
 #define PS2_NULL_SCENE_REBUILD 0
 // Keep the minimum gameplay UI; software 3D interface models remain blocked.
