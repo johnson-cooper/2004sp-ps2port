@@ -156,12 +156,13 @@ bool model_point_within_triangle(int x, int y, int ya, int yb, int yc, int xa, i
 void model_draw_simple(Model *m, int pitch, int yaw, int roll, int eyePitch, int eyeX, int eyeY, int eyeZ);
 void model_draw(Model *m, int yaw, int sinCameraPitch, int cosCameraPitch, int sinCameraYaw, int cosCameraYaw, int sceneX, int sceneY, int sceneZ, int key);
 // model.c's renderer-safety wrapper temporarily macro-renames model_draw2 while it includes the
-// historical implementation. Preserve a declaration for the public bounded entry point as well as
-// restoring the rename for the implementation that follows. Other translation units take the
-// ordinary declaration below with no macro involved.
+// historical implementation. Preserve declarations for both the public bounded entry point and the
+// renamed historical helper before model_draw_simple_unchecked calls it. Other translation units
+// take the ordinary declaration below with no macro involved.
 #ifdef model_draw2
 #undef model_draw2
 void model_draw2(Model *m, bool projected, bool hasInput, int bitset);
+void model_draw2_unchecked(Model *m, bool projected, bool hasInput, int bitset);
 #define model_draw2 model_draw2_unchecked
 #else
 void model_draw2(Model *m, bool projected, bool hasInput, int bitset);
