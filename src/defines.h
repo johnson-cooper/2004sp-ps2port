@@ -75,11 +75,12 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// Expand only terrain residency from the T10k-proven 2x2 rasterized baseline. Object-model reuse
-// stays disabled, the 4 MiB scene arena is unchanged, and static locations/minimap remain off. This
-// makes a 4x4 failure a terrain residency/memory-pressure signal rather than a cache-lifetime change.
+// Hardware proved 2x2 can render past T10k while 4x4 dies during S1 even after Ground/underlay/
+// overlay storage moved into the scene arena. Test a 3x3 window before changing renderer architecture:
+// if this works, the failure is a capacity threshold; if it fails, the newly included border tile data
+// is a stronger suspect than raw triangle count. Keep all other PS2 memory/cache behavior unchanged.
 #define PS2_TERRAIN_MIN_TILE 50
-#define PS2_TERRAIN_MAX_TILE 54
+#define PS2_TERRAIN_MAX_TILE 53
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
