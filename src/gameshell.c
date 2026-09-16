@@ -13,9 +13,53 @@
 
 #ifdef __PS2__
 #include <malloc.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "allocator.h"
 #include "clientstream.h"
+
+// platform/ps2.c detects the actual mounted cache device after the BDM USB stack
+// is live. The old global rs2_log file sink can disable itself during earlier
+// network bring-up, before USB exists, so runtime PERF telemetry uses this
+// already-resolved prefix directly instead of depending on that early sink.
+const char *ps2_cache_prefix(void);
+
+static void ps2_runtime_log_line(const char *line) {
+    static int selected_path = -1;
+    static bool created[4] = {false, false, false, false};
+
+    char detected_path[64];
+    snprintf(detected_path, sizeof(detected_path), "%sboot.log", ps2_cache_prefix());
+    const char *paths[4] = {detected_path, "mass0:/boot.log", "mass:/boot.log", "boot.log"};
+
+    // Once a path works, prefer it on later reports. If it disappears, fall
+    // back to probing again instead of permanently disabling logging.
+    if (selected_path >= 0) {
+        FILE *file = fopen(paths[selected_path], created[selected_path] ? "a" : "w");
+        if (file) {
+            created[selected_path] = true;
+            fputs(line, file);
+            fflush(file);
+            fclose(file);
+            return;
+        }
+        selected_path = -1;
+    }
+
+    for (int i = 0; i < 4; i++) {
+        FILE *file = fopen(paths[i], created[i] ? "a" : "w");
+        if (!file) {
+            continue;
+        }
+        created[i] = true;
+        selected_path = i;
+        fputs(line, file);
+        fflush(file);
+        fclose(file);
+        return;
+    }
+}
 
 // PHASE 4 audit instrumentation: per-phase frame timing, aggregated and printed every ~2s rather
 // than every frame (rs2_log isn't free - see platform.c's fflush-per-call note - and per-frame
@@ -52,7 +96,9 @@ static void perf_report_if_due(void) {
     }
     double fps = _Perf.frame_count * 1000.0 / (double)elapsed;
     int64_t log_t0 = rs2_now();
-    rs2_log("PERF fps=%.1f frame=%.1f update=%.1f netwait=%.1f netcall=%.1f pkt=%.1f npcpos=%.1f getplr=%.1f plr=%.1f npc=%.1f chat=%.1f mrgl=%.1f draw=%.1f gs=%.1f ramKB=%d arenaKB=%d/%d lastlogms=%d\n",
+    char report[512];
+    snprintf(report, sizeof(report),
+             "PERF fps=%.1f frame=%.1f update=%.1f netwait=%.1f netcall=%.1f pkt=%.1f npcpos=%.1f getplr=%.1f plr=%.1f npc=%.1f chat=%.1f mrgl=%.1f draw=%.1f gs=%.1f ramKB=%d arenaKB=%d/%d lastlogms=%d\n",
              fps,
              (double)_Perf.frame_ms / _Perf.frame_count,
              (double)_Perf.update_ms / _Perf.frame_count,
@@ -70,6 +116,8 @@ static void perf_report_if_due(void) {
              mallinfo().fordblks / 1024,
              bump_allocator_used() / 1024, bump_allocator_capacity() / 1024,
              (int)_last_log_ms);
+    rs2_log("%s", report);
+    ps2_runtime_log_line(report);
     _last_log_ms = rs2_now() - log_t0;
     clientstream_net_wait_reset();
     clientstream_net_call_reset();
@@ -287,7 +335,7 @@ void key_pressed(GameShell *shell, int code, int ch) {
         ch = 6; // (custom)
     } else if (code == 18) {
         // ALT
-        ch = 7; // (custom)
+        ch = 7;
     } else if (code == 8) {
         // BACKSPACE
         ch = 8;
@@ -357,7 +405,7 @@ void key_released(GameShell *shell, int code, int ch) {
         ch = 6; // (custom)
     } else if (code == 18) {
         // ALT
-        ch = 7; // (custom)
+        ch = 7;
     } else if (code == 8) {
         // BACKSPACE
         ch = 8;
