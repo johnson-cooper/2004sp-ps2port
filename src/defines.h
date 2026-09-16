@@ -75,11 +75,11 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// Keep the exact 2x2 materialized terrain working set that reproduced the hardware crash. With the
-// object-model cache now forced to miss without intrusive LRU links, restore only terrain triangle
-// rasterization to determine whether that old 2x2 failure was independent of the cache lifetime bug.
-#define PS2_TERRAIN_MIN_TILE 51
-#define PS2_TERRAIN_MAX_TILE 53
+// Expand only terrain residency from the T10k-proven 2x2 rasterized baseline. Object-model reuse
+// stays disabled, the 4 MiB scene arena is unchanged, and static locations/minimap remain off. This
+// makes a 4x4 failure a terrain residency/memory-pressure signal rather than a cache-lifetime change.
+#define PS2_TERRAIN_MIN_TILE 50
+#define PS2_TERRAIN_MAX_TILE 54
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
@@ -93,7 +93,7 @@
 // The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
 #define PS2_SIMPLE_UI 1
-// Terrain remains untextured on PS2, but this test restores the actual underlay/overlay triangles.
+// Terrain remains untextured on PS2, with normal underlay/overlay rasterization enabled.
 #define PS2_UNTEXTURED_TERRAIN 1
 #define PS2_FLAT_TERRAIN 0
 // Keep synchronous scene/land construction enabled. Static locations and the minimap remain disabled.
