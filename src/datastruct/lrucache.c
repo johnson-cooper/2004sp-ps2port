@@ -6,6 +6,45 @@
 #include "hashtable.h"
 #include "lrucache.h"
 
+#ifdef __PS2__
+// objtype.c is the sole 50-entry LRU user in the current client. Its model values can be allocated
+// from the resettable scene bump arena, so linking the Model's embedded DoublyLinkable into the
+// process-lifetime generic LRU is unsafe on real hardware. Hardware bisection showed that even with
+// reads forced to miss and eviction disabled, merely publishing these arena-backed Models into the
+// intrusive hash/history structures regresses world entry, while bypassing both get and put survives.
+//
+// Keep the exact lrucache_new(50) allocation/layout (important for the tight PS2 startup heap), but
+// give that one cache a fixed BSS-backed sidecar. It stores only {key,pointer} pairs, never touches the
+// Model's embedded link, allocates no heap memory, and is cleared by the same lrucache_clear() call
+// that already runs before the scene bump arena is reset. Thus cached pointers never cross an arena
+// generation. Fifty linear comparisons are negligible relative to building and lighting an item model.
+#define PS2_OBJ_SCENE_CACHE_CAPACITY 50
+
+typedef struct {
+    int64_t key;
+    DoublyLinkable *value;
+    bool valid;
+} Ps2ObjSceneCacheEntry;
+
+static LruCache *ps2_obj_scene_cache_owner = NULL;
+static Ps2ObjSceneCacheEntry ps2_obj_scene_cache[PS2_OBJ_SCENE_CACHE_CAPACITY];
+static int ps2_obj_scene_cache_replace = 0;
+
+static void ps2_obj_scene_cache_reset(LruCache *owner) {
+    for (int i = 0; i < PS2_OBJ_SCENE_CACHE_CAPACITY; i++) {
+        ps2_obj_scene_cache[i].key = 0;
+        ps2_obj_scene_cache[i].value = NULL;
+        ps2_obj_scene_cache[i].valid = false;
+    }
+    ps2_obj_scene_cache_replace = 0;
+    ps2_obj_scene_cache_owner = owner;
+}
+
+static bool ps2_is_obj_model_cache(LruCache *cache) {
+    return cache && cache->capacity == PS2_OBJ_SCENE_CACHE_CAPACITY;
+}
+#endif
+
 LruCache *lrucache_new(int size) {
 #ifdef __PS2__
     // playerentity.c is the sole 12-entry LRU user in the current client. Preserve the exact
@@ -54,6 +93,11 @@ LruCache *lrucache_new(int size) {
 }
 
 void lrucache_free(LruCache *cache) {
+#ifdef __PS2__
+    if (ps2_obj_scene_cache_owner == cache) {
+        ps2_obj_scene_cache_reset(NULL);
+    }
+#endif
     hashtable_free(cache->hashtable);
     doublylinklist_free(cache->history);
     free(cache);
@@ -61,10 +105,15 @@ void lrucache_free(LruCache *cache) {
 
 DoublyLinkable *lrucache_get(LruCache *cache, int64_t key) {
 #ifdef __PS2__
-    // objtype.c is the only 50-entry LRU user. Keep reads forced to miss so object Models are built
-    // at the same frequency as the T10226 stable hardware run. This test is about the write side:
-    // insertion/history are allowed until the cache reaches its original 50-entry capacity.
-    if (cache && cache->capacity == 50) {
+    if (ps2_is_obj_model_cache(cache)) {
+        if (ps2_obj_scene_cache_owner != cache) {
+            ps2_obj_scene_cache_reset(cache);
+        }
+        for (int i = 0; i < PS2_OBJ_SCENE_CACHE_CAPACITY; i++) {
+            if (ps2_obj_scene_cache[i].valid && ps2_obj_scene_cache[i].key == key) {
+                return ps2_obj_scene_cache[i].value;
+            }
+        }
         return NULL;
     }
 #endif
@@ -86,13 +135,36 @@ DoublyLinkable *lrucache_get(LruCache *cache, int64_t key) {
 
 void lrucache_put(LruCache *cache, int64_t key, DoublyLinkable *value) {
 #ifdef __PS2__
-    // The preceding hardware test regressed to a title/world-entry freeze when the 50-entry object
-    // cache's full put/eviction path was restored, while bypassing both get and put survived past
-    // T10226. Split that path without changing constructor/startup allocation layout: allow the first
-    // 50 insertions/history links, but once the cache is full skip further puts instead of popping and
-    // unlinking an arena-backed Model. If this is stable, eviction/replacement is the dangerous side;
-    // if it still regresses, merely linking these object Models into the cache is sufficient.
-    if (cache && cache->capacity == 50 && cache->available == 0) {
+    if (ps2_is_obj_model_cache(cache)) {
+        if (ps2_obj_scene_cache_owner != cache) {
+            ps2_obj_scene_cache_reset(cache);
+        }
+
+        // Replace an existing key in place first. This keeps repeated requests for one object from
+        // consuming slots even when the caller rebuilt the Model for some reason.
+        for (int i = 0; i < PS2_OBJ_SCENE_CACHE_CAPACITY; i++) {
+            if (ps2_obj_scene_cache[i].valid && ps2_obj_scene_cache[i].key == key) {
+                ps2_obj_scene_cache[i].value = value;
+                return;
+            }
+        }
+
+        // Prefer an unused slot. If one scene genuinely references more than 50 distinct object
+        // models, use deterministic round-robin replacement; replacing the sidecar pointer is safe
+        // because no intrusive links are attached to either Model.
+        for (int i = 0; i < PS2_OBJ_SCENE_CACHE_CAPACITY; i++) {
+            if (!ps2_obj_scene_cache[i].valid) {
+                ps2_obj_scene_cache[i].key = key;
+                ps2_obj_scene_cache[i].value = value;
+                ps2_obj_scene_cache[i].valid = true;
+                return;
+            }
+        }
+
+        int slot = ps2_obj_scene_cache_replace++ % PS2_OBJ_SCENE_CACHE_CAPACITY;
+        ps2_obj_scene_cache[slot].key = key;
+        ps2_obj_scene_cache[slot].value = value;
+        ps2_obj_scene_cache[slot].valid = true;
         return;
     }
 #endif
@@ -108,6 +180,13 @@ void lrucache_put(LruCache *cache, int64_t key, DoublyLinkable *value) {
 }
 
 void lrucache_clear(LruCache *cache) {
+#ifdef __PS2__
+    if (ps2_is_obj_model_cache(cache)) {
+        ps2_obj_scene_cache_reset(cache);
+        cache->available = cache->capacity;
+        return;
+    }
+#endif
     while (true) {
         DoublyLinkable *node = doublylinklist_pop(cache->history);
         if (!node) {
