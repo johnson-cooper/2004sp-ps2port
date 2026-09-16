@@ -31,6 +31,17 @@
 #undef model_create_label_references
 
 Model *playerentity_draw(PlayerEntity *entity, int loopCycle) {
+    // Hardware test after the bounded-face run survived from roughly T394 to T1324 but still
+    // eventually froze.  The remaining hot player path allocates a temporary Model plus three
+    // vertex arrays in model_share_alpha() every draw, transforms it, then frees it after drawing.
+    // At ~1 MiB free heap that repeated malloc/free churn can fragment the EE heap, and
+    // model_share_alpha() currently has no allocation-failure checks.  PlayerEntity::lowmem already
+    // has the exact ownership semantics we want for this isolation: draw the long-lived cached
+    // appearance model directly, skip per-frame animation/spotanim copies, and do not free it in
+    // entity_draw_free(). Keep the renderer face bound from the preceding test so this changes only
+    // the temporary-player allocation path for the next real-hardware run.
+    entity->lowmem = true;
+
     Model *model = playerentity_draw_impl(entity, loopCycle);
     if (!model) {
         return NULL;
