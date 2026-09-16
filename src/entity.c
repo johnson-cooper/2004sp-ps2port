@@ -10,6 +10,10 @@
 #include "projectileentity.h"
 #include "spotanimentity.h"
 
+#ifdef __PS2__
+extern NpcTypeData _NpcType;
+#endif
+
 Entity *entity_new(const char *type) {
     Entity *entity = calloc(1, sizeof(Entity));
     entity->link = (Linkable){0};
@@ -46,22 +50,27 @@ void entity_draw_free(Entity *entity, Model *m, int loopCycle) {
 
 Model *entity_draw(Entity *entity, int loopCycle) {
 #ifdef __PS2__
-    // Real-hardware bisection: NPC-only rendering froze, and building/freeing
-    // the complete animated NPC model without rasterizing it also froze. Narrow
-    // that path further: exercise only the NPC type cache plus the ordinary
-    // model_share_alpha() per-frame clone/free path. Do not apply primary or
-    // secondary sequence transforms, do not compose an NPC spotanim, and do not
-    // return the model to world3d for rasterization.
+    // Real-hardware bisection: even the animation-free NPC base-model path
+    // freezes when it creates and frees model_share_alpha() clones every frame.
+    // Separate that heap churn from the persistent NPC type/model cache here.
     //
-    // Freeze => base NPC cache/model clone/free ownership is sufficient.
-    // Stable => the remaining fault is in NPC sequence transforms or NPC
-    // spot-animation composition, not the base-model cache/clone path.
+    // A cache hit now performs only lrucache_get(): no temporary Model, vertex
+    // arrays, alpha copy, transforms, spotanim composition, or rasterization.
+    // On a miss, build the cache entry once through the normal helper, then free
+    // that one returned temporary clone. This preserves normal cache population.
+    //
+    // Stable => repeated model_share_alpha()/free churn is sufficient to explain
+    // the freeze. Freeze => the persistent NPC base cache/LRU/build path itself
+    // remains sufficient and should be moved off the resettable scene arena.
     if (strcmp(entity->type, "npc") == 0) {
         NpcEntity *npc = (NpcEntity *)entity;
-        if (npc->type) {
-            Model *model = npctype_get_sequencedmodel(npc->type, -1, -1, NULL);
-            if (model) {
-                model_free_share_alpha(model, !npc->type->animHasAlpha);
+        if (npc->type && npc->type->models_count > 0) {
+            Model *cached = (Model *)lrucache_get(_NpcType.modelCache, npc->type->index);
+            if (!cached) {
+                Model *tmp = npctype_get_sequencedmodel(npc->type, -1, -1, NULL);
+                if (tmp) {
+                    model_free_share_alpha(tmp, !npc->type->animHasAlpha);
+                }
             }
         }
     }
