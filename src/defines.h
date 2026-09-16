@@ -72,15 +72,13 @@
 // users and avoids the extra permanent pool that made the dense Lumbridge rebuild regress.
 #define PIX3D_POOL_COUNT 1
 #define DISABLE_FLAMES
-// The 3x3 resident terrain build now reaches Lumbridge, but the live scene still eventually dies
-// with libc free space hovering around ~50 KiB.  Reduce only the *draw/submission* radius here from
-// 4 to 3 so fewer dynamic player/NPC temporary Locations, Ground scaffolds and model submissions are
-// active each rendered frame. Full networking/simulation and decoded collision/height state remain
-// unchanged; this is a runtime PS2 working-set test, not another terrain-residency change.
-#define PS2_RENDER_RADIUS 3
-// Hardware proved 2x2 can render past T10k, while the optimized 3x3 terrain build reaches the world
-// and runs for thousands of ticks before eventually freezing. Keep 3x3 residency fixed while we
-// reduce the live per-frame working set; do not reintroduce 4x4 until the runtime memory floor is sane.
+// Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
+// state remains available outside it for movement, pathing and server-side gameplay.
+#define PS2_RENDER_RADIUS 4
+// Hardware proved 2x2 can render past T10k while 4x4 dies during S1 even after Ground/underlay/
+// overlay storage moved into the scene arena. Test a 3x3 window before changing renderer architecture:
+// if this works, the failure is a capacity threshold; if it fails, the newly included border tile data
+// is a stronger suspect than raw triangle count. Keep all other PS2 memory/cache behavior unchanged.
 #define PS2_TERRAIN_MIN_TILE 50
 #define PS2_TERRAIN_MAX_TILE 53
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
