@@ -5,6 +5,19 @@
 #include "jagfile.h"
 #include "packet.h"
 
+#ifdef __PS2__
+// Character-only hardware isolation is stable at ~1 MiB free but still eventually freezes. The
+// software renderer currently writes each visible face into a fixed per-depth bucket without a
+// capacity guard, while the PS2 profile only reserves 80 entries per bucket. Dense assembled player
+// meshes can therefore overwrite adjacent heap memory even when mallinfo() still reports plenty of
+// free RAM. Keep MODEL_MAX_DEPTH unchanged (lowering it previously regressed world entry) and widen
+// only the per-depth bucket for this diagnostic. If this removes/extends the character-only crash,
+// the production fix is explicit bounded insertion/culling in model_draw2(), not keeping this RAM
+// trade forever once terrain is restored.
+#undef MODEL_DEPTH_FACE_COUNT
+#define MODEL_DEPTH_FACE_COUNT 256
+#endif
+
 typedef struct {
     int vertex_count;
     int face_count;
