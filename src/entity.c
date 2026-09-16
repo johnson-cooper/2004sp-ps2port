@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "datastruct/hashtable.h"
 #include "datastruct/linkable.h"
 #include "entity.h"
 #include "npcentity.h"
@@ -10,10 +9,6 @@
 #include "playerentity.h"
 #include "projectileentity.h"
 #include "spotanimentity.h"
-
-#ifdef __PS2__
-extern NpcTypeData _NpcType;
-#endif
 
 Entity *entity_new(const char *type) {
     Entity *entity = calloc(1, sizeof(Entity));
@@ -51,32 +46,17 @@ void entity_draw_free(Entity *entity, Model *m, int loopCycle) {
 
 Model *entity_draw(Entity *entity, int loopCycle) {
 #ifdef __PS2__
-    // Real-hardware bisection: the NPC cache-only diagnostic still freezes even
-    // with no temporary clone, animation, spotanim, or rasterization. Its only
-    // per-frame cache operation was lrucache_get(), which also unlinks/relinks the
-    // cached Model in the LRU history list on every visible NPC lookup.
+    // The cache-only hardware test became stable after persistent NPC base models
+    // were moved off the resettable scene arena and onto the normal heap. Validate
+    // that lifetime fix against the complete NPC path now: sequence transforms,
+    // per-frame working copy, optional spotanim composition, world3d submission,
+    // rasterization, and the matching entity_draw_free() ownership path all run.
     //
-    // Preserve the exact same persistent hash table/cache entries, but make cache
-    // hits read-only with hashtable_get(). A miss still goes through the normal
-    // NPC helper once so cache population remains unchanged.
-    //
-    // Stable => repeated NPC LRU history mutation is the trigger.
-    // Freeze => even read-only access to the persistent NPC cache is sufficient,
-    // strongly implicating cache-entry lifetime/arena ownership rather than LRU
-    // recency bookkeeping.
+    // Keep players/projectiles/standalone spotanims suppressed for this one test so
+    // a stable 10-minute Lumbridge run can be attributed to the NPC cache fix.
     if (strcmp(entity->type, "npc") == 0) {
-        NpcEntity *npc = (NpcEntity *)entity;
-        if (npc->type && npc->type->models_count > 0) {
-            Model *cached = (Model *)hashtable_get(_NpcType.modelCache->hashtable, npc->type->index);
-            if (!cached) {
-                Model *tmp = npctype_get_sequencedmodel(npc->type, -1, -1, NULL);
-                if (tmp) {
-                    model_free_share_alpha(tmp, !npc->type->animHasAlpha);
-                }
-            }
-        }
+        return npcentity_draw((NpcEntity *)entity, loopCycle);
     }
-    (void)loopCycle;
     return NULL;
 #else
     Model *model = NULL;
