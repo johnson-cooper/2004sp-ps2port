@@ -61,9 +61,10 @@ static void ps2_runtime_log_line(const char *line) {
     }
 }
 
-// Temporary real-hardware crash diagnostic. Report every ~500ms so the last
-// successfully persisted line is close to an abrupt freeze, while still
-// keeping synchronous USB writes far away from the per-tick hot path.
+// Real-hardware crash diagnostic. USB/BDM file I/O is intentionally kept at
+// the previously-stable ~2 second cadence. A 500ms version repeatedly froze
+// real hardware before the first log line, so sub-second state is shown on the
+// normal viewport instead of adding more synchronous mass-storage traffic.
 typedef struct {
     int64_t frame_ms;
     int64_t update_ms;
@@ -89,7 +90,7 @@ static void perf_report_if_due(Client *c) {
         return;
     }
     int64_t elapsed = now - _Perf.window_start;
-    if (elapsed < 500 || _Perf.frame_count == 0) {
+    if (elapsed < 2000 || _Perf.frame_count == 0) {
         return;
     }
     double fps = _Perf.frame_count * 1000.0 / (double)elapsed;
@@ -128,6 +129,27 @@ static void perf_report_if_due(Client *c) {
     client_tick_phase_reset();
     _Perf = (PerfAccum){0};
     _Perf.window_start = now;
+}
+
+static void ps2_draw_live_packet_state(Client *c) {
+    if (!c || !c->ingame || !c->area_viewport || !c->font_plain11) {
+        return;
+    }
+
+    // This is deliberately just a software-pixmap annotation. It does NOT call
+    // platform_update_surface() and performs no file I/O, avoiding the two
+    // diagnostic mechanisms that have already produced false hardware hangs.
+    char status[160];
+    snprintf(status, sizeof(status),
+             "PKT %d,%d,%d C%d/%d P%d N%d O%d I%d H%d S%d",
+             c->last_packet_type0, c->last_packet_type1, c->last_packet_type2,
+             c->packet_type, c->packet_size,
+             c->player_count, c->npc_count,
+             c->out ? c->out->pos : -1,
+             c->idle_net_cycles, c->heartbeatTimer, c->scene_state);
+    pixmap_bind(c->area_viewport);
+    drawString(c->font_plain11, 5, 325, status, YELLOW);
+    pixmap_draw(c->area_viewport, 4, 4);
 }
 #endif
 
@@ -262,6 +284,7 @@ void gameshell_run(Client *c) {
         bool ps2_render_frame = (++ps2_render_counter % PS2_RENDER_DIVISOR) == 0;
         if (ps2_render_frame) {
             client_draw(c);
+            ps2_draw_live_packet_state(c);
             ps2_heap_after_draw_kb = mallinfo().fordblks / 1024;
             gameshell_update_touch(c); // update mouse after client_draw_scene to fix model picking
         }
