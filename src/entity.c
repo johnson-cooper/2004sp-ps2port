@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "datastruct/hashtable.h"
 #include "datastruct/linkable.h"
 #include "entity.h"
 #include "npcentity.h"
@@ -50,22 +51,23 @@ void entity_draw_free(Entity *entity, Model *m, int loopCycle) {
 
 Model *entity_draw(Entity *entity, int loopCycle) {
 #ifdef __PS2__
-    // Real-hardware bisection: even the animation-free NPC base-model path
-    // freezes when it creates and frees model_share_alpha() clones every frame.
-    // Separate that heap churn from the persistent NPC type/model cache here.
+    // Real-hardware bisection: the NPC cache-only diagnostic still freezes even
+    // with no temporary clone, animation, spotanim, or rasterization. Its only
+    // per-frame cache operation was lrucache_get(), which also unlinks/relinks the
+    // cached Model in the LRU history list on every visible NPC lookup.
     //
-    // A cache hit now performs only lrucache_get(): no temporary Model, vertex
-    // arrays, alpha copy, transforms, spotanim composition, or rasterization.
-    // On a miss, build the cache entry once through the normal helper, then free
-    // that one returned temporary clone. This preserves normal cache population.
+    // Preserve the exact same persistent hash table/cache entries, but make cache
+    // hits read-only with hashtable_get(). A miss still goes through the normal
+    // NPC helper once so cache population remains unchanged.
     //
-    // Stable => repeated model_share_alpha()/free churn is sufficient to explain
-    // the freeze. Freeze => the persistent NPC base cache/LRU/build path itself
-    // remains sufficient and should be moved off the resettable scene arena.
+    // Stable => repeated NPC LRU history mutation is the trigger.
+    // Freeze => even read-only access to the persistent NPC cache is sufficient,
+    // strongly implicating cache-entry lifetime/arena ownership rather than LRU
+    // recency bookkeeping.
     if (strcmp(entity->type, "npc") == 0) {
         NpcEntity *npc = (NpcEntity *)entity;
         if (npc->type && npc->type->models_count > 0) {
-            Model *cached = (Model *)lrucache_get(_NpcType.modelCache, npc->type->index);
+            Model *cached = (Model *)hashtable_get(_NpcType.modelCache->hashtable, npc->type->index);
             if (!cached) {
                 Model *tmp = npctype_get_sequencedmodel(npc->type, -1, -1, NULL);
                 if (tmp) {
