@@ -75,10 +75,11 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// Keep only a 24x24 materialised terrain working set around scene centre. The complete 104x104
-// decoded height/collision arrays remain resident; this only bounds Ground/underlay/overlay graphics.
-#define PS2_TERRAIN_MIN_TILE 36
-#define PS2_TERRAIN_MAX_TILE 60
+// Hardware retest: allow the synchronous land/height scene-build path to run, but materialise zero
+// Ground tiles. With min==max the existing [min,max) terrain gate is empty. This separates map/land
+// decode and world_build overhead from actual persistent terrain residency before growing a window.
+#define PS2_TERRAIN_MIN_TILE 52
+#define PS2_TERRAIN_MAX_TILE 52
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
@@ -95,10 +96,9 @@
 // No terrain texture sampling/cache churn: preserve map heights, overlays and lighting using colour.
 #define PS2_UNTEXTURED_TERRAIN 1
 #define PS2_FLAT_TERRAIN 0
-// Keep the synchronous terrain build disabled for one more isolation step. With dynamic entities now
-// stable, restore REBUILD_NORMAL relocation and live zone OBJ/LOC mutations first so scene mutation
-// can be validated independently before the bounded terrain build is switched back on.
-#define PS2_DEFER_SCENE_REBUILD 1
+// Re-enable synchronous scene/land construction for the zero-Ground hardware test above. Static
+// locations and the minimap remain disabled, and no persistent terrain tiles can be materialised.
+#define PS2_DEFER_SCENE_REBUILD 0
 #define PS2_NULL_SCENE_REBUILD 0
 // Keep the minimum gameplay UI; software 3D interface models remain blocked.
 #define PS2_NULL_UI 0
@@ -208,7 +208,7 @@
 // other
 #define PROGRESS_RED 0x8c1111              // 9179409
 #define OPTIONS_MENU 0x5d5447              // 6116423
-#define SCROLLBAR_TRACK 0x23201b           // 2301979
+#define SCROLLBAR_TRACK 0x23201b            // 2301979
 #define SCROLLBAR_GRIP_FOREGROUND 0x4d4233 // 5063219
 #define SCROLLBAR_GRIP_HIGHLIGHT 0x766654  // 7759444
 #define SCROLLBAR_GRIP_LOWLIGHT 0x332d25   // 3353893
