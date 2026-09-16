@@ -10,6 +10,30 @@
 
 extern SeqTypeData _SeqType;
 
+static bool pathingentity_seq_valid(int seq_id) {
+    return seq_id >= 0 && seq_id < _SeqType.count && _SeqType.instances && _SeqType.instances[seq_id];
+}
+
+static void pathingentity_cancel_interruptible_primary_seq(PathingEntity *entity) {
+    if (entity->primarySeqId == -1) {
+        return;
+    }
+
+    // PLAYER_INFO/NPC_INFO movement reaches this path directly from the live
+    // packet stream. Client3 historically trusted primarySeqId here and indexed
+    // _SeqType.instances[] before checking that the rev254 id exists locally.
+    // A stale/unsupported id must be discarded rather than turning an ordinary
+    // movement update into an EE out-of-bounds read.
+    if (!pathingentity_seq_valid(entity->primarySeqId)) {
+        entity->primarySeqId = -1;
+        return;
+    }
+
+    if (_SeqType.instances[entity->primarySeqId]->priority <= 1) {
+        entity->primarySeqId = -1;
+    }
+}
+
 PathingEntity pathingentity_new(const char *type) {
     PathingEntity entity = {0};
     entity.entity = (Entity){(Linkable){0}, type},
@@ -38,9 +62,7 @@ PathingEntity pathingentity_new(const char *type) {
 }
 
 void pathingentity_teleport(PathingEntity *entity, bool jump, int x, int z) {
-    if (entity->primarySeqId != -1 && _SeqType.instances[entity->primarySeqId]->priority <= 1) {
-        entity->primarySeqId = -1;
-    }
+    pathingentity_cancel_interruptible_primary_seq(entity);
 
     if (!jump) {
         int dx = x - entity->pathTileX[0];
@@ -98,9 +120,7 @@ void pathingentity_movealongroute(PathingEntity *entity, bool running, int direc
         nextZ--;
     }
 
-    if (entity->primarySeqId != -1 && _SeqType.instances[entity->primarySeqId]->priority <= 1) {
-        entity->primarySeqId = -1;
-    }
+    pathingentity_cancel_interruptible_primary_seq(entity);
 
     if (entity->pathLength < 9) {
         entity->pathLength++;
