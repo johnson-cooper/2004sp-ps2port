@@ -12,14 +12,15 @@ diff --git a/src/world3d.c b/src/world3d.c
  #endif
  
  SceneData _World3D = {.lowMemory = true};
-@@ -65,7 +70,16 @@ void world3d_init_global(void) {
+@@ -65,7 +70,17 @@ void world3d_init_global(void) {
      _World3D.clickTileX = -1;
      _World3D.clickTileZ = -1;
      _World3D.drawTileQueue = linklist_new();
 +#ifdef __PS2__
 +    for (int x = 0; x < 51; x++) {
 +        for (int z = 0; z < 51; z++) {
-+            ps2_visibility_map[x][z] = true;
++            ps2_visibility_map[x][z] =
++                abs(x - 25) <= PS2_RENDER_RADIUS && abs(z - 25) <= PS2_RENDER_RADIUS;
 +        }
 +    }
 +    _World3D.visibilityMatrix = NULL;
@@ -30,14 +31,14 @@ diff --git a/src/world3d.c b/src/world3d.c
  }
  
  World3D *world3d_new(int (*levelHeightmaps)[104 + 1][104 + 1], int maxTileZ, int maxLevel, int maxTileX) {
-@@ -166,6 +180,15 @@ void world3d_init(int viewportWidth, int viewportHeight, int frustumStart, int f
+@@ -166,6 +181,15 @@ void world3d_init(int viewportWidth, int viewportHeight, int frustumStart, int f
      _World3D.viewportCenterX = viewportWidth / 2;
      _World3D.viewportCenterY = viewportHeight / 2;
  
 +#ifdef __PS2__
-+    // The PS2 uses the conservative all-visible 51x51 map above, then applies its
-+    // much tighter PS2_RENDER_RADIUS in world3d_draw().  Avoid both the permanent
-+    // ~650 KiB matrix and the ~790 KiB temporary 9x32x53x53 construction matrix.
++    // The PS2 map above conservatively marks the complete render-radius square
++    // visible. Avoid both the permanent ~650 KiB desktop matrix and the ~790 KiB
++    // temporary 9x32x53x53 construction matrix while retaining PS2 radius culling.
 +    (void)frustumStart;
 +    (void)frustumEnd;
 +    (void)pitchDistance;
@@ -47,7 +48,7 @@ diff --git a/src/world3d.c b/src/world3d.c
      bool (*matrix)[32][53][53] = malloc(9 * sizeof(*matrix));
      for (int pitch = 128; pitch <= 384; pitch += 32) {
          for (int yaw = 0; yaw < 2048; yaw += 64) {
-@@ -500,6 +523,21 @@ bool world3d_add_temporary2(World3D *world3d, int level, int x, int y, int z, i
+@@ -500,6 +524,21 @@ bool world3d_add_temporary2(World3D *world3d, int level, int x, int y, int z, i
  }
  
  bool world3d_add_loc2(World3D *world3d, int x, int z, int y, int level, int tileX, int tileZ, int tileSizeX, int tileSizeZ, Model *model, Entity *entity, int bitset, int8_t info, int yaw, bool temporary) {
@@ -67,7 +68,7 @@ diff --git a/src/world3d.c b/src/world3d.c
      if (!model && !entity) {
          return false;
      }
-@@ -550,6 +588,17 @@ bool world3d_add_loc2(World3D *world3d, int x, int z, int y, int level, int ti
+@@ -550,6 +589,17 @@ bool world3d_add_loc2(World3D *world3d, int x, int z, int y, int level, int ti
                  }
              }
              Ground *tile = world3d->levelTiles[level][tx][tz];
@@ -86,7 +87,7 @@ diff --git a/src/world3d.c b/src/world3d.c
              tile->locs[tile->locCount] = loc;
              tile->locSpan[tile->locCount] = spans;
              tile->locSpans |= spans;
-@@ -1149,7 +1198,11 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel
+@@ -1149,7 +1199,11 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel
      _World3D.sinEyeYaw = _Pix3D.sin_table[eyeYaw];
      _World3D.cosEyeYaw = _Pix3D.cos_table[eyeYaw];
  
@@ -98,7 +99,7 @@ diff --git a/src/world3d.c b/src/world3d.c
      _World3D.eyeX = eyeX;
      _World3D.eyeY = eyeY;
      _World3D.eyeZ = eyeZ;
-@@ -1640,6 +1693,9 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int
+@@ -1640,6 +1694,9 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int
                          }
                          Ground *other = tiles[x][z];
  
@@ -108,7 +109,7 @@ diff --git a/src/world3d.c b/src/world3d.c
                          if (!other->visible) {
                              if (other->checkLocSpans == 0) {
                                  continue;
-@@ -1720,6 +1776,9 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int
+@@ -1720,6 +1777,9 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int
                      for (int z = farthest->minSceneTileZ; z <= farthest->maxSceneTileZ; z++) {
                          Ground *occupied = tiles[x][z];
  
