@@ -75,11 +75,11 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// Hardware retest: allow the synchronous land/height scene-build path to run, but materialise zero
-// Ground tiles. With min==max the existing [min,max) terrain gate is empty. This separates map/land
-// decode and world_build overhead from actual persistent terrain residency before growing a window.
-#define PS2_TERRAIN_MIN_TILE 52
-#define PS2_TERRAIN_MAX_TILE 52
+// First real-terrain hardware test after the stable zero-Ground baseline: materialise only a 4x4
+// scene-center patch. Keep every other memory variable fixed so H/D/G and arena movement measure the
+// cost of persistent Ground/underlay/overlay residency rather than another subsystem changing too.
+#define PS2_TERRAIN_MIN_TILE 50
+#define PS2_TERRAIN_MAX_TILE 54
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
@@ -96,8 +96,8 @@
 // No terrain texture sampling/cache churn: preserve map heights, overlays and lighting using colour.
 #define PS2_UNTEXTURED_TERRAIN 1
 #define PS2_FLAT_TERRAIN 0
-// Re-enable synchronous scene/land construction for the zero-Ground hardware test above. Static
-// locations and the minimap remain disabled, and no persistent terrain tiles can be materialised.
+// Keep synchronous scene/land construction enabled for the bounded terrain-residency test. Static
+// locations and the minimap remain disabled so this commit changes only persistent terrain tiles.
 #define PS2_DEFER_SCENE_REBUILD 0
 #define PS2_NULL_SCENE_REBUILD 0
 // Keep the minimum gameplay UI; software 3D interface models remain blocked.
