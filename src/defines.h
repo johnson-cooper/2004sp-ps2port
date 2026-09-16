@@ -95,8 +95,12 @@
 // No terrain texture sampling/cache churn: preserve map heights, overlays and lighting using colour.
 #define PS2_UNTEXTURED_TERRAIN 1
 #define PS2_FLAT_TERRAIN 0
-// Real land decoding and bounded terrain construction are enabled.
-#define PS2_DEFER_SCENE_REBUILD 0
+// One hardware-isolation build after the socket-buffer corruption fix: skip the synchronous
+// landscape decode/world construction while leaving REBUILD_NORMAL coordinate relocation,
+// PLAYER_INFO/getPlayer(), networking and the live tick intact. If this consistently reaches the
+// live game, the remaining deterministic freeze is inside terrain/map construction; if it still
+// freezes on the loading screen, the fault is earlier in REBUILD relocation or PLAYER_INFO.
+#define PS2_DEFER_SCENE_REBUILD 1
 #define PS2_NULL_SCENE_REBUILD 0
 // Keep the minimum gameplay UI; software 3D interface models remain blocked.
 #define PS2_NULL_UI 0
