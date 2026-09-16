@@ -75,13 +75,10 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// First terrain-restoration isolation after the stable deferred-scene baseline: run the complete
-// map read + land/height decode + world_build bookkeeping, but materialise zero Ground tiles. The
-// x/z gate in world_build() is therefore always false (x >= 52 && x < 52). If hardware reaches the
-// live game, the failing part of the previous 24x24 rebuild is Ground/terrain residency rather than
-// map/land decode itself; if it still freezes, the problem is earlier in the synchronous build.
-#define PS2_TERRAIN_MIN_TILE 52
-#define PS2_TERRAIN_MAX_TILE 52
+// Keep only a 24x24 materialised terrain working set around scene centre. The complete 104x104
+// decoded height/collision arrays remain resident; this only bounds Ground/underlay/overlay graphics.
+#define PS2_TERRAIN_MIN_TILE 36
+#define PS2_TERRAIN_MAX_TILE 60
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
@@ -92,17 +89,16 @@
 // Static locations remain off while the gameplay-first loc streamer/filter is implemented. When
 // restored, examine-only decorative locs should not receive render/model residency on PS2.
 #define PS2_DEFER_STATIC_LOCATIONS 1
-// Permanent PS2 decision: the 512x512 minimap and map-function sprites cost roughly 1 MiB, which is
-// better reserved for terrain, models, region transitions and fragmentation headroom on a 32 MiB EE.
+// The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
 #define PS2_SIMPLE_UI 1
 // No terrain texture sampling/cache churn: preserve map heights, overlays and lighting using colour.
 #define PS2_UNTEXTURED_TERRAIN 1
 #define PS2_FLAT_TERRAIN 0
-// Re-enable the synchronous scene path only with the zero-Ground isolation above. This restores map
-// file reads, land/height decode and world_build bookkeeping without bringing terrain residency back
-// yet. Zone mutations already passed the previous real-hardware test.
-#define PS2_DEFER_SCENE_REBUILD 0
+// Keep the synchronous terrain build disabled for one more isolation step. With dynamic entities now
+// stable, restore REBUILD_NORMAL relocation and live zone OBJ/LOC mutations first so scene mutation
+// can be validated independently before the bounded terrain build is switched back on.
+#define PS2_DEFER_SCENE_REBUILD 1
 #define PS2_NULL_SCENE_REBUILD 0
 // Keep the minimum gameplay UI; software 3D interface models remain blocked.
 #define PS2_NULL_UI 0
@@ -212,7 +208,7 @@
 // other
 #define PROGRESS_RED 0x8c1111              // 9179409
 #define OPTIONS_MENU 0x5d5447              // 6116423
-#define SCROLLBAR_TRACK 0x23201b            // 2301979
+#define SCROLLBAR_TRACK 0x23201b           // 2301979
 #define SCROLLBAR_GRIP_FOREGROUND 0x4d4233 // 5063219
 #define SCROLLBAR_GRIP_HIGHLIGHT 0x766654  // 7759444
 #define SCROLLBAR_GRIP_LOWLIGHT 0x332d25   // 3353893
