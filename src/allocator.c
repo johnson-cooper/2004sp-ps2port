@@ -45,16 +45,12 @@ int bump_allocator_capacity(void) {
 
 bool bump_allocator_init(int capacity) {
 #ifdef __PS2__
-    // The synchronous zero-Ground build is stable with a 4 MiB scene arena, but the first real
-    // persistent terrain tile leaves libc at only ~20-50 KiB free. A 4x4 terrain patch then fails
-    // before/during world entry. The arena telemetry is still far below its reservation, so for this
-    // one-variable hardware test trade another 1 MiB of unused arena reservation back to the normal
-    // EE heap while keeping the proven one-tile terrain configuration unchanged. If H/D/G rises by
-    // roughly 1 MiB and the tile remains stable, the next test can retry 4x4 with this partition.
-    // Longer term, persistent terrain allocations should be made scene-owned instead of competing
-    // with the tiny libc heap, but first keep the hardware bisection to one memory variable at a time.
+    // Real-hardware partition baseline: 4 MiB is the smallest scene-arena reservation proven to
+    // preserve normal title/login/world-entry behaviour. A 3 MiB reservation regressed deterministically
+    // before/during world entry even with the exact same single terrain tile, so keep allocation layout
+    // at the proven 4 MiB split while terrain residency is increased independently.
     if (capacity == (6 << 20)) {
-        capacity = 3 << 20;
+        capacity = 4 << 20;
     }
 #endif
 #ifdef __3DS__
