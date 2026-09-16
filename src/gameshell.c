@@ -96,7 +96,7 @@ static void perf_report_if_due(Client *c) {
     int64_t log_t0 = rs2_now();
     char report[768];
     snprintf(report, sizeof(report),
-             "PERF fps=%.1f frame=%.1f update=%.1f netwait=%.1f netcall=%.1f pkt=%.1f npcpos=%.1f getplr=%.1f plr=%.1f npc=%.1f chat=%.1f mrgl=%.1f draw=%.1f gs=%.1f ramKB=%d arenaKB=%d/%d lastlogms=%d loop=%d last=%d,%d,%d cur=%d psize=%d players=%d npcs=%d out=%d idle=%d scene=%d waves=%d hb=%d\n",
+             "PERF fps=%.1f frame=%.1f update=%.1f netwait=%.1f netcall=%.1f pkt=%.1f npcpos=%.1f getplr=%.1f plr=%.1f npc=%.1f chat=%.1f mrgl=%.1f draw=%.1f gs=%.1f ramKB=%d arenaKB=%d/%d lastlogms=%d cycle=%d last=%d,%d,%d cur=%d psize=%d players=%d npcs=%d out=%d idle=%d scene=%d waves=%d hb=%d\n",
              fps,
              (double)_Perf.frame_ms / _Perf.frame_count,
              (double)_Perf.update_ms / _Perf.frame_count,
@@ -114,7 +114,7 @@ static void perf_report_if_due(Client *c) {
              mallinfo().fordblks / 1024,
              bump_allocator_used() / 1024, bump_allocator_capacity() / 1024,
              (int)_last_log_ms,
-             c->loop_cycle,
+             c->scene_cycle,
              c->last_packet_type0, c->last_packet_type1, c->last_packet_type2,
              c->packet_type, c->packet_size,
              c->player_count, c->npc_count,
