@@ -19,8 +19,30 @@
 // that point it rewrites the declaration itself into invalid C. model.h is #pragma once, so this
 // early include makes the later transitive include a no-op while calls inside the implementation
 // still get rewritten to use the normal heap.
+#include <stdlib.h>
 #include "model.h"
-#define model_create_label_references(model, use_allocator) model_create_label_references((model), false)
+
+static void ps2_player_create_label_references(Model *model, bool persistent_cache_model) {
+    // Only the cached appearance call originally passes true. Its Model and raw label arrays are
+    // heap-owned, and model_create_label_references() consumes those raw arrays by building the
+    // animation lookup tables and then setting vertex_labels/face_labels to NULL. If we do not free
+    // the original owners here, every appearance-cache miss permanently loses those allocations.
+    //
+    // Calls that originally pass false include temporary/shared spot-animation models. Their raw
+    // label pointers may be shared with another model, so they must retain the old behavior.
+    int *raw_vertex_labels = persistent_cache_model ? model->vertex_labels : NULL;
+    int *raw_face_labels = persistent_cache_model ? model->face_labels : NULL;
+
+    model_create_label_references(model, false);
+
+    if (persistent_cache_model) {
+        free(raw_vertex_labels);
+        free(raw_face_labels);
+    }
+}
+
+#define model_create_label_references(model, use_allocator) \
+    ps2_player_create_label_references((model), (use_allocator))
 #endif
 
 #include "playerentity_impl.inc"
