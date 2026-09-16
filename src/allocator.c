@@ -14,17 +14,16 @@
 // doesn't pull in the whole Client struct. See client.h's own declaration comment for the rationale.
 extern void ps2_report_oom(const char *msg);
 
-// The EE only has 32 MiB and the old PS2 bump allocator reserved its entire 6 MiB ceiling in one
-// calloc at startup.  That guaranteed scene space, but permanently hid every unused arena byte from
-// ordinary malloc users.  Real-hardware telemetry reached only a few dozen KiB of libc heap while
-// the arena still had unused capacity.  Commit the same logical arena in moderately-sized stable
-// blocks instead.  Blocks NEVER move while a scene is alive, so every raw Model/Location pointer
-// keeps exactly the same lifetime/semantics as the old contiguous bump arena.  All blocks are
-// returned to libc together at bump_allocator_reset(), which is already the scene/cache lifetime
-// boundary.  This is deliberately not a general reallocating/compacting allocator.
-#define PS2_BUMP_BLOCK_BYTES (256 * 1024)
-#define PS2_BUMP_GROW_ALIGN  (64 * 1024)
-#define PS2_BUMP_MAX_BLOCKS 32
+// The EE only has 32 MiB.  Keep the scene arena's established 6 MiB logical ceiling, but commit it
+// from libc only as the scene actually needs it.  Blocks never move while the allocator is alive,
+// so Model/Location pointers remain stable.  IMPORTANT: bump_allocator_reset() historically only
+// rewound the arena; it did NOT invalidate its backing storage.  Some world teardown paths reset the
+// arena immediately before world3d_reset() finishes walking old scene structures, so committed blocks
+// must remain valid across reset.  They are released only by bump_allocator_free()/re-init.
+#define PS2_BUMP_BLOCK_BYTES (128 * 1024)
+#define PS2_BUMP_GROW_ALIGN  (16 * 1024)
+#define PS2_BUMP_MIN_FALLBACK (32 * 1024)
+#define PS2_BUMP_MAX_BLOCKS 128
 
 typedef struct {
     int8_t *data;
@@ -41,8 +40,8 @@ typedef struct {
     int committed;
     int block_count;
     Ps2BumpBlock blocks[PS2_BUMP_MAX_BLOCKS];
-    // Diagnostic-only (see PHASE 7 audit notes): callers don't tag their allocations by subsystem,
-    // so a size histogram + running count is the cheapest way to see WHAT is filling the scene arena.
+    // Diagnostic-only: callers don't tag their allocations by subsystem, so a size histogram plus
+    // running count is the cheapest way to see what is filling the scene arena on real hardware.
     int alloc_count;
     int largest_alloc;
     int histogram[6]; // buckets: <=32, <=128, <=512, <=2048, <=8192, >8192 bytes
@@ -76,28 +75,57 @@ static void ps2_bump_release_blocks(void) {
     alloc.committed = 0;
 }
 
+static void ps2_bump_rewind_blocks(void) {
+    // Preserve every block address.  This matches the old contiguous allocator's reset semantics:
+    // old pointers remain address-valid until the teardown that follows reset has completed, while
+    // subsequent arena allocations may reuse the storage once the next scene starts building.
+    for (int i = 0; i < alloc.block_count; i++) {
+        alloc.blocks[i].used = 0;
+    }
+    alloc.used = 0;
+}
+
 static Ps2BumpBlock *ps2_bump_add_block(int minimum) {
-    if (alloc.block_count >= PS2_BUMP_MAX_BLOCKS) {
+    if (minimum <= 0 || alloc.block_count >= PS2_BUMP_MAX_BLOCKS) {
         return NULL;
     }
 
-    // Normal growth is 256 KiB.  Oversized single allocations get a block rounded to 64 KiB so
-    // they do not waste an entire extra 256 KiB step.  The final block may use the exact remaining
-    // logical arena budget.
+    int budget = alloc.capacity - alloc.committed;
+    if (budget < minimum) {
+        return NULL;
+    }
+
+    // 128 KiB is intentionally smaller than the first version's 256 KiB growth unit.  The PS2 heap
+    // gets fragmented by models, packets, UI, and scene structures during a region build; requiring
+    // a fresh contiguous quarter-megabyte late in loading is unnecessarily fragile.  Large single
+    // requests still get a dedicated block rounded to 16 KiB.
     int block_capacity = PS2_BUMP_BLOCK_BYTES;
     if (block_capacity < minimum) {
         block_capacity = (minimum + PS2_BUMP_GROW_ALIGN - 1) & ~(PS2_BUMP_GROW_ALIGN - 1);
     }
-
-    int budget = alloc.capacity - alloc.committed;
     if (block_capacity > budget) {
         block_capacity = budget;
     }
-    if (block_capacity < minimum || block_capacity <= 0) {
-        return NULL;
-    }
 
     int8_t *data = malloc(block_capacity);
+
+    // If normal growth cannot find a contiguous block, retry with the smallest useful allocation.
+    // This preserves demand growth under fragmentation instead of reporting an arena OOM merely
+    // because 128 KiB was unavailable as one run while a smaller block would have satisfied request.
+    if (!data && block_capacity > minimum) {
+        int fallback = (minimum + PS2_BUMP_GROW_ALIGN - 1) & ~(PS2_BUMP_GROW_ALIGN - 1);
+        if (fallback < PS2_BUMP_MIN_FALLBACK) {
+            fallback = PS2_BUMP_MIN_FALLBACK;
+        }
+        if (fallback > budget) {
+            fallback = budget;
+        }
+        if (fallback >= minimum && fallback < block_capacity) {
+            block_capacity = fallback;
+            data = malloc(block_capacity);
+        }
+    }
+
     if (!data) {
         return NULL;
     }
@@ -113,9 +141,8 @@ static Ps2BumpBlock *ps2_bump_add_block(int minimum) {
 
 bool bump_allocator_init(int capacity) {
 #ifdef __PS2__
-    // Demand-commit on PS2.  `capacity` is still a hard upper bound (currently 6 MiB), but zero of
-    // it is removed from the general heap until the first scene allocation actually needs it.
-    // This lets UI/network/transient game state use RAM that the scene has not committed yet.
+    // Demand-commit on PS2. `capacity` remains a hard upper bound (currently 6 MiB), but no scene
+    // memory is removed from the general heap until an arena allocation actually needs it.
     ps2_bump_release_blocks();
     alloc.data = NULL;
     alloc.capacity = capacity;
@@ -166,10 +193,9 @@ void bump_allocator_free(void) {
 }
 
 void bump_allocator_reset(void) {
-    // rs2_log("Allocator reset: clearing caches (size %d)", alloc.used);
 #ifdef __PS2__
-    // Log the completed cycle's peak usage BEFORE releasing it.  `committed` is important on PS2:
-    // it tells us how much of the 6 MiB ceiling was actually borrowed from the ordinary heap.
+    // Log the completed cycle's peak usage BEFORE rewinding it.  `committed` shows how much of the
+    // logical 6 MiB maximum has actually been borrowed from ordinary libc heap.
     if (alloc.alloc_count > 0) {
         rs2_log("Scene arena cycle complete: used=%d/%d committed=%d, alloc_count=%d, largest_alloc=%d, "
                 "histogram(<=32/<=128/<=512/<=2048/<=8192/>8192): %d %d %d %d %d %d\n",
@@ -178,36 +204,40 @@ void bump_allocator_reset(void) {
                 alloc.histogram[4], alloc.histogram[5]);
     }
 
-    // Scene/cache reset is the only point at which every bump-backed pointer is dead.  Returning all
-    // committed blocks here is therefore safe and makes the arena dynamic in BOTH directions: it can
-    // grow toward 6 MiB during a dense scene, then hand every byte back when that scene is discarded.
-    ps2_bump_release_blocks();
-    alloc.used = 0;
+    // Do NOT free blocks here.  The previous segmented implementation did that and changed a subtle
+    // but important lifetime property of the original allocator.  client_clear_caches() can invoke
+    // this reset before world3d_reset() has finished traversing the old scene.  Rewinding preserves
+    // pointer validity through teardown while still avoiding the old up-front 6 MiB reservation.
+    ps2_bump_rewind_blocks();
     alloc.alloc_count = 0;
     alloc.largest_alloc = 0;
     memset(alloc.histogram, 0, sizeof(alloc.histogram));
 #else
-    // The arena is monotonic and starts calloc-zeroed. Only bytes handed out by
-    // the previous scene can contain stale state; clearing the unused tail was
-    // a needless large write on every rebuild. rs2_calloc() still explicitly
-    // clears its own allocation, preserving its normal calloc contract.
+    // Only bytes handed out by the previous scene can contain stale state. rs2_calloc() explicitly
+    // clears its own allocation, preserving normal calloc semantics.
     memset(alloc.data, 0, alloc.used);
     alloc.used = 0;
 #endif
 }
 
 void *rs2_malloc(bool use_allocator, int size) {
-    // use_allocator = false;
     return use_allocator ? bump_alloc(size) : malloc(size);
 }
 
 void *rs2_calloc(bool use_allocator, int count, int size) {
-    // use_allocator = false;
     if (!use_allocator) {
         return calloc(count, size);
     }
-    // Explicitly preserve calloc semantics.  This is required for the PS2 segmented arena because
-    // newly malloc'd blocks are intentionally not zero-filled wholesale.
+
+    // Avoid integer overflow before handing a byte count to the arena.  Current callers are small,
+    // but failing explicitly is far safer than wrapping into an undersized allocation on the EE.
+    if (count <= 0 || size <= 0 || count > 0x7fffffff / size) {
+#ifdef __PS2__
+        ps2_report_oom("Invalid scene calloc size");
+#endif
+        return NULL;
+    }
+
     void *ptr = bump_alloc(count * size);
     if (ptr) {
         memset(ptr, 0, count * size);
@@ -228,8 +258,8 @@ static void *bump_alloc(int size) {
     int bucket = size <= 32 ? 0 : size <= 128 ? 1 : size <= 512 ? 2 : size <= 2048 ? 3 : size <= 8192 ? 4 : 5;
     alloc.histogram[bucket]++;
 
-    // Reuse any tail that still fits before committing another block.  This is still a monotonic
-    // allocator: an individual block's used pointer only moves forward until the whole scene resets.
+    // Search existing block tails before committing more heap.  This is still monotonic within one
+    // scene cycle; addresses never move and no individual allocation is reclaimed early.
     for (int i = alloc.block_count - 1; i >= 0; i--) {
         Ps2BumpBlock *block = &alloc.blocks[i];
         int aligned = (block->used + 3) & ~3;
@@ -249,11 +279,11 @@ static void *bump_alloc(int size) {
         return block->data;
     }
 
-    char oom_msg[128];
+    char oom_msg[160];
     snprintf(oom_msg, sizeof(oom_msg),
-             "Scene arena OOM: request=%d used=%d cap=%d committed=%d heapfree=%dKB count=%d",
+             "Scene arena OOM: request=%d used=%d cap=%d committed=%d heapfree=%dKB blocks=%d count=%d",
              size, alloc.used, alloc.capacity, alloc.committed,
-             mallinfo().fordblks / 1024, alloc.alloc_count);
+             mallinfo().fordblks / 1024, alloc.block_count, alloc.alloc_count);
     rs2_error("%s\n", oom_msg);
     ps2_report_oom(oom_msg);
     return NULL;
