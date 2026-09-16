@@ -46,21 +46,26 @@ void entity_draw_free(Entity *entity, Model *m, int loopCycle) {
 
 Model *entity_draw(Entity *entity, int loopCycle) {
 #ifdef __PS2__
-    // Real-hardware bisection: NPC-only rendering reproduced the Lumbridge
-    // freeze, while all-dynamic-disabled and player-only each survived 10+
-    // minutes in the same position. Exercise the complete NPC model build,
-    // animation, spotanim composition, and matching free path here, but return
-    // NULL so world3d never rasterizes the resulting mesh.
+    // Real-hardware bisection: NPC-only rendering froze, and building/freeing
+    // the complete animated NPC model without rasterizing it also froze. Narrow
+    // that path further: exercise only the NPC type cache plus the ordinary
+    // model_share_alpha() per-frame clone/free path. Do not apply primary or
+    // secondary sequence transforms, do not compose an NPC spotanim, and do not
+    // return the model to world3d for rasterization.
     //
-    // Freeze => fault is in NPC model build/animation/free/cache ownership.
-    // Stable => those paths are safe and the failure is in drawing an NPC model
-    // through world3d/model rasterization (or state consumed only by that draw).
+    // Freeze => base NPC cache/model clone/free ownership is sufficient.
+    // Stable => the remaining fault is in NPC sequence transforms or NPC
+    // spot-animation composition, not the base-model cache/clone path.
     if (strcmp(entity->type, "npc") == 0) {
-        Model *model = npcentity_draw((NpcEntity *)entity, loopCycle);
-        if (model) {
-            entity_draw_free(entity, model, loopCycle);
+        NpcEntity *npc = (NpcEntity *)entity;
+        if (npc->type) {
+            Model *model = npctype_get_sequencedmodel(npc->type, -1, -1, NULL);
+            if (model) {
+                model_free_share_alpha(model, !npc->type->animHasAlpha);
+            }
         }
     }
+    (void)loopCycle;
     return NULL;
 #else
     Model *model = NULL;
