@@ -8,13 +8,14 @@
 
 LruCache *lrucache_new(int size) {
 #ifdef __PS2__
-    // playerentity.c is the sole 12-entry LRU user in the current client. Those entries are
-    // complete assembled/lit player meshes backed by the normal EE heap (not the scene arena),
-    // and real-hardware traces show the live world repeatedly falling below 50 KiB free. Keep
-    // only three appearances resident on PS2. playerentity_cache_model() owns and frees evicted
-    // meshes, so reducing this capacity is safe and trades some rebuild work for substantial
-    // heap headroom. Other LRUs keep their existing capacities/ownership semantics.
-    if (size == 12) {
+    // playerentity.c is the sole 12-entry LRU user in the current client. Preserve the exact
+    // three-entry constructor/allocation shape that is proven to pass real-hardware world entry:
+    // in particular this keeps the same 16-bucket hashtable and startup heap layout. After those
+    // allocations are complete we expand only the logical residency below. A three-model working
+    // set thrashes as soon as the local player plus >=3 other appearances are visible, rebuilding
+    // heap-backed meshes over and over instead of reaching a steady state.
+    bool ps2_player_appearance_cache = size == 12;
+    if (ps2_player_appearance_cache) {
         size = 3;
     }
 #endif
@@ -38,6 +39,17 @@ LruCache *lrucache_new(int size) {
     cache->hashtable = hashtable_new(1024);
 #endif
     cache->history = doublylinklist_new();
+#ifdef __PS2__
+    if (ps2_player_appearance_cache) {
+        // Eight slots cover the local player plus the seven other players seen in the hardware
+        // Lumbridge traces. No extra allocation is performed here: the existing 16-bucket table
+        // comfortably handles eight linked entries. This tests whether the long-run heap collapse
+        // was caused by the old 3-entry cache continuously evicting/rebuilding nearby appearances,
+        // without perturbing the fragile pre-world allocation layout.
+        cache->capacity = 8;
+        cache->available = 8;
+    }
+#endif
     return cache;
 }
 
