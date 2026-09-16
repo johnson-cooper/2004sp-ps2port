@@ -135,10 +135,6 @@ void npctype_free_global(void) {
 
 NpcType *npctype_get(int id) {
     if (id < 0 || id >= _NpcType.count) {
-        // rev254 servers can reference npc type ids beyond what's in Client3's loaded npc.idx
-        // (offsets[] only has _NpcType.count entries) - indexing it out of bounds here set
-        // _NpcType.dat->pos to garbage, and decoding from that garbage offset segfaulted during
-        // NPC_INFO processing. Fall back to npctype_new()'s built-in defaults instead.
         rs2_error("npctype_get: npc type id %d out of range (max %d), using defaults\n", id, _NpcType.count - 1);
         return _NpcType.invalid;
     }
@@ -214,13 +210,10 @@ static void npctype_decode(NpcType *npc, Packet *dat) {
                 npc->heads[i] = g2(dat);
             }
         } else if (code == 90) {
-            // unused
             npc->resizex = g2(dat);
         } else if (code == 91) {
-            // unused
             npc->resizey = g2(dat);
         } else if (code == 92) {
-            // unused
             npc->resizez = g2(dat);
         } else if (code == 93) {
             npc->minimap = false;
@@ -241,12 +234,6 @@ static void npctype_decode(NpcType *npc, Packet *dat) {
         } else if (code == 103) {
             npc->turnspeed = g2(dat);
         } else {
-            // see objtype_decode()/loctype_decode() for the same fix - an opcode this decoder
-            // doesn't recognise (rev254 npc.dat can contain some) would otherwise desync dat->pos,
-            // and g1/g2/g1b do no bounds checking, so that desync can read arbitrarily far past the
-            // buffer and crash much later, far from this site (confirmed: this was the real cause of
-            // a sporadic crash whose location moved between world3d_draw and client_draw_minimap
-            // depending on which garbage-decoded npc type got rendered first). Stop decoding instead.
             rs2_error("Error unrecognised npc config code: %d\n", code);
             return;
         }
@@ -270,8 +257,6 @@ Model *npctype_get_sequencedmodel(NpcType *npc, int primaryTransformId, int seco
         bool build_failed = false;
         for (int i = 0; i < npc->models_count; i++) {
 #ifdef __PS2__
-            // A cached NPC model outlives scene-arena rebuilds/resets. Decode every
-            // component onto the normal heap so the cache never retains arena pointers.
             models[i] = model_from_id(npc->models[i], false);
 #else
             models[i] = model_from_id(npc->models[i], npc->models_count == 1);
@@ -317,24 +302,8 @@ Model *npctype_get_sequencedmodel(NpcType *npc, int primaryTransformId, int seco
         }
 
 #ifdef __PS2__
-        // These raw label arrays belong to this heap-backed cache model. Creating the
-        // animation lookup tables replaces them with label_vertices/label_faces and
-        // intentionally NULLs the raw pointers, so retain/free the old owners here
-        // instead of leaking them on every NPC cache miss/eviction cycle.
-        int *raw_vertex_labels = model->vertex_labels;
-        int *raw_face_labels = model->face_labels;
         model_create_label_references(model, false);
-        free(raw_vertex_labels);
-        free(raw_face_labels);
-
-        // apply_lighting() similarly discards face_colors once an untextured model has
-        // been fully lit. model_free() cannot reclaim an array after that pointer has
-        // been cleared, so release it exactly when lighting consumed it.
-        int *raw_face_colors = model->face_colors;
         model_calculate_normals(model, npc->ambient + 64, npc->contrast + 850, -30, -50, -30, true, false);
-        if (!model->face_colors) {
-            free(raw_face_colors);
-        }
         npctype_cache_model_ps2(npc->index, model);
 #else
         model_create_label_references(model, true);
