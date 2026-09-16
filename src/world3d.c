@@ -4,15 +4,27 @@
 #define world3d_init_global world3d_init_global_desktop
 #define world3d_init world3d_init_desktop
 #define world3d_draw world3d_draw_desktop
+#define world3d_add_occluder world3d_add_occluder_desktop
+#define world3d_update_activeoccluders world3d_update_activeoccluders_desktop
+#define world3d_clear_temporarylocs world3d_clear_temporarylocs_desktop
 #include "world3d_impl.inc"
+#undef world3d_clear_temporarylocs
+#undef world3d_update_activeoccluders
+#undef world3d_add_occluder
 #undef world3d_draw
 #undef world3d_init
 #undef world3d_init_global
 
 // PS2 uses a four-tile draw radius. A single conservative 51x51 visibility map
-// is enough for the existing occluder code, so avoid the desktop 8x32x51x51
-// table and its large temporary construction matrix entirely.
+// is enough for the bounded PS2 scene, avoiding the desktop 8x32x51x51 table
+// and its large temporary construction matrix.
 static bool ps2_visibility_map[51][51];
+
+static bool ps2_ground_is_empty(const Ground *tile) {
+    return tile && tile->locCount == 0 && !tile->underlay && !tile->overlay &&
+           !tile->wall && !tile->decor && !tile->groundDecor &&
+           !tile->groundObj && !tile->bridge;
+}
 
 void world3d_init_global(void) {
     _World3D.clickTileX = -1;
@@ -40,9 +52,72 @@ void world3d_init(int viewportWidth, int viewportHeight, int frustumStart, int f
     (void)pitchDistance;
 }
 
-// The remainder of the PS2 draw path is supplied below. It is the existing
-// implementation with only the visibility-map selection changed; scene,
-// occlusion and raster behaviour otherwise remain unchanged.
+// With a four-tile PS2 draw radius, the desktop occluder graph costs heap and
+// update time for little benefit. Keep geometry/collision intact and simply
+// render the already tightly bounded nearby scene without world occluders.
+void world3d_add_occluder(int level, int type, int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
+    (void)level;
+    (void)type;
+    (void)minX;
+    (void)minY;
+    (void)minZ;
+    (void)maxX;
+    (void)maxY;
+    (void)maxZ;
+}
+
+void world3d_update_activeoccluders(void) {
+    _World3D.activeOccluderCount = 0;
+}
+
+// Dynamic players/NPCs/projectiles are inserted as temporary Locations every
+// frame. world3d_add_loc2() creates missing Ground nodes for those locations,
+// but the desktop clear path only removes/frees the Location. In a deliberately
+// sparse PS2 scene that means actors walking across previously empty tiles leave
+// permanent ~Ground-sized breadcrumbs behind. Reclaim any now-empty scaffolding
+// after removing each temporary location. Real terrain/loc tiles are retained by
+// the attachment checks below.
+void world3d_clear_temporarylocs(World3D *world3d) {
+    for (int i = 0; i < world3d->temporaryLocCount; i++) {
+        Location *loc = world3d->temporaryLocs[i];
+        if (!loc) {
+            continue;
+        }
+
+        int level = loc->level;
+        int minX = loc->minSceneTileX;
+        int maxX = loc->maxSceneTileX;
+        int minZ = loc->minSceneTileZ;
+        int maxZ = loc->maxSceneTileZ;
+
+        world3d_remove_loc2(world3d, loc);
+        world3d->temporaryLocs[i] = NULL;
+        free(loc);
+
+        if (minX < 0) minX = 0;
+        if (minZ < 0) minZ = 0;
+        if (maxX >= world3d->maxTileX) maxX = world3d->maxTileX - 1;
+        if (maxZ >= world3d->maxTileZ) maxZ = world3d->maxTileZ - 1;
+        if (level >= world3d->maxLevel) level = world3d->maxLevel - 1;
+
+        for (int l = level; l >= 0; l--) {
+            for (int x = minX; x <= maxX; x++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    Ground *tile = world3d->levelTiles[l][x][z];
+                    if (ps2_ground_is_empty(tile)) {
+                        ground_free(tile);
+                        world3d->levelTiles[l][x][z] = NULL;
+                    }
+                }
+            }
+        }
+    }
+
+    world3d->temporaryLocCount = 0;
+}
+
+// The PS2 draw path is the existing bounded renderer with only the visibility
+// map selection changed. Gameplay state/collision remains full-world.
 void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, int eyeYaw, int eyePitch, int loopCycle) {
     if (eyeX < 0) {
         eyeX = 0;
