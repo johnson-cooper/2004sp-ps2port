@@ -14,14 +14,14 @@
 // doesn't pull in the whole Client struct. See client.h's own declaration comment for the rationale.
 extern void ps2_report_oom(const char *msg);
 
-// The EE only has 32 MiB.  Keep the scene arena's established 6 MiB logical ceiling, but commit it
-// from libc only as the scene actually needs it.  Blocks never move while the allocator is alive,
-// so Model/Location pointers remain stable.  IMPORTANT: bump_allocator_reset() historically only
-// rewound the arena; it did NOT invalidate its backing storage.  Some world teardown paths reset the
+// The EE only has 32 MiB. Keep the scene arena's established 6 MiB logical ceiling, but commit it
+// from libc only as the scene actually needs it. Blocks never move while the allocator is alive,
+// so Model/Location pointers remain stable. IMPORTANT: bump_allocator_reset() historically only
+// rewound the arena; it did NOT invalidate its backing storage. Some world teardown paths reset the
 // arena immediately before world3d_reset() finishes walking old scene structures, so committed blocks
-// must remain valid across reset.  They are released only by bump_allocator_free()/re-init.
+// must remain valid across reset. They are released only by bump_allocator_free()/re-init.
 #define PS2_BUMP_BLOCK_BYTES (128 * 1024)
-#define PS2_BUMP_GROW_ALIGN  (16 * 1024)
+#define PS2_BUMP_GROW_ALIGN (16 * 1024)
 #define PS2_BUMP_MIN_FALLBACK (32 * 1024)
 #define PS2_BUMP_MAX_BLOCKS 128
 
@@ -30,6 +30,12 @@ typedef struct {
     int capacity;
     int used;
 } Ps2BumpBlock;
+
+// The old contiguous allocator returned a non-NULL arena address for a zero-byte allocation while
+// consuming no bytes. Some perfectly valid zero-count model/scene arrays rely on that behaviour.
+// Keep one stable, aligned sentinel so demand-commit doesn't have to reserve a block just to satisfy
+// malloc(0)/calloc(0, n). Arena allocations are never individually freed, so this is safe.
+static unsigned int ps2_zero_alloc_sentinel __attribute__((aligned(16)));
 #endif
 
 typedef struct {
@@ -76,7 +82,7 @@ static void ps2_bump_release_blocks(void) {
 }
 
 static void ps2_bump_rewind_blocks(void) {
-    // Preserve every block address.  This matches the old contiguous allocator's reset semantics:
+    // Preserve every block address. This matches the old contiguous allocator's reset semantics:
     // old pointers remain address-valid until the teardown that follows reset has completed, while
     // subsequent arena allocations may reuse the storage once the next scene starts building.
     for (int i = 0; i < alloc.block_count; i++) {
@@ -95,9 +101,9 @@ static Ps2BumpBlock *ps2_bump_add_block(int minimum) {
         return NULL;
     }
 
-    // 128 KiB is intentionally smaller than the first version's 256 KiB growth unit.  The PS2 heap
+    // 128 KiB is intentionally smaller than the first version's 256 KiB growth unit. The PS2 heap
     // gets fragmented by models, packets, UI, and scene structures during a region build; requiring
-    // a fresh contiguous quarter-megabyte late in loading is unnecessarily fragile.  Large single
+    // a fresh contiguous quarter-megabyte late in loading is unnecessarily fragile. Large single
     // requests still get a dedicated block rounded to 16 KiB.
     int block_capacity = PS2_BUMP_BLOCK_BYTES;
     if (block_capacity < minimum) {
@@ -194,7 +200,7 @@ void bump_allocator_free(void) {
 
 void bump_allocator_reset(void) {
 #ifdef __PS2__
-    // Log the completed cycle's peak usage BEFORE rewinding it.  `committed` shows how much of the
+    // Log the completed cycle's peak usage BEFORE rewinding it. `committed` shows how much of the
     // logical 6 MiB maximum has actually been borrowed from ordinary libc heap.
     if (alloc.alloc_count > 0) {
         rs2_log("Scene arena cycle complete: used=%d/%d committed=%d, alloc_count=%d, largest_alloc=%d, "
@@ -204,9 +210,9 @@ void bump_allocator_reset(void) {
                 alloc.histogram[4], alloc.histogram[5]);
     }
 
-    // Do NOT free blocks here.  The previous segmented implementation did that and changed a subtle
-    // but important lifetime property of the original allocator.  client_clear_caches() can invoke
-    // this reset before world3d_reset() has finished traversing the old scene.  Rewinding preserves
+    // Do NOT free blocks here. The previous segmented implementation did that and changed a subtle
+    // but important lifetime property of the original allocator. client_clear_caches() can invoke
+    // this reset before world3d_reset() has finished traversing the old scene. Rewinding preserves
     // pointer validity through teardown while still avoiding the old up-front 6 MiB reservation.
     ps2_bump_rewind_blocks();
     alloc.alloc_count = 0;
@@ -229,28 +235,39 @@ void *rs2_calloc(bool use_allocator, int count, int size) {
         return calloc(count, size);
     }
 
-    // Avoid integer overflow before handing a byte count to the arena.  Current callers are small,
-    // but failing explicitly is far safer than wrapping into an undersized allocation on the EE.
-    if (count <= 0 || size <= 0 || count > 0x7fffffff / size) {
+    // Negative/overflowed sizes are invalid. Zero-sized allocations are NOT errors: the original
+    // contiguous scene arena returned a valid pointer for them and several legitimate empty model
+    // arrays can request them while a region is loading. Rejecting zero here caused real PS2
+    // Lumbridge loads to stop with "Invalid scene calloc size".
+    if (count < 0 || size < 0 || (count != 0 && size > 0x7fffffff / count)) {
 #ifdef __PS2__
-        ps2_report_oom("Invalid scene calloc size");
+        ps2_report_oom("BAD CALLOC - see boot.log");
+        rs2_error("Invalid scene calloc: count=%d size=%d\n", count, size);
 #endif
         return NULL;
     }
 
-    void *ptr = bump_alloc(count * size);
-    if (ptr) {
-        memset(ptr, 0, count * size);
+    int total = count * size;
+    void *ptr = bump_alloc(total);
+    if (ptr && total > 0) {
+        memset(ptr, 0, total);
     }
     return ptr;
 }
 
 static void *bump_alloc(int size) {
-    if (size <= 0) {
+    if (size < 0) {
         return NULL;
     }
 
 #ifdef __PS2__
+    // Match the old bump allocator's malloc(0)/calloc(0, n) behaviour without committing any scene
+    // block. Returning NULL here is observably different to existing callers and was the cause of
+    // the latest Lumbridge loading regression.
+    if (size == 0) {
+        return &ps2_zero_alloc_sentinel;
+    }
+
     alloc.alloc_count++;
     if (size > alloc.largest_alloc) {
         alloc.largest_alloc = size;
@@ -258,7 +275,7 @@ static void *bump_alloc(int size) {
     int bucket = size <= 32 ? 0 : size <= 128 ? 1 : size <= 512 ? 2 : size <= 2048 ? 3 : size <= 8192 ? 4 : 5;
     alloc.histogram[bucket]++;
 
-    // Search existing block tails before committing more heap.  This is still monotonic within one
+    // Search existing block tails before committing more heap. This is still monotonic within one
     // scene cycle; addresses never move and no individual allocation is reclaimed early.
     for (int i = alloc.block_count - 1; i >= 0; i--) {
         Ps2BumpBlock *block = &alloc.blocks[i];
@@ -279,13 +296,18 @@ static void *bump_alloc(int size) {
         return block->data;
     }
 
-    char oom_msg[160];
-    snprintf(oom_msg, sizeof(oom_msg),
+    int heap_kb = mallinfo().fordblks / 1024;
+    char log_msg[192];
+    snprintf(log_msg, sizeof(log_msg),
              "Scene arena OOM: request=%d used=%d cap=%d committed=%d heapfree=%dKB blocks=%d count=%d",
-             size, alloc.used, alloc.capacity, alloc.committed,
-             mallinfo().fordblks / 1024, alloc.block_count, alloc.alloc_count);
-    rs2_error("%s\n", oom_msg);
-    ps2_report_oom(oom_msg);
+             size, alloc.used, alloc.capacity, alloc.committed, heap_kb, alloc.block_count, alloc.alloc_count);
+    rs2_error("%s\n", log_msg);
+
+    // Keep the TV diagnostic deliberately short/readable; the complete figures remain in boot.log.
+    char screen_msg[80];
+    snprintf(screen_msg, sizeof(screen_msg), "ARENA OOM req=%d used=%dK com=%dK heap=%dK",
+             size, alloc.used / 1024, alloc.committed / 1024, heap_kb);
+    ps2_report_oom(screen_msg);
     return NULL;
 #else
 #if __SIZEOF_POINTER__ == 4
