@@ -41,15 +41,7 @@ static void npctype_clear_model_cache_ps2(void) {
 
 static void npctype_cache_model_ps2(int64_t key, Model *model) {
     LruCache *cache = _NpcType.modelCache;
-    // Keep the cache container at the proven boot-stable 16-entry layout, but retain at most four
-    // actual NPC meshes. Constructing the LRU itself at capacity 4 reproducibly moved the PS2 heap
-    // layout enough to freeze at the pre-world S1/IF_SETTAB transition before any NPC had rendered.
-    // A soft residency limit tests the original heap-pressure hypothesis without perturbing that
-    // startup allocation layout. Each manual eviction restores one available slot before the normal
-    // lrucache_put() consumes it again, so cache accounting remains consistent.
-    const int residency_limit = 4;
-    int resident = cache->capacity - cache->available;
-    if (resident >= residency_limit) {
+    if (cache->available == 0) {
         DoublyLinkable *node = doublylinklist_pop(cache->history);
         if (node) {
             linkable_unlink(&node->link);
@@ -117,8 +109,8 @@ void npctype_unpack(Jagfile *config) {
     _NpcType.instances = calloc(_NpcType.count, sizeof(NpcType *));
     _NpcType.invalid = npctype_new();
 #ifdef __PS2__
-    // Preserve the exact LRU/hash-table allocation shape of the build that reliably enters the
-    // world. npctype_cache_model_ps2() enforces a four-model soft residency limit after startup.
+    // These entries are persistent across live frames, so they cannot live in the
+    // scene bump arena. Keep a bounded heap-backed working set on the 32 MiB PS2.
     _NpcType.modelCache = lrucache_new(16);
 #else
     _NpcType.modelCache = lrucache_new(30);
