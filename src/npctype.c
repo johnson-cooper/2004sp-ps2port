@@ -2,6 +2,8 @@
 #include <stdlib.h>
 
 #include "allocator.h"
+#include "datastruct/doublylinklist.h"
+#include "datastruct/linkable.h"
 #include "datastruct/lrucache.h"
 #include "jagfile.h"
 #include "model.h"
@@ -12,6 +14,44 @@
 NpcTypeData _NpcType = {0};
 
 static void npctype_decode(NpcType *npc, Packet *dat);
+
+#ifdef __PS2__
+static void npctype_free_cached_model(Model *model) {
+    if (!model) {
+        return;
+    }
+    // NPC cache entries now have the same lifetime rule as PS2 player appearances:
+    // every allocation owned by a persistent cached model is heap-backed and can be
+    // reclaimed explicitly. Label-reference arrays are not owned by model_free().
+    model_free_label_references(model);
+    model_free(model);
+}
+
+static void npctype_clear_model_cache_ps2(void) {
+    if (!_NpcType.modelCache) {
+        return;
+    }
+    DoublyLinkable *node;
+    while ((node = doublylinklist_pop(_NpcType.modelCache->history)) != NULL) {
+        linkable_unlink(&node->link);
+        npctype_free_cached_model((Model *)node);
+    }
+    _NpcType.modelCache->available = _NpcType.modelCache->capacity;
+}
+
+static void npctype_cache_model_ps2(int64_t key, Model *model) {
+    LruCache *cache = _NpcType.modelCache;
+    if (cache->available == 0) {
+        DoublyLinkable *node = doublylinklist_pop(cache->history);
+        if (node) {
+            linkable_unlink(&node->link);
+            npctype_free_cached_model((Model *)node);
+            cache->available++;
+        }
+    }
+    lrucache_put(cache, key, &model->link);
+}
+#endif
 
 static void npctype_free(NpcType *npc) {
     if (!npc) return;
@@ -68,12 +108,21 @@ void npctype_unpack(Jagfile *config) {
 
     _NpcType.instances = calloc(_NpcType.count, sizeof(NpcType *));
     _NpcType.invalid = npctype_new();
+#ifdef __PS2__
+    // These entries are persistent across live frames, so they cannot live in the
+    // scene bump arena. Keep a bounded heap-backed working set on the 32 MiB PS2.
+    _NpcType.modelCache = lrucache_new(16);
+#else
     _NpcType.modelCache = lrucache_new(30);
+#endif
 
     packet_free(idx);
 }
 
 void npctype_free_global(void) {
+#ifdef __PS2__
+    npctype_clear_model_cache_ps2();
+#endif
     lrucache_free(_NpcType.modelCache);
     free(_NpcType.offsets);
     for (int i = 0; i < _NpcType.count; i++) {
@@ -205,24 +254,61 @@ static void npctype_decode(NpcType *npc, Packet *dat) {
 }
 
 Model *npctype_get_sequencedmodel(NpcType *npc, int primaryTransformId, int secondaryTransformId, int *seqMask) {
+    if (!npc || npc->models_count <= 0 || !npc->models) {
+        return NULL;
+    }
+
     Model *tmp = NULL;
     Model *model = (Model *)lrucache_get(_NpcType.modelCache, npc->index);
 
     if (!model) {
         Model **models = calloc(npc->models_count, sizeof(Model *));
+        if (!models) {
+            return NULL;
+        }
+
+        bool build_failed = false;
         for (int i = 0; i < npc->models_count; i++) {
+#ifdef __PS2__
+            // A cached NPC model outlives scene-arena rebuilds/resets. Decode every
+            // component onto the normal heap so the cache never retains arena pointers.
+            models[i] = model_from_id(npc->models[i], false);
+#else
             models[i] = model_from_id(npc->models[i], npc->models_count == 1);
+#endif
+            if (!models[i]) {
+                build_failed = true;
+                break;
+            }
+        }
+
+        if (build_failed) {
+            for (int i = 0; i < npc->models_count; i++) {
+                if (models[i]) {
+                    model_free(models[i]);
+                }
+            }
+            free(models);
+            return NULL;
         }
 
         if (npc->models_count == 1) {
             model = models[0];
         } else {
+#ifdef __PS2__
+            model = model_from_models(models, npc->models_count, false);
+#else
             model = model_from_models(models, npc->models_count, true);
+#endif
             for (int i = 0; i < npc->models_count; i++) {
                 model_free(models[i]);
             }
         }
         free(models);
+
+        if (!model) {
+            return NULL;
+        }
 
         if (npc->recol_s) {
             for (int i = 0; i < npc->recol_count; i++) {
@@ -230,12 +316,21 @@ Model *npctype_get_sequencedmodel(NpcType *npc, int primaryTransformId, int seco
             }
         }
 
+#ifdef __PS2__
+        model_create_label_references(model, false);
+        model_calculate_normals(model, npc->ambient + 64, npc->contrast + 850, -30, -50, -30, true, false);
+        npctype_cache_model_ps2(npc->index, model);
+#else
         model_create_label_references(model, true);
         model_calculate_normals(model, npc->ambient + 64, npc->contrast + 850, -30, -50, -30, true, true);
         lrucache_put(_NpcType.modelCache, npc->index, &model->link);
+#endif
     }
 
     tmp = model_share_alpha(model, !npc->animHasAlpha);
+    if (!tmp) {
+        return NULL;
+    }
 
     if (primaryTransformId != -1 && secondaryTransformId != -1) {
         model_apply_transforms(tmp, primaryTransformId, secondaryTransformId, seqMask);
