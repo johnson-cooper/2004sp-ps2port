@@ -75,9 +75,9 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// Keep the exact 2x2 materialized terrain working set that reproduced the hardware crash. This test
-// changes only whether its underlay/overlay triangles enter the software rasterizer, allowing us to
-// decide whether a VU1/GS terrain path targets the actual failing subsystem or merely hides a heap bug.
+// Keep the exact 2x2 materialized terrain working set that reproduced the hardware crash. With the
+// object-model cache now forced to miss without intrusive LRU links, restore only terrain triangle
+// rasterization to determine whether that old 2x2 failure was independent of the cache lifetime bug.
 #define PS2_TERRAIN_MIN_TILE 51
 #define PS2_TERRAIN_MAX_TILE 53
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
@@ -93,11 +93,9 @@
 // The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
 #define PS2_SIMPLE_UI 1
-// Keep the terrain resident but skip only its underlay/overlay rasterization. world3d_draw_tile()
-// deliberately continues the player/NPC/item/wall/entity pass in this mode, making it a clean test
-// of the EE software terrain rasterizer before we invest in the VU1 Path1 implementation.
+// Terrain remains untextured on PS2, but this test restores the actual underlay/overlay triangles.
 #define PS2_UNTEXTURED_TERRAIN 1
-#define PS2_FLAT_TERRAIN 1
+#define PS2_FLAT_TERRAIN 0
 // Keep synchronous scene/land construction enabled. Static locations and the minimap remain disabled.
 #define PS2_DEFER_SCENE_REBUILD 0
 #define PS2_NULL_SCENE_REBUILD 0
@@ -214,7 +212,7 @@
 #define SCROLLBAR_GRIP_HIGHLIGHT 0x766654  // 7759444
 #define SCROLLBAR_GRIP_LOWLIGHT 0x332d25   // 3353893
 #define TRADE_MESSAGE 0x800080             // 8388736
-#define DUEL_MESSAGE 0xcbb789              // 13350793
+#define DUEL_MESSAGE 0xcbb789              // 13347721
 
 // ---- these are in hsl 16 bits
 // hair
