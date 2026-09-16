@@ -61,11 +61,9 @@ static void ps2_runtime_log_line(const char *line) {
     }
 }
 
-// PHASE 4 audit instrumentation: per-phase frame timing, aggregated and printed every ~2s rather
-// than every frame (rs2_log isn't free - see platform.c's fflush-per-call note - and per-frame
-// spam would itself be a measurable overhead on top of what's being measured). Wall-clock (rs2_now,
-// millisecond resolution) rather than a cycle counter - coarser, but survives PCSX2/real-hardware
-// clock-rate differences and needs no new platform API.
+// Temporary real-hardware crash diagnostic. Report every ~500ms so the last
+// successfully persisted line is close to an abrupt freeze, while still
+// keeping synchronous USB writes far away from the per-tick hot path.
 typedef struct {
     int64_t frame_ms;
     int64_t update_ms;
@@ -84,21 +82,21 @@ static PerfAccum _Perf = {0};
 // call, so this stores the duration and reports it deferred by one window instead.
 static int64_t _last_log_ms = 0;
 
-static void perf_report_if_due(void) {
+static void perf_report_if_due(Client *c) {
     int64_t now = rs2_now();
     if (_Perf.window_start == 0) {
         _Perf.window_start = now;
         return;
     }
     int64_t elapsed = now - _Perf.window_start;
-    if (elapsed < 2000 || _Perf.frame_count == 0) {
+    if (elapsed < 500 || _Perf.frame_count == 0) {
         return;
     }
     double fps = _Perf.frame_count * 1000.0 / (double)elapsed;
     int64_t log_t0 = rs2_now();
-    char report[512];
+    char report[768];
     snprintf(report, sizeof(report),
-             "PERF fps=%.1f frame=%.1f update=%.1f netwait=%.1f netcall=%.1f pkt=%.1f npcpos=%.1f getplr=%.1f plr=%.1f npc=%.1f chat=%.1f mrgl=%.1f draw=%.1f gs=%.1f ramKB=%d arenaKB=%d/%d lastlogms=%d\n",
+             "PERF fps=%.1f frame=%.1f update=%.1f netwait=%.1f netcall=%.1f pkt=%.1f npcpos=%.1f getplr=%.1f plr=%.1f npc=%.1f chat=%.1f mrgl=%.1f draw=%.1f gs=%.1f ramKB=%d arenaKB=%d/%d lastlogms=%d loop=%d last=%d,%d,%d cur=%d psize=%d players=%d npcs=%d out=%d idle=%d scene=%d waves=%d hb=%d\n",
              fps,
              (double)_Perf.frame_ms / _Perf.frame_count,
              (double)_Perf.update_ms / _Perf.frame_count,
@@ -115,7 +113,13 @@ static void perf_report_if_due(void) {
              (double)_Perf.gs_upload_ms / _Perf.frame_count,
              mallinfo().fordblks / 1024,
              bump_allocator_used() / 1024, bump_allocator_capacity() / 1024,
-             (int)_last_log_ms);
+             (int)_last_log_ms,
+             c->loop_cycle,
+             c->last_packet_type0, c->last_packet_type1, c->last_packet_type2,
+             c->packet_type, c->packet_size,
+             c->player_count, c->npc_count,
+             c->out ? c->out->pos : -1,
+             c->idle_net_cycles, c->scene_state, c->wave_count, c->heartbeatTimer);
     rs2_log("%s", report);
     ps2_runtime_log_line(report);
     _last_log_ms = rs2_now() - log_t0;
@@ -283,7 +287,7 @@ void gameshell_run(Client *c) {
         _Perf.gs_upload_ms += gs_t3 - draw_t2;
         _Perf.frame_ms += gs_t3 - frame_t0;
         _Perf.frame_count++;
-        perf_report_if_due();
+        perf_report_if_due(c);
 #endif
     }
     if (c->shell->state == -1) {
