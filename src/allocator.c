@@ -44,6 +44,21 @@ int bump_allocator_capacity(void) {
 }
 
 bool bump_allocator_init(int capacity) {
+#ifdef __PS2__
+    // The client currently requests a 6 MiB scene arena before login. Real-hardware endurance after
+    // the player-cache ownership fixes leaves only ~380-420 KiB in libc's normal heap, while
+    // client_build_scene() immediately constructs a temporary World whose decode/blend arrays alone
+    // require about 440 KiB (plus a 100 KiB bzip scratch buffer). That explains why merely enabling
+    // the zero-Ground scene build can freeze before world entry even though terrain residency is zero.
+    //
+    // For this hardware test, reserve 5 MiB instead. This returns a full MiB to libc without changing
+    // any scene-build code or terrain residency, letting us test the normal-heap-starvation hypothesis
+    // directly. If confirmed, the production fix should move the temporary World/scratch allocations
+    // into the scene arena, then re-evaluate the final arena size from measured terrain high-water.
+    if (capacity == (6 << 20)) {
+        capacity = 5 << 20;
+    }
+#endif
 #ifdef __3DS__
     // this large malloc fails on 3ds, so we use linearAlloc
     rs2_log("Free linear space: %d\n", linearSpaceFree());
