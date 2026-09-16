@@ -95,10 +95,10 @@
 // No terrain texture sampling/cache churn: preserve map heights, overlays and lighting using colour.
 #define PS2_UNTEXTURED_TERRAIN 1
 #define PS2_FLAT_TERRAIN 0
-// Live zone mutations are stable on hardware. Restore the bounded 24x24 terrain construction while
-// retaining the low-memory PS2 profile: untextured terrain, deferred static locations, no minimap,
-// 9x9 draw radius and 10 Hz software-3D presentation. Real hardware remains the stability authority.
-#define PS2_DEFER_SCENE_REBUILD 0
+// Keep the synchronous terrain build disabled for one more isolation step. With dynamic entities now
+// stable, restore REBUILD_NORMAL relocation and live zone OBJ/LOC mutations first so scene mutation
+// can be validated independently before the bounded terrain build is switched back on.
+#define PS2_DEFER_SCENE_REBUILD 1
 #define PS2_NULL_SCENE_REBUILD 0
 // Keep the minimum gameplay UI; software 3D interface models remain blocked.
 #define PS2_NULL_UI 0
