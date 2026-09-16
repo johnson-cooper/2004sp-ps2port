@@ -46,18 +46,20 @@ void entity_draw_free(Entity *entity, Model *m, int loopCycle) {
 
 Model *entity_draw(Entity *entity, int loopCycle) {
 #ifdef __PS2__
-    // Real-hardware bisection: the all-dynamic-entities-disabled build and the
-    // player-only build both ran for 10+ minutes at the same Lumbridge position
-    // without freezing. Restore only NPC meshes now. Players, projectiles, and
-    // standalone spotanims stay suppressed while all networking/pathing/scene
-    // state continues normally.
+    // Real-hardware bisection: NPC-only rendering reproduced the Lumbridge
+    // freeze, while all-dynamic-disabled and player-only each survived 10+
+    // minutes in the same position. Exercise the complete NPC model build,
+    // animation, spotanim composition, and matching free path here, but return
+    // NULL so world3d never rasterizes the resulting mesh.
     //
-    // If this freezes, NPC model build/render/free is sufficient to reproduce
-    // the hardware failure. If it stays stable, NPC and player rendering are
-    // independently safe and the next test should isolate projectile/spotanim
-    // rendering or the interaction between multiple dynamic entity types.
+    // Freeze => fault is in NPC model build/animation/free/cache ownership.
+    // Stable => those paths are safe and the failure is in drawing an NPC model
+    // through world3d/model rasterization (or state consumed only by that draw).
     if (strcmp(entity->type, "npc") == 0) {
-        return npcentity_draw((NpcEntity *)entity, loopCycle);
+        Model *model = npcentity_draw((NpcEntity *)entity, loopCycle);
+        if (model) {
+            entity_draw_free(entity, model, loopCycle);
+        }
     }
     return NULL;
 #else
