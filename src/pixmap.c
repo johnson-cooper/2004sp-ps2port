@@ -1,47 +1,14 @@
 #include <stdlib.h>
 
-#include "defines.h"
 #include "pix2d.h"
 #include "pixmap.h"
 #include "gl11.h"
 
-#ifdef __PS2__
-// The PS2 game screen currently creates two consecutive 512x334 PixMaps: area_viewport_3d is the
-// software-3D render target and area_viewport is the UI/composite viewport.  With the native-sized
-// PS2 3D target, ps2_upscale_viewport_3d() is a 1:1 copy between those buffers, so keeping two
-// separate 32-bit pixel arrays wastes 512*334*4 = 684,032 bytes of scarce EE RAM.  Share the first
-// pair of native viewport-sized PixMaps while retaining separate Surface metadata.  Limit this to
-// exactly two live references so an unrelated PixMap of the same dimensions can never join it.
-static int *ps2_native_viewport_pixels = NULL;
-static int ps2_native_viewport_refs = 0;
-#endif
-
 PixMap *pixmap_new(int width, int height) {
     PixMap *pixmap = calloc(1, sizeof(PixMap));
-    if (!pixmap) {
-        return NULL;
-    }
     pixmap->width = width;
     pixmap->height = height;
-#ifdef __PS2__
-    int share_native_viewport = width == 512 && height == 334 && PS2_3D_RENDER_WIDTH == 512 && PS2_3D_RENDER_HEIGHT == 334;
-    if (share_native_viewport && ps2_native_viewport_pixels && ps2_native_viewport_refs == 1) {
-        pixmap->pixels = ps2_native_viewport_pixels;
-        ps2_native_viewport_refs = 2;
-    } else {
-        pixmap->pixels = calloc(pixmap->width * pixmap->height, sizeof(int));
-        if (share_native_viewport && !ps2_native_viewport_pixels && pixmap->pixels) {
-            ps2_native_viewport_pixels = pixmap->pixels;
-            ps2_native_viewport_refs = 1;
-        }
-    }
-#else
     pixmap->pixels = calloc(pixmap->width * pixmap->height, sizeof(int));
-#endif
-    if (!pixmap->pixels) {
-        free(pixmap);
-        return NULL;
-    }
     pixmap_bind(pixmap);
 #ifndef GL11
     pixmap->image = platform_create_surface(pixmap->pixels, width, height, false);
@@ -71,19 +38,7 @@ void pixmap_free(PixMap *pixmap) {
 #else
     platform_free_surface(pixmap->image);
 #endif
-#ifdef __PS2__
-    if (pixmap->pixels == ps2_native_viewport_pixels && ps2_native_viewport_refs > 0) {
-        ps2_native_viewport_refs--;
-        if (ps2_native_viewport_refs == 0) {
-            free(ps2_native_viewport_pixels);
-            ps2_native_viewport_pixels = NULL;
-        }
-    } else {
-        free(pixmap->pixels);
-    }
-#else
     free(pixmap->pixels);
-#endif
     free(pixmap);
 }
 
@@ -166,7 +121,7 @@ void pixmap_draw(PixMap *pixmap, int x, int y) {
                 }
             }
 #else
-            for (int px = 0; px < width; px++) {
+            for (int px = 0; px < >width; px++) {
                 uint32_t rgb = src[py * width + px];
                 if (rgb != 0xffffffff) {
                     Point p = {(rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff, x + px, y + py};
