@@ -4,6 +4,7 @@
 #include "defines.h"
 #include "gameshell.h"
 #include "inputtracking.h"
+#include "pix2d.h"
 #include "pixmap.h"
 #include "platform.h"
 
