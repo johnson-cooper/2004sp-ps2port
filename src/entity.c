@@ -46,14 +46,18 @@ void entity_draw_free(Entity *entity, Model *m, int loopCycle) {
 
 Model *entity_draw(Entity *entity, int loopCycle) {
 #ifdef __PS2__
-    // The cache-only hardware test became stable after persistent NPC base models
-    // were moved off the resettable scene arena and onto the normal heap. Validate
-    // that lifetime fix against the complete NPC path now: sequence transforms,
-    // per-frame working copy, optional spotanim composition, world3d submission,
-    // rasterization, and the matching entity_draw_free() ownership path all run.
+    // Real hardware is stable with the heap-backed persistent NPC model cache,
+    // both in the cache-only diagnostic and with the complete NPC rendering path.
+    // Restore players as the next single-variable validation: normal player and
+    // NPC model construction, animation, world3d submission, rasterization and
+    // matching free paths all run together.
     //
-    // Keep players/projectiles/standalone spotanims suppressed for this one test so
-    // a stable 10-minute Lumbridge run can be attributed to the NPC cache fix.
+    // Projectiles and standalone spotanim entities remain suppressed for this
+    // test so a stable Lumbridge run directly validates the player+NPC workload
+    // before the last dynamic entity classes are restored.
+    if (strcmp(entity->type, "player") == 0) {
+        return playerentity_draw((PlayerEntity *)entity, loopCycle);
+    }
     if (strcmp(entity->type, "npc") == 0) {
         return npcentity_draw((NpcEntity *)entity, loopCycle);
     }
