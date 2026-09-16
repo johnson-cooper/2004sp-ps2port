@@ -95,13 +95,15 @@
 // No terrain texture sampling/cache churn: preserve map heights, overlays and lighting using colour.
 #define PS2_UNTEXTURED_TERRAIN 1
 #define PS2_FLAT_TERRAIN 0
-// One hardware-isolation build after the socket-buffer corruption fix: skip the synchronous
-// landscape decode/world construction while leaving REBUILD_NORMAL coordinate relocation,
-// PLAYER_INFO/getPlayer(), networking and the live tick intact. If this consistently reaches the
-// live game, the remaining deterministic freeze is inside terrain/map construction; if it still
-// freezes on the loading screen, the fault is earlier in REBUILD relocation or PLAYER_INFO.
+// Keep the synchronous terrain build disabled for this isolation series. The previous hardware run
+// reached the live game with ~1.15 MiB heap free, proving terrain construction is a major memory
+// consumer but not the only crash source.
 #define PS2_DEFER_SCENE_REBUILD 1
-#define PS2_NULL_SCENE_REBUILD 0
+// Complete the isolation by suppressing REBUILD_NORMAL's residual 104x104 relocation and all live
+// zone OBJ/LOC mutations against an intentionally unbuilt scene. Networking, PLAYER_INFO/NPC_INFO,
+// entity simulation/rendering and UI remain live. If this stabilises, the remaining runtime crash is
+// in zone/scene mutation; if it still crashes, focus next on entity packet bounds/model rendering.
+#define PS2_NULL_SCENE_REBUILD 1
 // Keep the minimum gameplay UI; software 3D interface models remain blocked.
 #define PS2_NULL_UI 0
 #define PS2_SAFE_INTERFACE 1
@@ -202,7 +204,7 @@
 #define DARKBLUE 0x80     // 128
 #define ORANGE1 0xffb000  // 16756736
 #define ORANGE2 0xff7000  // 16740352
-#define ORANGE3 0xff3000  // 16723968
+#define ORANGE3 0xff3000  // 16724736
 #define GREEN1 0xc0ff00   // 12648192
 #define GREEN2 0x80ff00   // 8453888
 #define GREEN3 0x40ff00   // 4259584
