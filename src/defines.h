@@ -96,9 +96,11 @@
 // The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
 #define PS2_SIMPLE_UI 1
-// Terrain remains untextured on PS2, with normal underlay/overlay rasterization enabled.
+// Diagnostic only: keep the exact five-tile scene that hard-crashed around T160, but suppress
+// underlay/overlay software rasterization. If this survives, the failure is in the terrain draw path
+// rather than terrain residency/allocation itself. Do not keep flat terrain as the final renderer.
 #define PS2_UNTEXTURED_TERRAIN 1
-#define PS2_FLAT_TERRAIN 0
+#define PS2_FLAT_TERRAIN 1
 // Keep synchronous scene/land construction enabled. Static locations and the minimap remain disabled.
 #define PS2_DEFER_SCENE_REBUILD 0
 #define PS2_NULL_SCENE_REBUILD 0
