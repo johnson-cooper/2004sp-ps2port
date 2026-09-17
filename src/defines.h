@@ -76,14 +76,16 @@
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
 // Rectangular bounds let hardware tests add one terrain edge at a time without changing any other
-// renderer or allocator behavior. The verified control is X=[50,52), Z=[50,52); the next bisection
-// extends only Z to 53, adding (50,52) and (51,52).
+// renderer or allocator behavior. This test extends the verified X=[50,52), Z=[50,52) control only
+// along Z, materializing X=[50,52), Z=[50,53): exactly (50,52) and (51,52) are newly admitted.
 #define PS2_TERRAIN_MIN_TILE 50
 #define PS2_TERRAIN_MAX_X_TILE 52
 #define PS2_TERRAIN_MAX_Z_TILE 53
-// Keep the legacy shared bound at the verified 2x2 value until the world materialization predicate is
-// switched to the rectangular bisection in the final test commit.
-#define PS2_TERRAIN_MAX_TILE 52
+// world.c still spells its historical resident test as two comparisons against one macro. Make that
+// expression implement the same rectangular predicate without touching the large scene-builder file:
+// for x0<52 the shared threshold is 53 (so z0 may reach 52); for x0>=52 it is 52 (so x rejects).
+// Ground ownership and temporary-Ground reuse use the explicit X/Z bounds above.
+#define PS2_TERRAIN_MAX_TILE ((x0) < PS2_TERRAIN_MAX_X_TILE ? PS2_TERRAIN_MAX_Z_TILE : PS2_TERRAIN_MAX_X_TILE)
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
