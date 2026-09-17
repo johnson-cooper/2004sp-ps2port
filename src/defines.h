@@ -75,17 +75,15 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// Rectangular bounds let hardware tests add one terrain edge at a time without changing any other
-// renderer or allocator behavior. This test extends the verified X=[50,52), Z=[50,52) control only
-// along Z, materializing X=[50,52), Z=[50,53): exactly (50,52) and (51,52) are newly admitted.
+// Hardware bisection: the verified 2x2 control survived past T34k, while adding the full south edge
+// (50,52)+(51,52) eventually crashed around T2193. Admit only (50,52) beyond the verified 2x2 now.
+// ground.c/world3d.c evaluate MAX_X with a local variable named z; rows 50-51 retain width 2, while
+// row 52 is width 1. world.c uses the separate x0-based shared threshold below to materialize exactly
+// the same five-tile shape without changing any renderer, heap, or scene-arena behavior.
 #define PS2_TERRAIN_MIN_TILE 50
-#define PS2_TERRAIN_MAX_X_TILE 52
+#define PS2_TERRAIN_MAX_X_TILE ((z) < 52 ? 52 : 51)
 #define PS2_TERRAIN_MAX_Z_TILE 53
-// world.c still spells its historical resident test as two comparisons against one macro. Make that
-// expression implement the same rectangular predicate without touching the large scene-builder file:
-// for x0<52 the shared threshold is 53 (so z0 may reach 52); for x0>=52 it is 52 (so x rejects).
-// Ground ownership and temporary-Ground reuse use the explicit X/Z bounds above.
-#define PS2_TERRAIN_MAX_TILE ((x0) < PS2_TERRAIN_MAX_X_TILE ? PS2_TERRAIN_MAX_Z_TILE : PS2_TERRAIN_MAX_X_TILE)
+#define PS2_TERRAIN_MAX_TILE ((x0) == 50 ? 53 : 52)
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
