@@ -72,14 +72,14 @@
 // users and avoids the extra permanent pool that made the dense Lumbridge rebuild regress.
 #define PIX3D_POOL_COUNT 1
 #define DISABLE_FLAMES
-// Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
-// state remains available outside it for movement, pathing and server-side gameplay.
-#define PS2_RENDER_RADIUS 4
-// Deliberate terrain-residency stress test after qword alignment fixed the old 3x3 failures. Jump
-// beyond the untested 4x4 step to a 16x16 window centred around the Lumbridge local scene (43..58 on
-// each axis, 256 resident terrain slots). Keep the renderer at its existing 4-tile/9x9 draw radius,
-// the scene arena at 4 MiB, and all other settings unchanged. This tests whether the alignment fix
-// really removed the terrain-layout crash without simultaneously increasing per-frame draw work.
+// First actual view-distance test after the qword-aligned 16x16 terrain residency proved stable on
+// real hardware. Increase the camera-centred draw radius from 4 (9x9) to 6 tiles (13x13) while
+// keeping the 16x16 resident terrain window, 4 MiB scene arena, 10 Hz presentation rate and every
+// other subsystem unchanged. This isolates the extra EE software-raster workload of seeing farther.
+#define PS2_RENDER_RADIUS 6
+// Qword-aligned scene arena is hardware-stable with this 16x16 Lumbridge residency stress window.
+// Keep residency fixed while draw radius is tested so resident-memory and per-frame draw costs do not
+// change at the same time.
 #define PS2_TERRAIN_MIN_TILE 43
 #define PS2_TERRAIN_MAX_X_TILE 59
 #define PS2_TERRAIN_MAX_Z_TILE 59
