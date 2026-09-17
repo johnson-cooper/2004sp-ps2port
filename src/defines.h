@@ -75,14 +75,15 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// Hardware bisection: the verified 2x2 control survived past T34k, while adding (50,52) alone
-// crashed around T1212. Swap that fifth tile out and admit only (51,52) beyond the verified 2x2.
-// ground.c/world3d.c use MAX_Z with their local x coordinate, while world.c uses the x0-based
-// shared threshold below; both predicates describe exactly the same five-tile resident shape.
+// Hardware bisection: both fifth-tile tests on the south Z=52 edge crashed, and disabling terrain
+// rasterization did not save the (51,52) case. Return to normal terrain drawing and move the fifth
+// resident tile to the east edge instead: verified 2x2 plus only (52,50). In ground.c/world3d.c,
+// MAX_X is evaluated with local x/z coordinates. world.c's shared threshold sees x0/z0 and admits
+// the same irregular five-tile shape.
 #define PS2_TERRAIN_MIN_TILE 50
-#define PS2_TERRAIN_MAX_X_TILE 52
-#define PS2_TERRAIN_MAX_Z_TILE ((x) == 51 ? 53 : 52)
-#define PS2_TERRAIN_MAX_TILE ((x0) == 51 ? 53 : 52)
+#define PS2_TERRAIN_MAX_X_TILE ((z) == 50 ? 53 : 52)
+#define PS2_TERRAIN_MAX_Z_TILE 52
+#define PS2_TERRAIN_MAX_TILE (((x0) == 52 && (z0) == 50) ? 53 : 52)
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
@@ -96,11 +97,9 @@
 // The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
 #define PS2_SIMPLE_UI 1
-// Diagnostic only: keep the exact five-tile scene that hard-crashed around T160, but suppress
-// underlay/overlay software rasterization. If this survives, the failure is in the terrain draw path
-// rather than terrain residency/allocation itself. Do not keep flat terrain as the final renderer.
+// Terrain remains untextured on PS2, with normal underlay/overlay rasterization enabled.
 #define PS2_UNTEXTURED_TERRAIN 1
-#define PS2_FLAT_TERRAIN 1
+#define PS2_FLAT_TERRAIN 0
 // Keep synchronous scene/land construction enabled. Static locations and the minimap remain disabled.
 #define PS2_DEFER_SCENE_REBUILD 0
 #define PS2_NULL_SCENE_REBUILD 0
