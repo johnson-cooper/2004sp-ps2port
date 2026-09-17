@@ -6,10 +6,10 @@ This file is the standing workflow for the PlayStation 2 port. Read it before ma
 
 - Active development branch: `ps2-hardware-integration`
 - Branch starting point: `main` commit `673657249ef18526e6c33a3d4381953c132c2782`
-- Last fully real-hardware-known-good integration commit: `cf87b2f6671eb4802128b754b3a31fc359f8c653` (confirmed working on real PS2 on 2026-09-16; current 2x2 untextured-terrain baseline survived beyond T34000 in Lumbridge).
+- Last fully real-hardware-known-good integration commit: `79060e04e67d7ee88c0f80f0f7cf4af91972353a` (confirmed working on real PS2 on 2026-09-16; 16-byte/qword-aligned 4 MiB scene arena with the verified 2x2 terrain plus east-edge tile `(52,50)` survived beyond T6855 in Lumbridge).
 - Terrain milestone: `fb83106daa4de4149bda6f6c36637000f378597a` completed the Lumbridge terrain build and reached the live world, but froze immediately after the first live frame. It is evidence that bounded terrain works, **not** a known-good gameplay checkpoint.
 - The subsequent five-slot textured-terrain cache experiment regressed to a world-loading crash and was rejected.
-- Current terrain finding: the current 2x2 resident window is hardware-stable beyond T34000, while the 3x3 resident window reproducibly failed around T160. Bisect the five additional 3x3 border tiles before increasing terrain residency further.
+- Current terrain finding: the 2x2 resident window survived beyond T34000. Multiple extra-tile layouts failed unpredictably with the old 4-byte scene-arena alignment, including the same east-edge five-tile layout failing during world load. Changing only the PS2 scene arena to a 16-byte-aligned base and 16-byte/qword-aligned bump allocations made that east-edge five-tile layout survive beyond T6855. Treat arena alignment as required; next re-test the previously failing 2x3 six-tile terrain strip under the aligned allocator before trying 3x3 again.
 - Current policy: gameplay-first 32 MiB profile — untextured colored terrain, bounded/lazy Ground residency, tight scene radius, capped nearby dynamic entities, minimum UI, minimap off, static locs deferred until filtered streaming is ready.
 - After each accepted hardware test, update the known-good commit here before starting the next restoration experiment.
 
