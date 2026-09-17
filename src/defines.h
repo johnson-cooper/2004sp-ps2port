@@ -75,14 +75,15 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// Hardware retest after fixing the scene arena to 16-byte/qword alignment. The original 3x3
-// resident terrain window (tiles 50..52 on both axes) previously failed around T160 with 4-byte
-// bump alignment. The aligned allocator has since made both five- and six-tile layouts stable for
-// thousands of ticks, so restore exactly the old 3x3 window and change nothing else for this test.
+// First controlled expansion beyond the hardware-known-good aligned 3x3 window. The qword-aligned
+// 4 MiB scene arena made the old 3x3 configuration survive beyond T9924; expand one row and one
+// column to tiles 50..53 (4x4 / 16 resident terrain slots) without changing render radius, allocator
+// capacity, presentation rate, or any other subsystem. Final terrain residency is expected to grow
+// beyond 3x3, but each increase remains a separate real-hardware acceptance test.
 #define PS2_TERRAIN_MIN_TILE 50
-#define PS2_TERRAIN_MAX_X_TILE 53
-#define PS2_TERRAIN_MAX_Z_TILE 53
-#define PS2_TERRAIN_MAX_TILE 53
+#define PS2_TERRAIN_MAX_X_TILE 54
+#define PS2_TERRAIN_MAX_Z_TILE 54
+#define PS2_TERRAIN_MAX_TILE 54
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
@@ -192,7 +193,7 @@
 #define RED 0xff0000      // 16711680
 #define GREEN 0xff00      // 65280
 #define BLUE 0xff         // 255
-#define YELLOW 0xffff00   // 16776960
+#define YELLOW 0xffff00   // 65535
 #define CYAN 0xffff       // 65535
 #define MAGENTA 0xff00ff  // 16711935
 #define WHITE 0xffffff    // 16777215
