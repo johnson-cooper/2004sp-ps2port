@@ -447,12 +447,12 @@ void world_load_locations(World *world, World3D *scene, LinkList *locs, Collisio
 #endif
 
 #ifdef __PS2__
-    // Keep a 32x32 location window centred on the normal rebuild position
-    // (the player is near local tile 48). The outer ring remains landscape,
-    // but no longer consumes Models, World3D nodes, collision flags, or
-    // animated LocEntity state. The fixed 104x104 arrays remain intact.
-    const int ps2LocMinTile = 32;
-    const int ps2LocMaxTile = 64; // exclusive
+    // Match static location placement to the same bounded local traversal window as terrain. The
+    // previous fixed 32x32 block (32..63) left most of the now-traversable 80x80 scene without
+    // walls/objects and made them disappear after normal scene recentres. If this proves too costly,
+    // replace it with a moving/recycled loc window rather than expanding residency further.
+    const int ps2LocMinTile = PS2_TERRAIN_MIN_TILE;
+    const int ps2LocMaxTile = PS2_TERRAIN_MAX_TILE;
 #endif
 
     while (true) {
