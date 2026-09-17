@@ -6,12 +6,13 @@ This file is the standing workflow for the PlayStation 2 port. Read it before ma
 
 - Active development branch: `ps2-hardware-integration`
 - Branch starting point: `main` commit `673657249ef18526e6c33a3d4381953c132c2782`
-- Last fully real-hardware-known-good integration commit: `882c9281b366c6eec02a967af3827f711ded004d` (confirmed working on real PS2 on 2026-09-17). The qword-aligned scene allocator, 80x80 bounded terrain bridge window, radius-14 / 29x29 camera window, local player, gameplay UI, inventory icons and viewport/UI virtual cursor all remain stable. The player can now travel indefinitely in any direction across normal `REBUILD_NORMAL` scene transitions with no crash.
+- Last fully real-hardware-known-good integration commit: `65a7d409593513defa5485dc7f17a2de2747b022` (confirmed working on real PS2 on 2026-09-17). The qword-aligned scene allocator, 80x80 bounded terrain bridge window, radius-14 / 29x29 camera window, local player, gameplay UI, inventory icons and viewport/UI virtual cursor remain stable. The player can travel indefinitely across normal `REBUILD_NORMAL` scene transitions, and restoring the original low-memory terrain texture path with a single 64 KiB texel-cache slot rendered water correctly with no crash.
 - Terrain finding: the old 4-byte scene-arena alignment made terrain residency layout-sensitive. A 16-byte/qword-aligned base and qword-aligned bump allocations fixed that class of hardware crash. 2x3, 3x3, 16x16, 32x32, 48x48 and now 80x80 traversal-bridge terrain configurations have run on real hardware. Keep qword alignment as mandatory.
 - Traversal finding: 32x32 and 48x48 fixed terrain windows ended before the client could comfortably reach the normal server-driven scene recenter. The 80x80 local window (12..91) bridges that gap and lets `REBUILD_NORMAL` recenter repeatedly, providing continuous world traversal without materialising the full 104x104 render scene.
-- Current world-restoration issues: water/textured floor overlays do not currently have a useful untextured PS2 fallback and rivers can appear absent; static locs/walls/objects use a fixed 32x32 local placement/read window and do not remain present throughout traversal/after the observed scene-transition path; the dedicated PS2 local-player draw still forces `player->lowmem = true`, suppressing normal walk/run/action transforms. Fix these as separate hardware-tested changes.
+- Texture finding: `PIX3D_POOL_COUNT=1` is sufficient for the low-memory texture path and costs 64 KiB for the active texel slot. Water/rivers are hardware-good with this configuration. Treat water as the essential terrain texture; non-water terrain textures can later fall back to average/flat colour so the single slot is not churned unnecessarily.
+- Current world-restoration issues: static locs/walls/objects still use a fixed 32x32 local placement/read window and do not remain present throughout traversal/after scene transitions; the dedicated PS2 local-player draw still forces `player->lowmem = true`, suppressing normal walk/run/action transforms. Fix these as separate hardware-tested changes.
 - Static loc/model rendering has been observed to reduce live framerate from roughly 50 FPS to roughly 30 FPS. Preserve correctness first; renderer/VU1/GS acceleration is a separate later optimization milestone.
-- Current policy: gameplay-first 32 MiB profile — untextured colored terrain, bounded/lazy Ground residency, fourteen-tile camera radius, local player enabled, bounded static-loc placement, capped nearby dynamic entities, normal interactive gameplay UI and inventory icons with simplified chrome, minimap off.
+- Current policy: gameplay-first 32 MiB profile — bounded/lazy Ground residency, fourteen-tile camera radius, one-slot low-memory terrain texturing with water as the essential texture, local player enabled, bounded static-loc placement, capped nearby dynamic entities, normal interactive gameplay UI and inventory icons with simplified chrome, minimap off.
 - After each accepted hardware test, update the known-good commit here before starting the next restoration experiment.
 
 ## Source of truth
@@ -66,7 +67,7 @@ Unless a specific experiment requires otherwise:
 
 The retail PS2 has 32 MiB total EE RAM. Gameplay state wins over cosmetic fidelity.
 
-- Keep terrain heights, collision and floor colours. Terrain textures are optional and currently disabled.
+- Keep terrain heights, collision and floor colours. Water is the essential terrain texture; non-water terrain textures are optional.
 - Keep terrain/scene residency bounded instead of eagerly materialising the full 104x104 map as `Ground` objects.
 - Cull dynamic render entities by distance before World3D insertion and enforce per-frame population caps. Network/update state may continue outside the render radius.
 - Prefer the local player and nearby interactable NPCs/players over distant entities and effects.
@@ -84,9 +85,9 @@ Restore missing game systems gradually, but optimize each system for the gamepla
 
 Current intended progression:
 
-1. Keep the hardware-good qword-aligned bounded terrain/traversal baseline stable.
+1. Keep the hardware-good qword-aligned bounded terrain/traversal + one-slot water-texture baseline stable.
 2. Make loc/wall/object residency survive continuous traversal and scene recentering without restoring the unrestricted desktop scene.
-3. Restore a cheap colored fallback for water/textured terrain overlays while keeping full terrain texturing disabled.
+3. Restrict the single terrain texture slot to water while using average/flat-colour fallback for other textured floors if texture churn materially costs frame time.
 4. Restore local-player walk/run/action animation without reintroducing appearance-cache/temporary-model leaks.
 5. Restore/verify ground items, projectiles and overhead elements under strict caps.
 6. Measure remaining scene/model/cache pressure and renderer time.
