@@ -69,11 +69,51 @@ int SHAPE_PATHS_SIZES[] = {
     24  // TRAPEZIUM_SHAPE
 };
 
+#ifdef __PS2__
+extern unsigned int ps2_scene_arena_generation;
+
+#define PS2_TILEOVERLAY_SLAB_BYTES 4096
+static unsigned char *ps2_tileoverlay_slab = NULL;
+static size_t ps2_tileoverlay_slab_used = 0;
+static size_t ps2_tileoverlay_slab_capacity = 0;
+static unsigned int ps2_tileoverlay_slab_generation = 0;
+#endif
+
 static void *tileoverlay_persistent_calloc(size_t count, size_t size) {
 #ifdef __PS2__
-    // TileOverlay and its geometry arrays live exactly as long as the materialized scene terrain.
-    // Keep them out of the tiny libc heap; bump_allocator_reset() reclaims the whole generation.
-    return rs2_calloc(true, count, size);
+    // TileOverlay is made from many tiny structs/int arrays. Giving each one directly to the scene
+    // arena wastes up to 15 bytes at every qword-aligned bump boundary. Pack those allocations into
+    // a qword-aligned scene-owned slab and keep the individual objects naturally 4-byte aligned.
+    // The slab itself still obeys the hardware-proven 16-byte arena alignment requirement.
+    if (!count || !size) {
+        return NULL;
+    }
+    size_t bytes = count * size;
+    size_t aligned = (bytes + 3u) & ~(size_t)3u;
+
+    if (ps2_tileoverlay_slab_generation != ps2_scene_arena_generation) {
+        ps2_tileoverlay_slab = NULL;
+        ps2_tileoverlay_slab_used = 0;
+        ps2_tileoverlay_slab_capacity = 0;
+        ps2_tileoverlay_slab_generation = ps2_scene_arena_generation;
+    }
+
+    if (!ps2_tileoverlay_slab ||
+        ps2_tileoverlay_slab_used + aligned > ps2_tileoverlay_slab_capacity) {
+        size_t slab_bytes = aligned > PS2_TILEOVERLAY_SLAB_BYTES ? aligned : PS2_TILEOVERLAY_SLAB_BYTES;
+        ps2_tileoverlay_slab = rs2_calloc(true, 1, slab_bytes);
+        if (!ps2_tileoverlay_slab) {
+            ps2_tileoverlay_slab_used = 0;
+            ps2_tileoverlay_slab_capacity = 0;
+            return NULL;
+        }
+        ps2_tileoverlay_slab_used = 0;
+        ps2_tileoverlay_slab_capacity = slab_bytes;
+    }
+
+    void *result = ps2_tileoverlay_slab + ps2_tileoverlay_slab_used;
+    ps2_tileoverlay_slab_used += aligned;
+    return result;
 #else
     return calloc(count, size);
 #endif
