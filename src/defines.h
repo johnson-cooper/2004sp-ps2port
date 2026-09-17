@@ -118,10 +118,10 @@
 #define PS2_NULL_UI 0
 #define PS2_SAFE_INTERFACE 0
 #define PS2_UI_PROFILE 0
-// Hardware-tested restoration step after radius-14 terrain became stable. The generic PS2
-// pushPlayers() path intentionally skips LOCAL_PLAYER_INDEX, so keep the dedicated direct local
-// avatar draw enabled while restoring the interactive/model-backed gameplay UI.
-#define PS2_RENDER_LOCAL_PLAYER 1
+// The old dedicated local-player pass ran after World3D, so it always painted over walls, and it
+// forced player->lowmem=true, bypassing sequenced animation transforms. Keep that overlay disabled;
+// world3d.c now injects the local player into the normal temporary-location scene before traversal.
+#define PS2_RENDER_LOCAL_PLAYER 0
 #elif defined(_arch_dreamcast) || defined(__NDS__)
 // NOTE: more extreme lowmem mode, making the game fully explorable on 32 MB
 // -2 MB RAM, may cause some models to be invisible
