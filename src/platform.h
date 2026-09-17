@@ -66,6 +66,13 @@ int indexof(const char *str, const char *str2);
 char *substring(const char *src, size_t start, size_t length);
 double jrand(void);
 
+#ifdef __PS2__
+// Capture the ELF launch directory before PS2 platform init so USB-backed assets can live
+// beside client.elf in any folder instead of being forced to the root of mass0:.
+void ps2_set_launch_path(const char *path);
+const char *ps2_cache_prefix(void);
+#endif
+
 bool platform_init(void);
 void platform_new(GameShell *shell);
 void platform_free(void);

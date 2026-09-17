@@ -12532,6 +12532,11 @@ static bool secured = false;
 #endif
 
 int main(int argc, char **argv) {
+#ifdef __PS2__
+    // Preserve the launcher-supplied ELF path before platform/USB initialization. The PS2 asset
+    // resolver later validates this directory and uses it for config.ini + the complete rom tree.
+    ps2_set_launch_path((argc > 0 && argv) ? argv[0] : NULL);
+#endif
     // init screen before logging is required for some platforms
     if (!platform_init()) {
         rs2_error("Failed to init platform!\n");

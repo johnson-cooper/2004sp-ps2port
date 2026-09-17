@@ -117,37 +117,102 @@ static void SleepMsApprox()
 // real boot log confirmed PCSX2's own USB-boot chain mounts a drive this way before handing off to
 // this ELF) and plain "mass:" as a fallback, in case a given loader/boot path ever exposes it
 // unnumbered instead. Checking both costs nothing once one succeeds.
+static char ps2_launch_relative_dir[192];
+
+// main() calls this before platform_init(). No filesystem access happens here: we only remember
+// the directory portion of a USB launch path such as mass0:/Games/2004sp/client.elf. Once the BDM
+// USB stack is mounted, ps2_cache_prefix() below validates that directory before using it.
+void ps2_set_launch_path(const char *path) {
+    ps2_launch_relative_dir[0] = '\0';
+    if (!path || strncmp(path, "mass", 4) != 0) {
+        return;
+    }
+
+    const char *colon = strchr(path, ':');
+    if (!colon) {
+        return;
+    }
+
+    const char *relative = colon + 1;
+    while (*relative == '/' || *relative == '\\') {
+        relative++;
+    }
+
+    size_t length = strlen(relative);
+    if (length == 0 || length >= sizeof(ps2_launch_relative_dir)) {
+        return;
+    }
+
+    memcpy(ps2_launch_relative_dir, relative, length + 1);
+    for (size_t i = 0; i < length; i++) {
+        if (ps2_launch_relative_dir[i] == '\\') {
+            ps2_launch_relative_dir[i] = '/';
+        }
+    }
+
+    char *last_slash = strrchr(ps2_launch_relative_dir, '/');
+    if (!last_slash) {
+        // client.elf was launched directly from the USB root.
+        ps2_launch_relative_dir[0] = '\0';
+        return;
+    }
+    last_slash[1] = '\0';
+}
+
+static bool ps2_install_prefix_valid(const char *candidate, bool require_config) {
+    char path[320];
+    snprintf(path, sizeof(path), "%srom/cache/client/crc", candidate);
+    FILE *probe = fopen(path, "rb");
+    if (!probe) {
+        return false;
+    }
+    fclose(probe);
+
+    if (!require_config) {
+        return true;
+    }
+
+    snprintf(path, sizeof(path), "%sconfig.ini", candidate);
+    probe = fopen(path, "rb");
+    if (!probe) {
+        return false;
+    }
+    fclose(probe);
+    return true;
+}
+
 const char *ps2_cache_prefix(void) {
     static bool checked = false;
-    static const char *prefix = "";
+    static char prefix[256] = "";
     if (!checked) {
         checked = true;
-        static const char *const candidates[] = {"mass0:/", "mass:/"};
-        // platform_init() now calls this immediately after loading USB, before network
-        // setup - the drive has had essentially no settling time yet at that point, unlike when
-        // this was only ever reached lazily much later in boot (after 30s+ of network setup had
-        // already elapsed in the background). A short fixed delay before the very first attempt,
-        // matching a real, working reference project's own approach to this exact timing problem
-        // (OptiJuegos/ReleasePlusPlus's Ps2UsbMass::initialize(), DelayThread(500*1000) before its
-        // first availability check), costs far less than even one avoidable retry pass if a
-        // not-yet-ready device makes each individual fopen() attempt itself slow rather than fast.
+        static const char *const devices[] = {"mass0:/", "mass:/"};
+
+        // Give the BDM mass-storage stack the same bounded settling window used by the proven
+        // root-level path. On each pass, prefer the directory client.elf was launched from, then
+        // preserve the historical mass0:/ root layout as a backwards-compatible fallback.
         SleepMsApprox();
         SleepMsApprox();
         SleepMsApprox();
         SleepMsApprox();
         SleepMsApprox();
-        // A real boot log measured ~1s between the USB driver coming up and the drive actually
-        // being mounted - retry for a few seconds to comfortably cover that, still bounded so a
-        // PCSX2 dev/testing boot with no mass-storage device attached doesn't hang, just pays a
-        // one-time few-second tax on this specific probe.
-        for (int i = 0; i < 50 && !prefix[0]; i++) {
-            for (size_t c = 0; c < sizeof(candidates) / sizeof(candidates[0]); c++) {
-                char path[64];
-                snprintf(path, sizeof(path), "%srom/cache/client/crc", candidates[c]);
-                FILE *probe = fopen(path, "rb");
-                if (probe) {
-                    fclose(probe);
-                    prefix = candidates[c];
+        for (int attempt = 0; attempt < 50 && !prefix[0]; attempt++) {
+            for (size_t d = 0; d < sizeof(devices) / sizeof(devices[0]) && !prefix[0]; d++) {
+                if (ps2_launch_relative_dir[0]) {
+                    char candidate[256];
+                    snprintf(candidate, sizeof(candidate), "%s%s", devices[d], ps2_launch_relative_dir);
+                    // A subfolder install must be self-contained. This prevents a stale/partial
+                    // rom tree elsewhere on the stick from being selected accidentally.
+                    if (ps2_install_prefix_valid(candidate, true)) {
+                        snprintf(prefix, sizeof(prefix), "%s", candidate);
+                        break;
+                    }
+                }
+
+                // Preserve existing installs exactly: root detection historically required the
+                // cache marker only, so don't make config.ini newly mandatory there.
+                if (ps2_install_prefix_valid(devices[d], false)) {
+                    snprintf(prefix, sizeof(prefix), "%s", devices[d]);
                     break;
                 }
             }

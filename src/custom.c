@@ -66,7 +66,7 @@ bool load_ini_args(void) {
 #ifdef NXDK
     ini_t *config = ini_load("D:\\config.ini");
 #elif defined(__PS2__)
-    char config_path[64];
+    char config_path[256];
     snprintf(config_path, sizeof(config_path), "%sconfig.ini", ps2_cache_prefix());
     ini_t *config = ini_load(config_path);
 #else
@@ -108,7 +108,7 @@ void load_ini_config(Client *c) {
 #ifdef NXDK
     ini_t *config = ini_load("D:\\config.ini");
 #elif defined(__PS2__)
-    char config_path[64];
+    char config_path[256];
     snprintf(config_path, sizeof(config_path), "%sconfig.ini", ps2_cache_prefix());
     ini_t *config = ini_load(config_path);
 #else
