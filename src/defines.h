@@ -221,7 +221,7 @@
 #define SCROLLBAR_GRIP_HIGHLIGHT 0x766654  // 7759444
 #define SCROLLBAR_GRIP_LOWLIGHT 0x332d25   // 3353893
 #define TRADE_MESSAGE 0x800080             // 8388736
-#define DUEL_MESSAGE 0xcbb789              // 13347821
+#define DUEL_MESSAGE 0xcbb789              // 13347721
 
 // ---- these are in hsl 16 bits
 // hair
