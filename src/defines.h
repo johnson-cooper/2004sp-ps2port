@@ -75,15 +75,14 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// Hardware bisection: the verified 2x2 control survived past T34k, while adding the full south edge
-// (50,52)+(51,52) eventually crashed around T2193. Admit only (50,52) beyond the verified 2x2 now.
-// ground.c/world3d.c evaluate MAX_X with a local variable named z; rows 50-51 retain width 2, while
-// row 52 is width 1. world.c uses the separate x0-based shared threshold below to materialize exactly
-// the same five-tile shape without changing any renderer, heap, or scene-arena behavior.
+// Hardware bisection: the verified 2x2 control survived past T34k, while adding (50,52) alone
+// crashed around T1212. Swap that fifth tile out and admit only (51,52) beyond the verified 2x2.
+// ground.c/world3d.c use MAX_Z with their local x coordinate, while world.c uses the x0-based
+// shared threshold below; both predicates describe exactly the same five-tile resident shape.
 #define PS2_TERRAIN_MIN_TILE 50
-#define PS2_TERRAIN_MAX_X_TILE ((z) < 52 ? 52 : 51)
-#define PS2_TERRAIN_MAX_Z_TILE 53
-#define PS2_TERRAIN_MAX_TILE ((x0) == 50 ? 53 : 52)
+#define PS2_TERRAIN_MAX_X_TILE 52
+#define PS2_TERRAIN_MAX_Z_TILE ((x) == 51 ? 53 : 52)
+#define PS2_TERRAIN_MAX_TILE ((x0) == 51 ? 53 : 52)
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
