@@ -73,18 +73,21 @@
 // terrain texture IDs, so this test does not repeat the earlier five-slot (+256 KiB) experiment.
 #define PIX3D_POOL_COUNT 1
 #define DISABLE_FLAMES
-// Radius 14 / 29x29 remains hardware-good. The 80x80 (12..91) terrain+loc residency restored
-// continuous scene transitions and the missing walls/objects, but dense scenes eventually crashed
-// with the malloc free-list down in the ~50 KiB range. Trim the shared fixed-local residency to
-// 72x72 (16..87): this is still wide enough to reach the normal rebuild/recenter boundary in the
-// classic 104x104 scene, while cutting resident tile/loc area from 6400 to 5184 positions (~19%).
-// If this is stable, replace the fixed loc residency with a player-following window rather than
-// expanding back to 80x80.
+// Radius 14 / 29x29 remains hardware-good. Real hardware established two separate requirements:
+// 80x80 terrain (12..91) is needed to bridge every normal REBUILD_NORMAL boundary without exposing
+// black/unmaterialised ground, while 80x80 static loc placement eventually destabilises dense scenes.
+// Keep terrain at the traversal-good 80x80 size, but retain the lighter 72x72 loc/model window from
+// the last test. world_load_locations is the only legacy call site that still aliases its loc bounds
+// to PS2_TERRAIN_*; the __func__-constant selector below decouples that one function without changing
+// the terrain/arena bounds used everywhere else. This is an isolated hardware bisection; once the
+// size is accepted, replace the selector with dedicated loc-window constants in world.c.
 #define PS2_RENDER_RADIUS 14
-#define PS2_TERRAIN_MIN_TILE 16
-#define PS2_TERRAIN_MAX_X_TILE 88
-#define PS2_TERRAIN_MAX_Z_TILE 88
-#define PS2_TERRAIN_MAX_TILE 88
+#define PS2_LOC_MIN_TILE 16
+#define PS2_LOC_MAX_TILE 88
+#define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 12)
+#define PS2_TERRAIN_MAX_X_TILE 92
+#define PS2_TERRAIN_MAX_Z_TILE 92
+#define PS2_TERRAIN_MAX_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MAX_TILE : 92)
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
@@ -92,9 +95,9 @@
 // Simulation/networking stay at 50 Hz. Present the expensive software 3D view at 10 Hz for now;
 // gameplay remains responsive while we establish a stable memory/performance floor.
 #define PS2_RENDER_DIVISOR 5
-// Static-world restoration stays enabled. world_load_locations currently follows the same bounded
-// local constants as terrain, so this 72x72 test deliberately reduces both together after the
-// 80x80 dense-loc hardware crash while preserving scene-transition population.
+// Static-world restoration stays enabled. For this test loc/model placement is 72x72 while terrain
+// returns to the traversal-proven 80x80 bridge window, so black terrain and dense-loc pressure are no
+// longer tied to the same knob.
 #define PS2_DEFER_STATIC_LOCATIONS 0
 // The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
@@ -110,7 +113,7 @@
 // Normal dynamic chat/sidebar/tab composition is hardware-good. Lift the final safe-interface gate
 // for this test so the controller virtual cursor is visible and type-2 inventory slots can render
 // their normal 32x32 object icons. This also admits normal type-6 interface model components, so
-// treat the whole interactive/model-backed UI layer as one hardware acceptance test and watch heap,
+// treat the whole interactive/model-backed gameplay UI layer as one hardware acceptance test and watch heap,
 // model/icon cache pressure and frame time. The minimap and heavy decorative chrome remain disabled.
 #define PS2_NULL_UI 0
 #define PS2_SAFE_INTERFACE 0
