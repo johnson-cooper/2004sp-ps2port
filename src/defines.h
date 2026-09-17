@@ -72,14 +72,15 @@
 // users and avoids the extra permanent pool that made the dense Lumbridge rebuild regress.
 #define PIX3D_POOL_COUNT 1
 #define DISABLE_FLAMES
-// Radius 6 / 13x13 is hardware-stable. Keep that exact per-frame draw workload while expanding only
-// terrain residency below, so this experiment measures whether the small visible patch was caused by
-// the orbit camera sitting near an edge of the old fixed 16x16 resident window.
-#define PS2_RENDER_RADIUS 6
-// 32x32 resident terrain window centred on the same local-scene point as the proven 16x16 window.
-// The normal orbit camera can sit roughly several tiles behind the player; 16x16 therefore clipped a
-// significant part of a camera-centred radius-6 draw window. 35..66 gives enough margin for the full
-// 13x13 camera window around a centrally located player without increasing draw radius at the same time.
+// Radius 6 / 13x13 with 32x32 terrain residency is hardware-stable but still visibly too short for
+// normal play. Increase only the camera-centred draw radius to 10 (21x21, up to 441 nearby tiles),
+// keeping residency, arena size, presentation rate and every other subsystem unchanged. This is a
+// meaningful view-distance step while remaining well below the desktop renderer's 25-tile radius.
+#define PS2_RENDER_RADIUS 10
+// Keep the hardware-proven 32x32 resident terrain window unchanged for this draw-distance test.
+// It provides much more camera margin than the former 16x16 block; if radius 10 reaches its edge at
+// steep camera pitches, the next step is a moving/bounded residency window rather than unbounded map
+// materialisation.
 #define PS2_TERRAIN_MIN_TILE 35
 #define PS2_TERRAIN_MAX_X_TILE 67
 #define PS2_TERRAIN_MAX_Z_TILE 67
