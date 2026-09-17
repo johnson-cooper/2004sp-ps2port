@@ -37,7 +37,7 @@ static bool ps2_ground_is_scene_arena_tile(int x, int z) {
            z >= PS2_TERRAIN_MIN_TILE && z < PS2_TERRAIN_MAX_Z_TILE;
 }
 
-static void ps2_submit_local_player(World3D *world3d) {
+static void ps2_submit_local_player(World3D *world3d, int loopCycle) {
 #if !PS2_RENDER_LOCAL_PLAYER
     Client *c = ps2_crash_client;
     if (!c || c->scene != world3d) {
@@ -63,8 +63,8 @@ static void ps2_submit_local_player(World3D *world3d) {
                               player->pathing_entity.x, player->pathing_entity.z);
 
     int bitset = LOCAL_PLAYER_INDEX << 14;
-    if (!player->locModel || _Client.loop_cycle < player->locStartCycle ||
-        _Client.loop_cycle >= player->locStopCycle) {
+    if (!player->locModel || loopCycle < player->locStartCycle ||
+        loopCycle >= player->locStopCycle) {
         world3d_add_temporary(world3d, c->currentLevel,
                               player->pathing_entity.x, player->y, player->pathing_entity.z,
                               NULL, &player->pathing_entity.entity, bitset,
@@ -80,6 +80,7 @@ static void ps2_submit_local_player(World3D *world3d) {
     }
 #else
     (void)world3d;
+    (void)loopCycle;
 #endif
 }
 
@@ -197,7 +198,7 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     // Admit the local player before visibility marking and tile traversal. This makes it participate
     // in the same Location ordering as walls/trees/buildings instead of being painted as a final
     // overlay after the whole scene, while leaving the rest of the PS2 entity caps unchanged.
-    ps2_submit_local_player(world3d);
+    ps2_submit_local_player(world3d, loopCycle);
 
     _World3D.cycle++;
     _World3D.sinEyePitch = _Pix3D.sin_table[eyePitch];
