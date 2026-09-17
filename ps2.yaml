@@ -17,6 +17,12 @@ targets:
       - __PS2__
       - WITH_RSA_LIBTOM
       - PS2IP_DNS
+      # Modern PS2 UI milestone 1 stays outside the legacy Client renderer. Intercept only
+      # prebuilt PS2SDK calls: the gsKit sprite wrapper reorganizes the final uploaded canvas,
+      # while the padRead wrapper remaps the physical cursor back to the old viewport/sidebar
+      # coordinate system. src/ps2_modern_ui.c undefines these before calling the real SDK APIs.
+      - gsKit_prim_sprite_texture_3d=ps2_modern_gsKit_prim_sprite_texture_3d
+      - padRead=ps2_modern_padRead
       # 2026-09-14: PS2_LOC_DECODE_ONLY (was here temporarily) answered its question - decode-only
       # mode (world_add_loc2() skipped) completed ALL 6 mapsquares' loc decode + world_build() +
       # reached "scene: build_scene complete" cleanly on real hardware. Bug confirmed to live inside
