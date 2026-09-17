@@ -92,25 +92,27 @@
 // Simulation/networking stay at 50 Hz. Present the expensive software 3D view at 10 Hz for now;
 // gameplay remains responsive while we establish a stable memory/performance floor.
 #define PS2_RENDER_DIVISOR 5
-// Static locations remain off while the gameplay-first loc streamer/filter is implemented. When
-// restored, examine-only decorative locs should not receive render/model residency on PS2.
-#define PS2_DEFER_STATIC_LOCATIONS 1
+// First static-world restoration test. client_build_scene() and world_load_locations() already gate
+// PS2 loc I/O and placement to the local 32x32 tile window (local tiles 32..63), so disabling the
+// defer switch restores only that bounded window instead of the full 104x104 desktop loc scene.
+// Keep this isolated from UI/minimap/effects changes until it passes on real hardware.
+#define PS2_DEFER_STATIC_LOCATIONS 0
 // The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
 #define PS2_SIMPLE_UI 1
 // Terrain remains untextured on PS2, with normal underlay/overlay rasterization enabled.
 #define PS2_UNTEXTURED_TERRAIN 1
 #define PS2_FLAT_TERRAIN 0
-// Keep synchronous scene/land construction enabled. Static locations and the minimap remain disabled.
+// Keep synchronous scene/land construction enabled. The minimap remains disabled.
 #define PS2_DEFER_SCENE_REBUILD 0
 #define PS2_NULL_SCENE_REBUILD 0
 // Keep the minimum gameplay UI; software 3D interface models remain blocked.
 #define PS2_NULL_UI 0
 #define PS2_SAFE_INTERFACE 1
 #define PS2_UI_PROFILE 1
-// Isolated restoration step after radius-14 terrain became hardware-stable. The generic PS2
-// pushPlayers() path intentionally skips LOCAL_PLAYER_INDEX, so enable the dedicated direct local
-// avatar draw without changing remote-player/NPC submission, locs, UI, minimap, or terrain.
+// Hardware-tested restoration step after radius-14 terrain became stable. The generic PS2
+// pushPlayers() path intentionally skips LOCAL_PLAYER_INDEX, so keep the dedicated direct local
+// avatar draw enabled while restoring the bounded static-loc window.
 #define PS2_RENDER_LOCAL_PLAYER 1
 #elif defined(_arch_dreamcast) || defined(__NDS__)
 // NOTE: more extreme lowmem mode, making the game fully explorable on 32 MB
