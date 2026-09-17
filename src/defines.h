@@ -193,7 +193,7 @@
 #define RED 0xff0000      // 16711680
 #define GREEN 0xff00      // 65280
 #define BLUE 0xff         // 255
-#define YELLOW 0xffff00   // 65535
+#define YELLOW 0xffff00   // 16776960
 #define CYAN 0xffff       // 65535
 #define MAGENTA 0xff00ff  // 16711935
 #define WHITE 0xffffff    // 16777215
