@@ -15,7 +15,13 @@
 #undef world3d_init
 #undef world3d_init_global
 
-// PS2 uses a four-tile draw radius. A single conservative 51x51 visibility map
+// The PS2 client already exposes its one lifetime Client instance for the crash/checkpoint path.
+// Reuse that pointer here so the local player can be admitted into World3D without reopening the
+// huge client draw path: the normal PS2 pushPlayers() still skips LOCAL_PLAYER_INDEX, while this
+// renderer-local bridge inserts that one actor before tile traversal/sorting.
+#include "client.h"
+
+// PS2 uses a bounded draw radius. A single conservative 51x51 visibility map
 // is enough for the bounded PS2 scene, avoiding the desktop 8x32x51x51 table
 // and its large temporary construction matrix.
 static bool ps2_visibility_map[51][51];
@@ -29,6 +35,52 @@ static bool ps2_ground_is_empty(const Ground *tile) {
 static bool ps2_ground_is_scene_arena_tile(int x, int z) {
     return x >= PS2_TERRAIN_MIN_TILE && x < PS2_TERRAIN_MAX_X_TILE &&
            z >= PS2_TERRAIN_MIN_TILE && z < PS2_TERRAIN_MAX_Z_TILE;
+}
+
+static void ps2_submit_local_player(World3D *world3d) {
+#if !PS2_RENDER_LOCAL_PLAYER
+    Client *c = ps2_crash_client;
+    if (!c || c->scene != world3d) {
+        return;
+    }
+
+    PlayerEntity *player = c->local_player;
+    if (!player || !playerentity_is_visible(player)) {
+        return;
+    }
+
+    int stx = player->pathing_entity.x >> 7;
+    int stz = player->pathing_entity.z >> 7;
+    if (stx < 0 || stx >= world3d->maxTileX || stz < 0 || stz >= world3d->maxTileZ) {
+        return;
+    }
+
+    // The old post-World3D shortcut forced lowmem here, which returned the cached base model before
+    // walk/run/action sequence transforms. The real local-player path is never lowmem on desktop;
+    // preserve that rule so entity_draw() builds the current animated pose when the tile is drawn.
+    player->lowmem = false;
+    player->y = getHeightmapY(c, c->currentLevel,
+                              player->pathing_entity.x, player->pathing_entity.z);
+
+    int bitset = LOCAL_PLAYER_INDEX << 14;
+    if (!player->locModel || _Client.loop_cycle < player->locStartCycle ||
+        _Client.loop_cycle >= player->locStopCycle) {
+        world3d_add_temporary(world3d, c->currentLevel,
+                              player->pathing_entity.x, player->y, player->pathing_entity.z,
+                              NULL, &player->pathing_entity.entity, bitset,
+                              player->pathing_entity.yaw, 60,
+                              player->pathing_entity.seqStretches);
+    } else {
+        world3d_add_temporary2(world3d, c->currentLevel,
+                               player->pathing_entity.x, player->y, player->pathing_entity.z,
+                               player->minTileX, player->minTileZ,
+                               player->maxTileX, player->maxTileZ,
+                               NULL, &player->pathing_entity.entity, bitset,
+                               player->pathing_entity.yaw);
+    }
+#else
+    (void)world3d;
+#endif
 }
 
 void world3d_init_global(void) {
@@ -57,7 +109,7 @@ void world3d_init(int viewportWidth, int viewportHeight, int frustumStart, int f
     (void)pitchDistance;
 }
 
-// With a four-tile PS2 draw radius, the desktop occluder graph costs heap and
+// With the bounded PS2 draw radius, the desktop occluder graph costs heap and
 // update time for little benefit. Keep geometry/collision intact and simply
 // render the already tightly bounded nearby scene without world occluders.
 void world3d_add_occluder(int level, int type, int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
@@ -85,7 +137,7 @@ void world3d_update_activeoccluders(void) {
 // cannot reclaim those individually, so clearing their levelTiles pointer would
 // lose the only reusable reference and make the same tile consume another arena
 // allocation on the next frame. Keep empty arena-backed nodes linked for reuse;
-// their population is strictly bounded by the tiny resident terrain window.
+// their population is strictly bounded by the resident terrain window.
 void world3d_clear_temporarylocs(World3D *world3d) {
     for (int i = 0; i < world3d->temporaryLocCount; i++) {
         Location *loc = world3d->temporaryLocs[i];
@@ -141,6 +193,11 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     } else if (eyeZ >= world3d->maxTileZ * 128) {
         eyeZ = world3d->maxTileZ * 128 - 1;
     }
+
+    // Admit the local player before visibility marking and tile traversal. This makes it participate
+    // in the same Location ordering as walls/trees/buildings instead of being painted as a final
+    // overlay after the whole scene, while leaving the rest of the PS2 entity caps unchanged.
+    ps2_submit_local_player(world3d);
 
     _World3D.cycle++;
     _World3D.sinEyePitch = _Pix3D.sin_table[eyePitch];
