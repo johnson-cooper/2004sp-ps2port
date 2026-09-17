@@ -35,6 +35,26 @@ static bool model_face_indices_valid(Model *m, int a, int b, int c) {
            c >= 0 && c < m->vertex_count && c < MODEL_VERTEX_SCRATCH_COUNT;
 }
 
+static inline int model_pick_mouse_x(void) {
+#ifdef __PS2__
+    // The PS2 scene setup still carries a stale half-resolution `/2` conversion even though the
+    // current software 3D target is the native 512x334 viewport. Undo that legacy conversion at the
+    // model picker so the visible virtual cursor and model hit tests refer to the same pixel. This is
+    // deliberately isolated from UI input; only World3D/model picking consumes these coordinates.
+    return _Model.mouse_x << 1;
+#else
+    return _Model.mouse_x;
+#endif
+}
+
+static inline int model_pick_mouse_y(void) {
+#ifdef __PS2__
+    return _Model.mouse_y << 1;
+#else
+    return _Model.mouse_y;
+#endif
+}
+
 static void model_bucket_face(int depth_average, int face) {
     if (depth_average < 0 || depth_average >= MODEL_MAX_DEPTH) {
 #ifdef __PS2__
@@ -165,8 +185,8 @@ void model_draw(Model *m, int yaw, int sinCameraPitch, int cosCameraPitch, int s
             maxScreenY /= d;
             minScreenY /= cx;
         }
-        cy = _Model.mouse_x - _Pix3D.center_x;
-        yawsin = _Model.mouse_y - _Pix3D.center_y;
+        cy = model_pick_mouse_x() - _Pix3D.center_x;
+        yawsin = model_pick_mouse_y() - _Pix3D.center_y;
         if (cy > minScreenX && cy < maxScreenX && yawsin > minScreenY && yawsin < maxScreenY) {
             if (m->pick_aabb) {
                 if (_Model.picked_count < 1000) {
@@ -264,7 +284,7 @@ void model_draw2(Model *m, bool projected, bool hasInput, int bitset) {
             int depth_average = (_Model.vertex_screen_z[a] + _Model.vertex_screen_z[b] + _Model.vertex_screen_z[c]) / 3 + m->min_depth;
             model_bucket_face(depth_average, f);
         } else {
-            if (hasInput && model_point_within_triangle(_Model.mouse_x, _Model.mouse_y,
+            if (hasInput && model_point_within_triangle(model_pick_mouse_x(), model_pick_mouse_y(),
                     _Model.vertex_screen_y[a], _Model.vertex_screen_y[b], _Model.vertex_screen_y[c], xa, xb, xc)) {
                 if (_Model.picked_count < 1000) {
                     _Model.picked_bitsets[_Model.picked_count++] = bitset;
