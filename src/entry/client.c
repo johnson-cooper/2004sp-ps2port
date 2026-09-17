@@ -10984,7 +10984,9 @@ void client_draw_scene(Client *c) {
     _Pix3D.line_offset = c->area_viewport_offsets;
     _Pix3D.center_x = 256;
     _Pix3D.center_y = 167;
+    if (_Custom.show_performance) {
     ps2_draw_large_world_time(c, world_ms);
+}
 #endif
 
     static uint64_t pixmap_now;
