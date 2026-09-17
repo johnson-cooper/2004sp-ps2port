@@ -37,12 +37,17 @@ struct Ground {
     uint8_t locSpan[5];
     uint8_t locSpans;
     uint8_t drawLevel;
-    bool visible;
-    bool update;
-    bool containsLocs;
-    uint8_t checkLocSpans;
-    uint8_t blockLocSpans;
-    uint8_t inverseBlockLocSpans;
+
+    // These fields were each stored in a full byte. Packing their actual ranges
+    // drops sizeof(Ground) to the next qword-friendly boundary on the EE: the
+    // scene arena therefore advances 80 bytes per Ground instead of 96 while
+    // preserving the existing field names and all renderer/bridge semantics.
+    uint8_t visible : 1;
+    uint8_t update : 1;
+    uint8_t containsLocs : 1;
+    uint8_t checkLocSpans : 4;
+    uint8_t blockLocSpans : 4;
+    uint8_t inverseBlockLocSpans : 4;
     uint8_t backWallTypes;
 #else
     int level;
