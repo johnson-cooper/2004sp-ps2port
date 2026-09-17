@@ -6,11 +6,12 @@ This file is the standing workflow for the PlayStation 2 port. Read it before ma
 
 - Active development branch: `ps2-hardware-integration`
 - Branch starting point: `main` commit `673657249ef18526e6c33a3d4381953c132c2782`
-- Last fully real-hardware-known-good integration commit: `013e6436e5cb662069304cb4b818ae6ae5d018f3` (confirmed working on real PS2 on 2026-09-17; retains the qword-aligned bounded scene arena, 32x32 / 1024-slot resident terrain window, fourteen-tile / 29x29 camera draw window, local-player model and bounded 32x32 static-loc window, normal dynamic chat/sidebar/tab UI composition, inventory item icons and interface 3D model components, and a controller virtual cursor that remains visible over both UI and the 3D viewport. No crash was observed in the loaded Lumbridge area. The remaining traversal problem is now clearly the tiny terrain-residency margin: a 29x29 camera window inside only 32x32 resident terrain leaves roughly one to two tiles of spare terrain at an edge, so the player reaches non-materialized black space before a normal 8-tile zone rebuild can comfortably recenter the 104x104 scene. Static loc/model rendering still lowers observed live framerate from roughly 50 FPS to roughly 30 FPS; keep that performance cost visible while correctness restoration continues.)
-- Terrain milestone: `fb83106daa4de4149bda6f6c36637000f378597a` completed the Lumbridge terrain build and reached the live world, but froze immediately after the first live frame. It is evidence that bounded terrain works, **not** a known-good gameplay checkpoint.
-- The subsequent five-slot textured-terrain cache experiment regressed to a world-loading crash and was rejected.
-- Current terrain finding: the old 4-byte scene-arena alignment made additional terrain residency highly layout-sensitive. After changing the PS2 scene arena to a 16-byte-aligned base with qword-aligned bump allocations, the previously failing 2x3 and 3x3 layouts became stable, then 16x16 and 32x32 resident windows also ran stably on real hardware. With 32x32 residency fixed, camera draw radius 14 / 29x29 also survived beyond T2435 and provides a passable gameplay view. The 32x32 window is nevertheless too tight for traversal because radius 14 consumes almost the whole resident block. The next isolated hardware test widens only resident terrain to 48x48, leaving draw radius, loc window, UI, entity limits and presentation rate unchanged. A 48-tile window gives about ten tiles of terrain margin beyond the fourteen-tile camera radius, enough to cross an 8-tile zone boundary and let the existing REBUILD_NORMAL path recenter the scene without jumping to full-map residency.
-- Current policy: gameplay-first 32 MiB profile — untextured colored terrain, bounded/lazy Ground residency, fourteen-tile camera radius, local player enabled, bounded 32x32 static-loc placement enabled, capped nearby dynamic entities, normal interactive gameplay UI and inventory icons with simplified chrome, minimap off. Long-distance traversal is the current isolated correctness target. Player animation is also known to be suppressed by the dedicated PS2 local-player draw forcing `player->lowmem = true`; restore active walk/run/action animation only after the terrain-residency test is accepted so memory/performance regressions remain attributable.
+- Last fully real-hardware-known-good integration commit: `882c9281b366c6eec02a967af3827f711ded004d` (confirmed working on real PS2 on 2026-09-17). The qword-aligned scene allocator, 80x80 bounded terrain bridge window, radius-14 / 29x29 camera window, local player, gameplay UI, inventory icons and viewport/UI virtual cursor all remain stable. The player can now travel indefinitely in any direction across normal `REBUILD_NORMAL` scene transitions with no crash.
+- Terrain finding: the old 4-byte scene-arena alignment made terrain residency layout-sensitive. A 16-byte/qword-aligned base and qword-aligned bump allocations fixed that class of hardware crash. 2x3, 3x3, 16x16, 32x32, 48x48 and now 80x80 traversal-bridge terrain configurations have run on real hardware. Keep qword alignment as mandatory.
+- Traversal finding: 32x32 and 48x48 fixed terrain windows ended before the client could comfortably reach the normal server-driven scene recenter. The 80x80 local window (12..91) bridges that gap and lets `REBUILD_NORMAL` recenter repeatedly, providing continuous world traversal without materialising the full 104x104 render scene.
+- Current world-restoration issues: water/textured floor overlays do not currently have a useful untextured PS2 fallback and rivers can appear absent; static locs/walls/objects use a fixed 32x32 local placement/read window and do not remain present throughout traversal/after the observed scene-transition path; the dedicated PS2 local-player draw still forces `player->lowmem = true`, suppressing normal walk/run/action transforms. Fix these as separate hardware-tested changes.
+- Static loc/model rendering has been observed to reduce live framerate from roughly 50 FPS to roughly 30 FPS. Preserve correctness first; renderer/VU1/GS acceleration is a separate later optimization milestone.
+- Current policy: gameplay-first 32 MiB profile — untextured colored terrain, bounded/lazy Ground residency, fourteen-tile camera radius, local player enabled, bounded static-loc placement, capped nearby dynamic entities, normal interactive gameplay UI and inventory icons with simplified chrome, minimap off.
 - After each accepted hardware test, update the known-good commit here before starting the next restoration experiment.
 
 ## Source of truth
@@ -69,9 +70,9 @@ The retail PS2 has 32 MiB total EE RAM. Gameplay state wins over cosmetic fideli
 - Keep terrain/scene residency bounded instead of eagerly materialising the full 104x104 map as `Ground` objects.
 - Cull dynamic render entities by distance before World3D insertion and enforce per-frame population caps. Network/update state may continue outside the render radius.
 - Prefer the local player and nearby interactable NPCs/players over distant entities and effects.
-- Keep the minimap disabled until its >1 MiB backing/cached assets can be made substantially cheaper or lazy.
-- Static loc loading must be streamed/bounded. Purely decorative locs whose only user-facing interaction is Examine should not consume PS2 model/render residency.
-- When filtering an Examine-only loc, preserve gameplay-relevant collision/pathing state separately when needed; do not make a blocking wall/object walk-through merely because its visual model was culled.
+- Keep the minimap disabled until its backing/cached assets can be made substantially cheaper or lazy.
+- Static loc loading must be streamed/bounded. Purely decorative locs whose only user-facing interaction is Examine should not consume PS2 model/render residency when memory is tight.
+- When filtering a loc, preserve gameplay-relevant collision/pathing state separately when needed; do not make a blocking wall/object walk-through merely because its visual model was culled.
 - Essential/actionable locs (doors, stairs, ladders, trees/resources, banks, ranges, altars, gates, quest/interact objects, etc.) have priority over decorative scenery.
 - Effects, projectiles, ground decoration, overhead elements and cosmetic UI are lower priority and receive strict caps.
 - Avoid thousands of tiny heap allocations. Prefer bounded pools/arenas or contiguous metadata where lifetime permits.
@@ -83,33 +84,32 @@ Restore missing game systems gradually, but optimize each system for the gamepla
 
 Current intended progression:
 
-1. Stabilize untextured colored terrain + hills with bounded/lazy Ground residency.
-2. Restore the local player model with a strict low-memory model/cache path.
-3. Stabilize nearby player/NPC entity culling and population caps.
-4. Restore essential gameplay UI only.
-5. Restore actionable static locs through bounded streaming/filtering.
-6. Restore essential structural walls/buildings only where needed for understanding/navigation/gameplay.
-7. Restore resource trees/rocks/fishing/etc. and interactive scenery.
-8. Add ground items, projectiles and overhead elements under strict caps.
-9. Increase draw distance/entity limits/presentation rate only when measured headroom exists.
-10. Cosmetic scenery/textures/minimap are last and may remain disabled if they compromise stability.
+1. Keep the hardware-good qword-aligned bounded terrain/traversal baseline stable.
+2. Make loc/wall/object residency survive continuous traversal and scene recentering without restoring the unrestricted desktop scene.
+3. Restore a cheap colored fallback for water/textured terrain overlays while keeping full terrain texturing disabled.
+4. Restore local-player walk/run/action animation without reintroducing appearance-cache/temporary-model leaks.
+5. Restore/verify ground items, projectiles and overhead elements under strict caps.
+6. Measure remaining scene/model/cache pressure and renderer time.
+7. Move terrain/loc/model transform and submission work toward a VU1/GS path where it provides a measured benefit.
+8. Increase presentation rate/draw distance/entity limits only when measured headroom exists.
+9. Cosmetic terrain textures/minimap remain last and may stay disabled if they compromise stability.
 
 ### Loc restoration rule
 
 Do **not** re-enable the entire desktop static-loc scene in one step.
 
 ```text
-known-good terrain
-  -> load one bounded loc mapsquare/window
-  -> decode loc metadata without building every model
+hardware-good traversal
+  -> retain/load loc metadata needed around the moving player
   -> preserve collision/pathing
-  -> admit actionable locs
-  -> discard Examine-only decorative renderables
+  -> admit actionable/structural locs first
   -> cap model/cache residency
   -> real PS2 test
-  -> add structural shell if memory allows
+  -> extend the moving loc window
   -> real PS2 test
 ```
+
+The final loc strategy should follow the traversable player rather than depending on one permanent startup-only local block. If a larger temporary loc window is used to prove correctness, replace it with a moving/recycled bounded window if its memory cost is too high.
 
 ## Performance and memory rule
 
@@ -120,7 +120,7 @@ Every restored subsystem should answer four questions:
 3. What does it cost in EE/scene/model/cache memory?
 4. What does it cost in update/render/GS time?
 
-Prefer measurement over visual guesses. Maintain or add lightweight PS2 diagnostics for useful quantities such as free EE heap, scene arena usage/high-water mark, model/cache memory, temporary loc count, resident Ground count, visible tiles/locs/models/entities, culled entity counts, update time, scene/model time, raster/draw time, GS upload/present time, update FPS/presented FPS and network time.
+Prefer measurement over visual guesses. Maintain or add lightweight PS2 diagnostics for useful quantities such as free EE heap, scene arena usage/high-water mark, model/cache memory, resident Ground/loc counts, visible models/entities, culled counts, update time, scene/model time, raster/draw time, GS upload/present time, update FPS/presented FPS and network time.
 
 Do not keep expensive debug instrumentation permanently if it materially harms the hardware profile. Use focused diagnostics, gather evidence, then reduce/remove them when the issue is understood.
 
