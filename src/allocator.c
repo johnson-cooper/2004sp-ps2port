@@ -70,13 +70,6 @@ int bump_allocator_capacity(void) {
 }
 
 bool bump_allocator_init(int capacity) {
-#ifdef __PS2__
-    // Falador can exhaust the 4 MiB scene arena even after compacting Ground nodes. Test one
-    // additional MiB of scene headroom while remaining below the client's historical 6 MiB request.
-    if (capacity == (6 << 20)) {
-        capacity = 5 << 20;
-    }
-#endif
 #ifdef __3DS__
     rs2_log("Free linear space: %d\n", linearSpaceFree());
     alloc.data = linearAlloc(capacity * sizeof(int8_t));
@@ -86,7 +79,8 @@ bool bump_allocator_init(int capacity) {
     }
 #elif defined(__PS2__)
     // EE scene allocations must remain qword aligned. Real hardware proved 4-byte bump alignment
-    // was unsafe and made terrain layout changes trigger unrelated crashes.
+    // was unsafe and made terrain layout changes trigger unrelated crashes. The PS2 now uses the
+    // client's historical 6 MiB scene-arena request directly; dense Ardougne scenes exceed 5 MiB.
     alloc.data = memalign(16, capacity * sizeof(int8_t));
     if (alloc.data) {
         memset(alloc.data, 0, capacity);
