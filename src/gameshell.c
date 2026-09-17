@@ -55,49 +55,6 @@ static void perf_reset_if_due(void) {
     _Perf = (PerfAccum){0};
     _Perf.window_start = now;
 }
-
-static void ps2_draw_live_packet_state(Client *c) {
-    if (!c || !c->ingame || !c->area_viewport || !c->font_bold12) {
-        return;
-    }
-
-    // The plain 1x line was unreadable from a real CRT photo. Render the compact
-    // state into a small scratch strip in the existing software viewport, then
-    // copy it 2x with nearest-neighbour scaling. No extra GS present and no file
-    // I/O: the normal platform_update_surface() below presents it once per frame.
-    const int source_x = 4;
-    const int source_y = 2;
-    const int source_w = 180;
-    const int source_h = 18;
-    const int dest_x = 4;
-    const int dest_y = 290;
-
-    char status[96];
-    snprintf(status, sizeof(status), "L%d/%d/%d P%d N%d S%d",
-             c->last_packet_type0, c->last_packet_type1, c->last_packet_type2,
-             c->player_count, c->npc_count, c->scene_state);
-
-    pixmap_bind(c->area_viewport);
-    pix2d_fill_rect(source_x, source_y, BLACK, source_w, source_h);
-    drawString(c->font_bold12, source_x + 2, source_y + 13, status, YELLOW);
-
-    int *pixels = c->area_viewport->pixels;
-    for (int y = 0; y < source_h; y++) {
-        const int *src = pixels + (source_y + y) * 512 + source_x;
-        int *dst0 = pixels + (dest_y + y * 2) * 512 + dest_x;
-        int *dst1 = dst0 + 512;
-        for (int x = 0; x < source_w; x++) {
-            const int pixel = src[x];
-            const int dx = x * 2;
-            dst0[dx] = pixel;
-            dst0[dx + 1] = pixel;
-            dst1[dx] = pixel;
-            dst1[dx + 1] = pixel;
-        }
-    }
-
-    pixmap_draw(c->area_viewport, 4, 4);
-}
 #endif
 
 extern InputTracking _InputTracking;
@@ -231,7 +188,11 @@ void gameshell_run(Client *c) {
         bool ps2_render_frame = (++ps2_render_counter % PS2_RENDER_DIVISOR) == 0;
         if (ps2_render_frame) {
             client_draw(c);
-            ps2_draw_live_packet_state(c);
+            // client_draw() deliberately draws the controller cursor last. Do not re-blit the
+            // software viewport after it: the old live-packet debug overlay did exactly that and
+            // erased the cursor only while it crossed the 3D game area, even though the same
+            // cursor remained visible over sidebar/chat UI. The packet banner was bring-up
+            // instrumentation, not gameplay, so remove it rather than adding another overlay pass.
             ps2_heap_after_draw_kb = mallinfo().fordblks / 1024;
             gameshell_update_touch(c); // update mouse after client_draw_scene to fix model picking
         }
@@ -378,7 +339,6 @@ void key_released(GameShell *shell, int code, int ch) {
         // SHIFT
         ch = 6; // (custom)
     } else if (code == 18) {
-        // ALT
         ch = 7;
     } else if (code == 8) {
         ch = 8;
