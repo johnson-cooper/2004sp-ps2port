@@ -72,18 +72,18 @@
 // users and avoids the extra permanent pool that made the dense Lumbridge rebuild regress.
 #define PIX3D_POOL_COUNT 1
 #define DISABLE_FLAMES
-// First actual view-distance test after the qword-aligned 16x16 terrain residency proved stable on
-// real hardware. Increase the camera-centred draw radius from 4 (9x9) to 6 tiles (13x13) while
-// keeping the 16x16 resident terrain window, 4 MiB scene arena, 10 Hz presentation rate and every
-// other subsystem unchanged. This isolates the extra EE software-raster workload of seeing farther.
+// Radius 6 / 13x13 is hardware-stable. Keep that exact per-frame draw workload while expanding only
+// terrain residency below, so this experiment measures whether the small visible patch was caused by
+// the orbit camera sitting near an edge of the old fixed 16x16 resident window.
 #define PS2_RENDER_RADIUS 6
-// Qword-aligned scene arena is hardware-stable with this 16x16 Lumbridge residency stress window.
-// Keep residency fixed while draw radius is tested so resident-memory and per-frame draw costs do not
-// change at the same time.
-#define PS2_TERRAIN_MIN_TILE 43
-#define PS2_TERRAIN_MAX_X_TILE 59
-#define PS2_TERRAIN_MAX_Z_TILE 59
-#define PS2_TERRAIN_MAX_TILE 59
+// 32x32 resident terrain window centred on the same local-scene point as the proven 16x16 window.
+// The normal orbit camera can sit roughly several tiles behind the player; 16x16 therefore clipped a
+// significant part of a camera-centred radius-6 draw window. 35..66 gives enough margin for the full
+// 13x13 camera window around a centrally located player without increasing draw radius at the same time.
+#define PS2_TERRAIN_MIN_TILE 35
+#define PS2_TERRAIN_MAX_X_TILE 67
+#define PS2_TERRAIN_MAX_Z_TILE 67
+#define PS2_TERRAIN_MAX_TILE 67
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
