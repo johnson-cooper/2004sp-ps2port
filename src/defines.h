@@ -68,8 +68,9 @@
 // Gameplay-first 32 MiB profile. Prefer bounded geometry and entities over cosmetic fidelity.
 #define MODEL_MAX_DEPTH 600
 #define MODEL_DEPTH_FACE_COUNT 80
-// Terrain textures are disabled below, so a single texel slot is enough for the remaining UI/model
-// users and avoids the extra permanent pool that made the dense Lumbridge rebuild regress.
+// Keep the hardware-good one-slot low-memory texel cache while restoring terrain texturing. In
+// low-memory Pix3D each slot is 16384 ints = 64 KiB; the cache can recycle this one slot across all
+// terrain texture IDs, so this test does not repeat the earlier five-slot (+256 KiB) experiment.
 #define PIX3D_POOL_COUNT 1
 #define DISABLE_FLAMES
 // Radius 14 / 29x29 and the 48x48 terrain window are hardware-stable, but 48x48 still ends before
@@ -98,8 +99,10 @@
 // The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
 #define PS2_SIMPLE_UI 1
-// Terrain remains untextured on PS2, with normal underlay/overlay rasterization enabled.
-#define PS2_UNTEXTURED_TERRAIN 1
+// Restore the original low-memory software terrain texture path, including textured water overlays.
+// Keep the one-slot texel cache above so the memory delta stays essentially flat; measure real-PS2
+// frame time separately because texture-cache churn can cost CPU even when it does not cost heap.
+#define PS2_UNTEXTURED_TERRAIN 0
 #define PS2_FLAT_TERRAIN 0
 // Keep synchronous scene/land construction enabled. The minimap remains disabled.
 #define PS2_DEFER_SCENE_REBUILD 0
