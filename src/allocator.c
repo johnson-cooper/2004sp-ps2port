@@ -71,9 +71,10 @@ int bump_allocator_capacity(void) {
 
 bool bump_allocator_init(int capacity) {
 #ifdef __PS2__
-    // Keep the hardware-proven 4 MiB scene arena when the client asks for its historical 6 MiB.
+    // Falador can exhaust the 4 MiB scene arena even after compacting Ground nodes. Test one
+    // additional MiB of scene headroom while remaining below the client's historical 6 MiB request.
     if (capacity == (6 << 20)) {
-        capacity = 4 << 20;
+        capacity = 5 << 20;
     }
 #endif
 #ifdef __3DS__
