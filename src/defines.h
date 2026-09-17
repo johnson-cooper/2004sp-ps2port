@@ -75,10 +75,14 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// Control test: keep every current memory/arena/runtime fix, but return terrain materialization to
-// the 2x2 window that previously survived beyond T10k on real hardware. If this current baseline
-// passes the repeatable T160 failure, the extra 3x3 border tiles become the next bisection target.
+// Rectangular bounds let hardware tests add one terrain edge at a time without changing any other
+// renderer or allocator behavior. The verified control is X=[50,52), Z=[50,52); the next bisection
+// extends only Z to 53, adding (50,52) and (51,52).
 #define PS2_TERRAIN_MIN_TILE 50
+#define PS2_TERRAIN_MAX_X_TILE 52
+#define PS2_TERRAIN_MAX_Z_TILE 53
+// Keep the legacy shared bound at the verified 2x2 value until the world materialization predicate is
+// switched to the rectangular bisection in the final test commit.
 #define PS2_TERRAIN_MAX_TILE 52
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
