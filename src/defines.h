@@ -108,9 +108,10 @@
 #define PS2_NULL_UI 0
 #define PS2_SAFE_INTERFACE 1
 #define PS2_UI_PROFILE 1
-// The normal pushPlayers() path still supplies dynamic players; this flag controls only the separate
-// direct local-avatar draw. Keep that duplicate path off until entity submission is fully culled.
-#define PS2_RENDER_LOCAL_PLAYER 0
+// Isolated restoration step after radius-14 terrain became hardware-stable. The generic PS2
+// pushPlayers() path intentionally skips LOCAL_PLAYER_INDEX, so enable the dedicated direct local
+// avatar draw without changing remote-player/NPC submission, locs, UI, minimap, or terrain.
+#define PS2_RENDER_LOCAL_PLAYER 1
 #elif defined(_arch_dreamcast) || defined(__NDS__)
 // NOTE: more extreme lowmem mode, making the game fully explorable on 32 MB
 // -2 MB RAM, may cause some models to be invisible
