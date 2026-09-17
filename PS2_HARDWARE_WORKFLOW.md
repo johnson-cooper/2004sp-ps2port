@@ -6,11 +6,11 @@ This file is the standing workflow for the PlayStation 2 port. Read it before ma
 
 - Active development branch: `ps2-hardware-integration`
 - Branch starting point: `main` commit `673657249ef18526e6c33a3d4381953c132c2782`
-- Last fully real-hardware-known-good integration commit: `6c924d02b2b5b37c295005010b2ad2fa61c2a4b4` (confirmed working on real PS2 on 2026-09-16; qword-aligned 4 MiB scene arena, 32x32 / 1024-slot resident terrain window, and fourteen-tile / 29x29 camera draw window survived beyond T2435 in Lumbridge without crashing; view distance judged passable).
+- Last fully real-hardware-known-good integration commit: `5a6a3ee4279715a9e4438fbdd5c06e78b22eba6b` (confirmed working on real PS2 on 2026-09-16; retains the qword-aligned 4 MiB scene arena, 32x32 / 1024-slot resident terrain window and fourteen-tile / 29x29 camera draw window, and restores the dedicated local-player model path without crashes).
 - Terrain milestone: `fb83106daa4de4149bda6f6c36637000f378597a` completed the Lumbridge terrain build and reached the live world, but froze immediately after the first live frame. It is evidence that bounded terrain works, **not** a known-good gameplay checkpoint.
 - The subsequent five-slot textured-terrain cache experiment regressed to a world-loading crash and was rejected.
 - Current terrain finding: the old 4-byte scene-arena alignment made additional terrain residency highly layout-sensitive. After changing the PS2 scene arena to a 16-byte-aligned base with qword-aligned bump allocations, the previously failing 2x3 and 3x3 layouts became stable, then 16x16 and 32x32 resident windows also ran stably on real hardware. With 32x32 residency fixed, camera draw radius 14 / 29x29 also survived beyond T2435 and provides a passable gameplay view. Treat qword alignment as required; keep this terrain/view-distance baseline fixed while restoring missing world/player/UI systems one isolated hardware-tested layer at a time.
-- Current policy: gameplay-first 32 MiB profile — untextured colored terrain, bounded/lazy Ground residency, fourteen-tile camera radius, capped nearby dynamic entities, minimum UI, minimap off, static locs deferred until filtered streaming is ready.
+- Current policy: gameplay-first 32 MiB profile — untextured colored terrain, bounded/lazy Ground residency, fourteen-tile camera radius, local player enabled, capped nearby dynamic entities, minimum UI, minimap off, static locs still deferred pending the next bounded-location hardware test.
 - After each accepted hardware test, update the known-good commit here before starting the next restoration experiment.
 
 ## Source of truth
