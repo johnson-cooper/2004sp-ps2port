@@ -97,6 +97,17 @@ bool bump_allocator_init(int capacity) {
     if (alloc.data) {
         memset(alloc.data, 0, capacity);
     }
+#elif defined(__PS2__)
+    // The scene arena is a malloc/calloc replacement for arbitrary game structs and arrays. The
+    // previous arena base came from calloc(), while bump_alloc() aligned each returned object to
+    // only 4 bytes. That is weaker than the EE's native 128-bit/qword alignment and weaker than the
+    // alignment callers can legitimately receive from the normal PS2 heap. Real hardware is much
+    // less forgiving than PCSX2 when code or libraries issue aligned wider accesses. Keep this test
+    // isolated to allocator alignment: same 4 MiB capacity, but a guaranteed qword-aligned base.
+    alloc.data = memalign(16, capacity * sizeof(int8_t));
+    if (alloc.data) {
+        memset(alloc.data, 0, capacity);
+    }
 #else
     alloc.data = calloc(capacity, sizeof(int8_t));
 #endif
@@ -169,10 +180,16 @@ void *rs2_calloc(bool use_allocator, int count, int size) {
 }
 
 static void *bump_alloc(int size) {
-#if __SIZEOF_POINTER__ == 4
-    int aligned_ptr = alloc.used + 3 & ~3;
+#ifdef __PS2__
+    // PS2 EE is a 128-bit machine and several SDK/rendering paths operate naturally on qwords.
+    // The old 4-byte bump alignment was not a valid malloc-equivalent alignment guarantee for every
+    // arena-backed type. Keep every arena allocation qword aligned so adding one terrain allocation
+    // cannot shift all later scene/model objects onto a hardware-hostile address.
+    int aligned_ptr = (alloc.used + 15) & ~15;
+#elif __SIZEOF_POINTER__ == 4
+    int aligned_ptr = (alloc.used + 3) & ~3;
 #else
-    int aligned_ptr = alloc.used + 7 & ~7;
+    int aligned_ptr = (alloc.used + 7) & ~7;
 #endif
 #ifdef __PS2__
     alloc.alloc_count++;
@@ -187,7 +204,7 @@ static void *bump_alloc(int size) {
         char oom_msg[112];
         snprintf(oom_msg, sizeof(oom_msg),
                  "Allocator full: attempted=%d cap=%d count=%d largest=%d hist=%d/%d/%d/%d/%d/%d",
-                 alloc.used + size, alloc.capacity, alloc.alloc_count, alloc.largest_alloc,
+                 aligned_ptr + size, alloc.capacity, alloc.alloc_count, alloc.largest_alloc,
                  alloc.histogram[0], alloc.histogram[1], alloc.histogram[2], alloc.histogram[3],
                  alloc.histogram[4], alloc.histogram[5]);
         rs2_error("%s\n", oom_msg);
@@ -213,7 +230,7 @@ static void *bump_alloc(int size) {
         // is a real, working process-exit there.
         return NULL;
 #else
-        rs2_error("Allocator full: this should never happen! attempted: %d, capacity: %d", alloc.used + size, alloc.capacity);
+        rs2_error("Allocator full: this should never happen! attempted: %d, capacity: %d", aligned_ptr + size, alloc.capacity);
         exit(1);
 #endif
     }
