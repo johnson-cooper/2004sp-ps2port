@@ -92,10 +92,9 @@
 // Simulation/networking stay at 50 Hz. Present the expensive software 3D view at 10 Hz for now;
 // gameplay remains responsive while we establish a stable memory/performance floor.
 #define PS2_RENDER_DIVISOR 5
-// First static-world restoration test. client_build_scene() and world_load_locations() already gate
-// PS2 loc I/O and placement to the local 32x32 tile window (local tiles 32..63), so disabling the
-// defer switch restores only that bounded window instead of the full 104x104 desktop loc scene.
-// Keep this isolated from UI/minimap/effects changes until it passes on real hardware.
+// Bounded static-world restoration is now hardware-good. client_build_scene() and
+// world_load_locations() gate PS2 loc I/O and placement to the local 32x32 tile window (32..63),
+// keeping the full desktop 104x104 loc scene out of the hardware profile.
 #define PS2_DEFER_STATIC_LOCATIONS 0
 // The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
@@ -106,13 +105,15 @@
 // Keep synchronous scene/land construction enabled. The minimap remains disabled.
 #define PS2_DEFER_SCENE_REBUILD 0
 #define PS2_NULL_SCENE_REBUILD 0
-// Keep the minimum gameplay UI; software 3D interface models remain blocked.
+// Restore the normal dynamic chat/sidebar/tab composition pass. Keep PS2_SAFE_INTERFACE enabled for
+// this first UI test so inventory item icons and type-6 interface 3D models still cannot enter the
+// software model renderer; those get their own isolated hardware restoration after the 2D UI passes.
 #define PS2_NULL_UI 0
 #define PS2_SAFE_INTERFACE 1
-#define PS2_UI_PROFILE 1
+#define PS2_UI_PROFILE 0
 // Hardware-tested restoration step after radius-14 terrain became stable. The generic PS2
 // pushPlayers() path intentionally skips LOCAL_PLAYER_INDEX, so keep the dedicated direct local
-// avatar draw enabled while restoring the bounded static-loc window.
+// avatar draw enabled while restoring the normal 2D gameplay UI composition.
 #define PS2_RENDER_LOCAL_PLAYER 1
 #elif defined(_arch_dreamcast) || defined(__NDS__)
 // NOTE: more extreme lowmem mode, making the game fully explorable on 32 MB
@@ -168,7 +169,6 @@
 #define K_MINUS 45
 #define K_PERIOD 46
 #define K_FWD_SLASH 47
-
 #define K_0 48
 #define K_1 49
 #define K_2 50
