@@ -7,22 +7,56 @@
 #include "lrucache.h"
 
 #ifdef __PS2__
+// Scene/model caches can contain pointers into the resettable 4 MiB scene bump arena. Those
+// pointers become invalid as soon as bump_allocator_reset() starts a new scene generation, even
+// though the backing RAM stays mapped. Track the allocator generation so PS2-only non-intrusive
+// side caches can keep same-scene reuse without ever linking stale arena objects into a process-
+// lifetime LRU list.
+extern unsigned int ps2_scene_arena_generation;
+
 // objtype.c is the sole 50-entry LRU user in the current client. Its model values can be allocated
 // from the resettable scene bump arena, so linking the Model's embedded DoublyLinkable into the
 // process-lifetime generic LRU is unsafe on real hardware. Keep the exact lrucache_new(50)
 // allocation/layout, but store candidate {key,pointer} pairs in a fixed BSS-backed sidecar that never
 // touches the Model's embedded links or allocates heap memory.
 #define PS2_OBJ_SCENE_CACHE_CAPACITY 50
+#define PS2_LOC_STATIC_CACHE_CAPACITY 500
+#define PS2_LOC_DYNAMIC_CACHE_CAPACITY 150
 
 typedef struct {
     int64_t key;
     DoublyLinkable *value;
     bool valid;
-} Ps2ObjSceneCacheEntry;
+} Ps2ArenaCacheEntry;
+
+typedef struct {
+    LruCache *owner;
+    unsigned int generation;
+    int replace;
+    int capacity;
+    Ps2ArenaCacheEntry *entries;
+} Ps2ArenaSideCache;
 
 static LruCache *ps2_obj_scene_cache_owner = NULL;
-static Ps2ObjSceneCacheEntry ps2_obj_scene_cache[PS2_OBJ_SCENE_CACHE_CAPACITY];
+static Ps2ArenaCacheEntry ps2_obj_scene_cache[PS2_OBJ_SCENE_CACHE_CAPACITY];
 static int ps2_obj_scene_cache_replace = 0;
+
+static Ps2ArenaCacheEntry ps2_loc_static_entries[PS2_LOC_STATIC_CACHE_CAPACITY];
+static Ps2ArenaCacheEntry ps2_loc_dynamic_entries[PS2_LOC_DYNAMIC_CACHE_CAPACITY];
+static Ps2ArenaSideCache ps2_loc_static_cache = {
+    .owner = NULL,
+    .generation = 0,
+    .replace = 0,
+    .capacity = PS2_LOC_STATIC_CACHE_CAPACITY,
+    .entries = ps2_loc_static_entries,
+};
+static Ps2ArenaSideCache ps2_loc_dynamic_cache = {
+    .owner = NULL,
+    .generation = 0,
+    .replace = 0,
+    .capacity = PS2_LOC_DYNAMIC_CACHE_CAPACITY,
+    .entries = ps2_loc_dynamic_entries,
+};
 
 static void ps2_obj_scene_cache_reset(LruCache *owner) {
     for (int i = 0; i < PS2_OBJ_SCENE_CACHE_CAPACITY; i++) {
@@ -36,6 +70,71 @@ static void ps2_obj_scene_cache_reset(LruCache *owner) {
 
 static bool ps2_is_obj_model_cache(LruCache *cache) {
     return cache && cache->capacity == PS2_OBJ_SCENE_CACHE_CAPACITY;
+}
+
+static Ps2ArenaSideCache *ps2_loc_model_sidecache(LruCache *cache) {
+    if (!cache) {
+        return NULL;
+    }
+    if (cache->capacity == PS2_LOC_STATIC_CACHE_CAPACITY) {
+        return &ps2_loc_static_cache;
+    }
+    if (cache->capacity == PS2_LOC_DYNAMIC_CACHE_CAPACITY) {
+        return &ps2_loc_dynamic_cache;
+    }
+    return NULL;
+}
+
+static void ps2_arena_sidecache_reset(Ps2ArenaSideCache *side, LruCache *owner) {
+    for (int i = 0; i < side->capacity; i++) {
+        side->entries[i].key = 0;
+        side->entries[i].value = NULL;
+        side->entries[i].valid = false;
+    }
+    side->replace = 0;
+    side->owner = owner;
+    side->generation = ps2_scene_arena_generation;
+}
+
+static void ps2_arena_sidecache_validate(Ps2ArenaSideCache *side, LruCache *owner) {
+    if (side->owner != owner || side->generation != ps2_scene_arena_generation) {
+        ps2_arena_sidecache_reset(side, owner);
+    }
+}
+
+static DoublyLinkable *ps2_arena_sidecache_get(Ps2ArenaSideCache *side, LruCache *owner, int64_t key) {
+    ps2_arena_sidecache_validate(side, owner);
+    for (int i = 0; i < side->capacity; i++) {
+        if (side->entries[i].valid && side->entries[i].key == key) {
+            return side->entries[i].value;
+        }
+    }
+    return NULL;
+}
+
+static void ps2_arena_sidecache_put(Ps2ArenaSideCache *side, LruCache *owner, int64_t key, DoublyLinkable *value) {
+    ps2_arena_sidecache_validate(side, owner);
+
+    for (int i = 0; i < side->capacity; i++) {
+        if (side->entries[i].valid && side->entries[i].key == key) {
+            side->entries[i].value = value;
+            return;
+        }
+    }
+
+    for (int i = 0; i < side->capacity; i++) {
+        if (!side->entries[i].valid) {
+            side->entries[i].key = key;
+            side->entries[i].value = value;
+            side->entries[i].valid = true;
+            return;
+        }
+    }
+
+    int slot = side->replace++ % side->capacity;
+    side->entries[slot].key = key;
+    side->entries[slot].value = value;
+    side->entries[slot].valid = true;
 }
 #endif
 
@@ -89,6 +188,10 @@ void lrucache_free(LruCache *cache) {
     if (ps2_obj_scene_cache_owner == cache) {
         ps2_obj_scene_cache_reset(NULL);
     }
+    Ps2ArenaSideCache *side = ps2_loc_model_sidecache(cache);
+    if (side && side->owner == cache) {
+        ps2_arena_sidecache_reset(side, NULL);
+    }
 #endif
     hashtable_free(cache->hashtable);
     doublylinklist_free(cache->history);
@@ -97,6 +200,11 @@ void lrucache_free(LruCache *cache) {
 
 DoublyLinkable *lrucache_get(LruCache *cache, int64_t key) {
 #ifdef __PS2__
+    Ps2ArenaSideCache *side = ps2_loc_model_sidecache(cache);
+    if (side) {
+        return ps2_arena_sidecache_get(side, cache, key);
+    }
+
     if (ps2_is_obj_model_cache(cache)) {
         if (ps2_obj_scene_cache_owner != cache) {
             ps2_obj_scene_cache_reset(cache);
@@ -123,6 +231,12 @@ DoublyLinkable *lrucache_get(LruCache *cache, int64_t key) {
 
 void lrucache_put(LruCache *cache, int64_t key, DoublyLinkable *value) {
 #ifdef __PS2__
+    Ps2ArenaSideCache *side = ps2_loc_model_sidecache(cache);
+    if (side) {
+        ps2_arena_sidecache_put(side, cache, key, value);
+        return;
+    }
+
     if (ps2_is_obj_model_cache(cache)) {
         if (ps2_obj_scene_cache_owner != cache) {
             ps2_obj_scene_cache_reset(cache);
@@ -166,6 +280,13 @@ void lrucache_put(LruCache *cache, int64_t key, DoublyLinkable *value) {
 
 void lrucache_clear(LruCache *cache) {
 #ifdef __PS2__
+    Ps2ArenaSideCache *side = ps2_loc_model_sidecache(cache);
+    if (side) {
+        ps2_arena_sidecache_reset(side, cache);
+        cache->available = cache->capacity;
+        return;
+    }
+
     if (ps2_is_obj_model_cache(cache)) {
         ps2_obj_scene_cache_reset(cache);
         cache->available = cache->capacity;

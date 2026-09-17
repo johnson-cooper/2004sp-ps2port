@@ -17,6 +17,11 @@
 // doesn't pull in the whole Client struct. See client.h's own declaration comment for the rationale.
 extern void ps2_report_oom(const char *msg);
 
+// Monotonic generation for the resettable scene arena. Any cache that keeps arena-backed pointers
+// across scene rebuilds must key its validity to this value; bump_allocator_reset() invalidates every
+// pointer handed out by the previous generation even though the backing 4 MiB block remains mapped.
+unsigned int ps2_scene_arena_generation = 1;
+
 // ReleasePlusPlus uses the gap between newlib's current program break and the live EE stack as a
 // second, independent RAM signal. mallinfo().fordblks (our H/D/G overlay) only reports free blocks
 // already owned by malloc; it does NOT include address space malloc can still acquire with sbrk().
@@ -149,6 +154,12 @@ void bump_allocator_reset(void) {
     memset(alloc.data, 0, alloc.used);
     alloc.used = 0;
 #ifdef __PS2__
+    // All arena-backed model/scene pointers from the previous scene are invalid from this point on.
+    // Increment after the clear so generation-aware side caches can lazily invalidate on next use.
+    ps2_scene_arena_generation++;
+    if (ps2_scene_arena_generation == 0) {
+        ps2_scene_arena_generation = 1;
+    }
     alloc.alloc_count = 0;
     alloc.largest_alloc = 0;
     memset(alloc.histogram, 0, sizeof(alloc.histogram));
