@@ -75,12 +75,11 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// Hardware proved 2x2 can render past T10k while 4x4 dies during S1 even after Ground/underlay/
-// overlay storage moved into the scene arena. Test a 3x3 window before changing renderer architecture:
-// if this works, the failure is a capacity threshold; if it fails, the newly included border tile data
-// is a stronger suspect than raw triangle count. Keep all other PS2 memory/cache behavior unchanged.
+// Control test: keep every current memory/arena/runtime fix, but return terrain materialization to
+// the 2x2 window that previously survived beyond T10k on real hardware. If this current baseline
+// passes the repeatable T160 failure, the extra 3x3 border tiles become the next bisection target.
 #define PS2_TERRAIN_MIN_TILE 50
-#define PS2_TERRAIN_MAX_TILE 53
+#define PS2_TERRAIN_MAX_TILE 52
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
