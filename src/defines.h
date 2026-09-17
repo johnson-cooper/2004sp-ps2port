@@ -105,15 +105,17 @@
 // Keep synchronous scene/land construction enabled. The minimap remains disabled.
 #define PS2_DEFER_SCENE_REBUILD 0
 #define PS2_NULL_SCENE_REBUILD 0
-// Restore the normal dynamic chat/sidebar/tab composition pass. Keep PS2_SAFE_INTERFACE enabled for
-// this first UI test so inventory item icons and type-6 interface 3D models still cannot enter the
-// software model renderer; those get their own isolated hardware restoration after the 2D UI passes.
+// Normal dynamic chat/sidebar/tab composition is hardware-good. Lift the final safe-interface gate
+// for this test so the controller virtual cursor is visible and type-2 inventory slots can render
+// their normal 32x32 object icons. This also admits normal type-6 interface model components, so
+// treat the whole interactive/model-backed UI layer as one hardware acceptance test and watch heap,
+// model/icon cache pressure and frame time. The minimap and heavy decorative chrome remain disabled.
 #define PS2_NULL_UI 0
-#define PS2_SAFE_INTERFACE 1
+#define PS2_SAFE_INTERFACE 0
 #define PS2_UI_PROFILE 0
 // Hardware-tested restoration step after radius-14 terrain became stable. The generic PS2
 // pushPlayers() path intentionally skips LOCAL_PLAYER_INDEX, so keep the dedicated direct local
-// avatar draw enabled while restoring the normal 2D gameplay UI composition.
+// avatar draw enabled while restoring the interactive/model-backed gameplay UI.
 #define PS2_RENDER_LOCAL_PLAYER 1
 #elif defined(_arch_dreamcast) || defined(__NDS__)
 // NOTE: more extreme lowmem mode, making the game fully explorable on 32 MB
