@@ -6,15 +6,15 @@ This file is the standing workflow for the PlayStation 2 port. Read it before ma
 
 - Active development branch: `ps2-hardware-integration`
 - Branch starting point: `main` commit `673657249ef18526e6c33a3d4381953c132c2782`
-- Last fully real-hardware-known-good integration commit: `04099cbaf5de2d59545e5fbc1fd89948d8abd749` (confirmed working on real PS2 on 2026-09-17). This includes the traversal-stable 80x80 terrain / 72x72 loc baseline plus the corrected PS2 viewport model-picking coordinates. Cooper confirmed the picking correction worked on hardware.
+- Last fully real-hardware-known-good integration commit: `0775c19761f0b0815f7c7efab520495ae039443d` (confirmed working on real PS2 on 2026-09-17). Cooper explicitly selected this revision as the new baseline after hardware testing with no crashes. It includes traversal-stable 80x80 terrain / 72x72 loc residency, one-slot terrain texturing with water visible, corrected PS2 viewport model picking, and the local player restored to normal World3D ordering with walk/run/action animation transforms enabled and correct wall/loc occlusion.
 - Terrain finding: the old 4-byte scene-arena alignment made terrain residency layout-sensitive. A 16-byte/qword-aligned base and qword-aligned bump allocations fixed that class of hardware crash. 2x3, 3x3, 16x16, 32x32, 48x48 and 80x80 traversal-bridge terrain configurations have run on real hardware. Keep qword alignment as mandatory.
 - Traversal finding: 32x32 and 48x48 fixed terrain windows ended before the client could comfortably reach every normal server-driven scene recenter. The 80x80 terrain window bridges that gap and supports continuous `REBUILD_NORMAL` traversal. Static loc/model residency is deliberately smaller at 72x72 to reduce dense-scene pressure while still repopulating walls/objects after transitions.
 - Scene-lifetime finding: `client_clear_caches()` reset the scene bump arena before `world3d_reset()` tore down the old World3D. Because resident `Ground` nodes are arena-backed but own normal-heap wall/decor/ground-decoration attachments, zeroing the arena first erased those owner pointers and leaked static-world wrappers on each `REBUILD_NORMAL`. Commit `d0aa55048ea99ebe66eab538040f3642414331cc` preserves the old arena bytes until World3D teardown can free those attachments; repeated Lumbridge traversal then survived hardware stress testing.
 - Texture finding: `PIX3D_POOL_COUNT=1` is sufficient for the low-memory texture path and costs 64 KiB for the active texel slot. Water/rivers are hardware-good with this configuration. Treat water as the essential terrain texture; non-water terrain textures can later fall back to average/flat colour so the single slot is not churned unnecessarily.
-- Picking finding: the 512x334 PS2 software target was still feeding the model picker coordinates divided by two. Commit `04099cbaf5de2d59545e5fbc1fd89948d8abd749` corrects the model AABB/triangle picking coordinates while leaving UI input unchanged; real hardware confirmed the fix.
-- Current local-player issue: the dedicated PS2 local-player pass is drawn after `world3d_draw()`, so it behaves like a final overlay and can appear in front of walls that should occlude it. That same shortcut forces `player->lowmem = true`, causing `playerentity_draw()` to return the cached base model before walk/run/action sequence transforms. The next isolated test moves the local player back into World3D temporary-location ordering with lowmem disabled.
-- Static loc/model rendering has been observed to reduce live framerate from roughly 50 FPS to roughly 30 FPS. Preserve correctness first; renderer/VU1/GS acceleration is a separate later optimization milestone.
-- Current policy: gameplay-first 32 MiB profile — bounded/lazy Ground residency, fourteen-tile camera radius, one-slot low-memory terrain texturing with water as the essential texture, local player enabled, bounded static-loc placement, capped nearby dynamic entities, normal interactive gameplay UI and inventory icons with simplified chrome, minimap off.
+- Picking finding: the 512x334 PS2 software target had mismatched viewport/model-picking coordinates. Commit `04099cbaf5de2d59545e5fbc1fd89948d8abd749` corrects the model AABB/triangle picking path while leaving UI input unchanged; real hardware confirmed the fix.
+- Local-player finding: the old dedicated post-World3D local-player pass behaved like a final overlay, so the avatar appeared in front of walls and also forced `player->lowmem = true`, suppressing sequence transforms. Baseline `0775c19761f0b0815f7c7efab520495ae039443d` submits the local player into World3D temporary-location ordering with lowmem disabled. Real hardware confirms animation and correct wall/loc occlusion with no crash.
+- Performance finding: with restored static loc/model rendering, live update FPS varies roughly 30-50 FPS depending on scene load. The expensive 3D software render/presentation is still throttled by `PS2_RENDER_DIVISOR`; the next optimization milestone is VU1/GS acceleration, beginning with measured terrain/model render costs and an isolated backend rather than changing gameplay residency at the same time.
+- Current policy: gameplay-first 32 MiB profile — bounded/lazy Ground residency, fourteen-tile camera radius, one-slot low-memory terrain texturing with water as the essential texture, animated local player in normal scene ordering, bounded static-loc placement, capped nearby dynamic entities, normal interactive gameplay UI and inventory icons with simplified chrome, minimap off.
 - After each accepted hardware test, update the known-good commit here before starting the next restoration experiment.
 
 ## Source of truth
@@ -81,19 +81,19 @@ The retail PS2 has 32 MiB total EE RAM. Gameplay state wins over cosmetic fideli
 - Avoid thousands of tiny heap allocations. Prefer bounded pools/arenas or contiguous metadata where lifetime permits.
 - Allocation failure must never become silent memory corruption. Add capacity checks and fail/skip optional rendering work safely.
 
-## Restoration strategy
+## Restoration and optimization strategy
 
 Restore missing game systems gradually, but optimize each system for the gameplay-first profile rather than blindly restoring the desktop implementation.
 
 Current intended progression:
 
-1. Keep the hardware-good qword-aligned 80x80 terrain / 72x72 loc traversal + one-slot water-texture baseline stable.
-2. Keep the hardware-good corrected PS2 viewport picking path stable.
-3. Restore local-player walk/run/action animation and normal wall/loc occlusion by putting the local actor back into World3D ordering, without reintroducing appearance-cache/temporary-model leaks.
-4. Restrict the single terrain texture slot to water while using average/flat-colour fallback for other textured floors if texture churn materially costs frame time.
-5. Restore/verify ground items, projectiles and overhead elements under strict caps.
-6. Measure remaining scene/model/cache pressure and renderer time.
-7. Move terrain/loc/model transform and submission work toward a VU1/GS path where it provides a measured benefit.
+1. Preserve baseline `0775c19761f0b0815f7c7efab520495ae039443d`: qword-aligned 80x80 terrain / 72x72 loc traversal, one-slot water texture, corrected picking, animated/occluded local player, normal gameplay UI.
+2. Measure the current software 3D path on hardware: World3D traversal, terrain transform/raster, model transform/sort/raster, viewport upscale, and GS/full-surface presentation.
+3. Introduce an isolated PS2 VU1/GS terrain backend behind a compile-time fallback. Prefer packed streams, bounded VIF1 DMA, double VU buffers and GS submission; do not disturb gameplay collision/residency.
+4. Hardware-test flat/Gouraud terrain first, then preserve essential water texturing through the GS path.
+5. Re-profile dense loc scenes. If models remain the dominant cost, extend the VU1/GS backend to static loc/model transform/submission while keeping animated player/entity correctness.
+6. Reduce `PS2_RENDER_DIVISOR` only after the accelerated backend demonstrates enough headroom on real hardware.
+7. Restore/verify remaining ground items, projectiles and overhead elements under strict caps.
 8. Increase presentation rate/draw distance/entity limits only when measured headroom exists.
 9. Cosmetic terrain textures/minimap remain last and may stay disabled if they compromise stability.
 
@@ -137,6 +137,7 @@ A good PS2 test commit should have one clear question, for example:
 - `PS2: enable local player model`
 - `PS2: stream actionable locs only`
 - `PS2: reduce loc model cache pressure`
+- `PS2: add VU1 terrain backend`
 
 For every commit sent for hardware testing, record or communicate the exact commit SHA. Test that exact revision before proceeding.
 
