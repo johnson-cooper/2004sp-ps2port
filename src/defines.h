@@ -73,18 +73,18 @@
 // terrain texture IDs, so this test does not repeat the earlier five-slot (+256 KiB) experiment.
 #define PIX3D_POOL_COUNT 1
 #define DISABLE_FLAMES
-// Radius 14 / 29x29 and the 48x48 terrain window are hardware-stable, but 48x48 still ends before
-// the normal server-driven REBUILD_NORMAL recenter boundary can be reached by clicking visible
-// terrain. Keep the proven draw radius and widen only resident terrain to an 80x80 bridge window
-// (12..91). This is intentionally a traversal experiment: if the normal rebuild fires and recentres
-// the player before this window ends, bounded fixed-local residency can support the whole world
-// without materialising the full 104x104 scene. If 80x80 is too expensive, replace this with a
-// moving/recycled terrain window rather than increasing residency again.
+// Radius 14 / 29x29 remains hardware-good. The 80x80 (12..91) terrain+loc residency restored
+// continuous scene transitions and the missing walls/objects, but dense scenes eventually crashed
+// with the malloc free-list down in the ~50 KiB range. Trim the shared fixed-local residency to
+// 72x72 (16..87): this is still wide enough to reach the normal rebuild/recenter boundary in the
+// classic 104x104 scene, while cutting resident tile/loc area from 6400 to 5184 positions (~19%).
+// If this is stable, replace the fixed loc residency with a player-following window rather than
+// expanding back to 80x80.
 #define PS2_RENDER_RADIUS 14
-#define PS2_TERRAIN_MIN_TILE 12
-#define PS2_TERRAIN_MAX_X_TILE 92
-#define PS2_TERRAIN_MAX_Z_TILE 92
-#define PS2_TERRAIN_MAX_TILE 92
+#define PS2_TERRAIN_MIN_TILE 16
+#define PS2_TERRAIN_MAX_X_TILE 88
+#define PS2_TERRAIN_MAX_Z_TILE 88
+#define PS2_TERRAIN_MAX_TILE 88
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
@@ -92,9 +92,9 @@
 // Simulation/networking stay at 50 Hz. Present the expensive software 3D view at 10 Hz for now;
 // gameplay remains responsive while we establish a stable memory/performance floor.
 #define PS2_RENDER_DIVISOR 5
-// Bounded static-world restoration is hardware-good. Keep loc/model placement at the proven 32x32
-// window (32..63) during this terrain-only traversal test, so extra location models cannot confound
-// the memory result. A later moving loc window will follow the accepted terrain strategy.
+// Static-world restoration stays enabled. world_load_locations currently follows the same bounded
+// local constants as terrain, so this 72x72 test deliberately reduces both together after the
+// 80x80 dense-loc hardware crash while preserving scene-transition population.
 #define PS2_DEFER_STATIC_LOCATIONS 0
 // The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
