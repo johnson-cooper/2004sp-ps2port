@@ -7,8 +7,8 @@
 
 static bool ground_is_ps2_resident_terrain(int x, int z) {
 #ifdef __PS2__
-    return x >= PS2_TERRAIN_MIN_TILE && x < PS2_TERRAIN_MAX_TILE &&
-           z >= PS2_TERRAIN_MIN_TILE && z < PS2_TERRAIN_MAX_TILE;
+    return x >= PS2_TERRAIN_MIN_TILE && x < PS2_TERRAIN_MAX_X_TILE &&
+           z >= PS2_TERRAIN_MIN_TILE && z < PS2_TERRAIN_MAX_Z_TILE;
 #else
     (void)x;
     (void)z;
