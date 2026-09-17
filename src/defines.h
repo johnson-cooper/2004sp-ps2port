@@ -75,15 +75,15 @@
 // Gameplay-first camera window. Four tiles is a 9x9 live draw area; full decoded height/collision
 // state remains available outside it for movement, pathing and server-side gameplay.
 #define PS2_RENDER_RADIUS 4
-// First controlled expansion beyond the hardware-known-good aligned 3x3 window. The qword-aligned
-// 4 MiB scene arena made the old 3x3 configuration survive beyond T9924; expand one row and one
-// column to tiles 50..53 (4x4 / 16 resident terrain slots) without changing render radius, allocator
-// capacity, presentation rate, or any other subsystem. Final terrain residency is expected to grow
-// beyond 3x3, but each increase remains a separate real-hardware acceptance test.
-#define PS2_TERRAIN_MIN_TILE 50
-#define PS2_TERRAIN_MAX_X_TILE 54
-#define PS2_TERRAIN_MAX_Z_TILE 54
-#define PS2_TERRAIN_MAX_TILE 54
+// Deliberate terrain-residency stress test after qword alignment fixed the old 3x3 failures. Jump
+// beyond the untested 4x4 step to a 16x16 window centred around the Lumbridge local scene (43..58 on
+// each axis, 256 resident terrain slots). Keep the renderer at its existing 4-tile/9x9 draw radius,
+// the scene arena at 4 MiB, and all other settings unchanged. This tests whether the alignment fix
+// really removed the terrain-layout crash without simultaneously increasing per-frame draw work.
+#define PS2_TERRAIN_MIN_TILE 43
+#define PS2_TERRAIN_MAX_X_TILE 59
+#define PS2_TERRAIN_MAX_Z_TILE 59
+#define PS2_TERRAIN_MAX_TILE 59
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
@@ -244,7 +244,7 @@
 #define BODY_BLUE 38430
 #define BODY_GREEN 24094
 #define BODY_YELLOW 10153
-#define BODY_PURPLE 56621
+#define BODY_PURPLE 58621
 #define BODY_ORANGE 4783
 #define BODY_ROSE 1341
 #define BODY_LIME 16578
