@@ -26,6 +26,11 @@ static bool ps2_ground_is_empty(const Ground *tile) {
            !tile->groundObj && !tile->bridge;
 }
 
+static bool ps2_ground_is_scene_arena_tile(int x, int z) {
+    return x >= PS2_TERRAIN_MIN_TILE && x < PS2_TERRAIN_MAX_TILE &&
+           z >= PS2_TERRAIN_MIN_TILE && z < PS2_TERRAIN_MAX_TILE;
+}
+
 void world3d_init_global(void) {
     _World3D.clickTileX = -1;
     _World3D.clickTileZ = -1;
@@ -74,9 +79,13 @@ void world3d_update_activeoccluders(void) {
 // frame. world3d_add_loc2() creates missing Ground nodes for those locations,
 // but the desktop clear path only removes/frees the Location. In a deliberately
 // sparse PS2 scene that means actors walking across previously empty tiles leave
-// permanent ~Ground-sized breadcrumbs behind. Reclaim any now-empty scaffolding
-// after removing each temporary location. Real terrain/loc tiles are retained by
-// the attachment checks below.
+// permanent ~Ground-sized breadcrumbs behind. Reclaim any now-empty heap-backed
+// scaffolding after removing each temporary location. Ground nodes inside the
+// resident terrain window are scene-arena allocations: ground_free() deliberately
+// cannot reclaim those individually, so clearing their levelTiles pointer would
+// lose the only reusable reference and make the same tile consume another arena
+// allocation on the next frame. Keep empty arena-backed nodes linked for reuse;
+// their population is strictly bounded by the tiny resident terrain window.
 void world3d_clear_temporarylocs(World3D *world3d) {
     for (int i = 0; i < world3d->temporaryLocCount; i++) {
         Location *loc = world3d->temporaryLocs[i];
@@ -105,6 +114,9 @@ void world3d_clear_temporarylocs(World3D *world3d) {
                 for (int z = minZ; z <= maxZ; z++) {
                     Ground *tile = world3d->levelTiles[l][x][z];
                     if (ps2_ground_is_empty(tile)) {
+                        if (ps2_ground_is_scene_arena_tile(x, z)) {
+                            continue;
+                        }
                         ground_free(tile);
                         world3d->levelTiles[l][x][z] = NULL;
                     }
