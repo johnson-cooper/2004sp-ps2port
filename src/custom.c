@@ -20,7 +20,11 @@ extern InputTracking _InputTracking;
 const char *ps2_cache_prefix(void);
 #endif
 
-#if defined(__WII__) || defined(__3DS__) || defined(__WIIU__) || defined(__SWITCH__) || defined(__PSP__) || defined(__vita__) || defined(_arch_dreamcast) || defined(NXDK) || defined(__NDS__) || defined(ANDROID) || defined(__PS2__)
+#if defined(__PS2__)
+// Keep the normal hardware presentation clean. The existing ::perf command can opt back into
+// the FPS/LRU diagnostics at runtime whenever hardware profiling is needed.
+Custom _Custom = {.chat_era = 2, .http_port = 80, .show_performance = false};
+#elif defined(__WII__) || defined(__3DS__) || defined(__WIIU__) || defined(__SWITCH__) || defined(__PSP__) || defined(__vita__) || defined(_arch_dreamcast) || defined(NXDK) || defined(__NDS__) || defined(ANDROID)
 Custom _Custom = {.chat_era = 2, .http_port = 80, .show_performance = true};
 #else
 Custom _Custom = {.chat_era = 2, .http_port = 80};
@@ -133,7 +137,14 @@ void load_ini_config(Client *c) {
     _Custom.resizable = true;
 #endif
     INI_INT_LOG(&(&_Custom), item_outlines, );
+#ifndef __PS2__
     INI_INT_LOG(&(&_Custom), show_performance, );
+#else
+    // The embedded PS2 config historically enabled the bring-up HUD. Keep diagnostics available via
+    // ::perf, but do not let that legacy config entry make them visible on every normal boot.
+    _Custom.show_performance = false;
+    rs2_log("  show_performance: 0 (PS2 default; toggle with ::perf)\n");
+#endif
 #ifdef GL11
     _Custom.use_opengl11 = true;
 #endif
@@ -141,112 +152,6 @@ void load_ini_config(Client *c) {
     rs2_log("\n");
     ini_free(config);
 }
-
-/* void update_camera_editor(Client *c) {
-    // holding ctrl
-    int modifier = c->shell->action_key[5] == 1 ? 2 : 1;
-
-    if (c->shell->action_key[6] == 1) {
-        // holding shift
-        if (c->shell->action_key[1] == 1) {
-            // left
-            c->cutsceneDstLocalTileX -= 1 * modifier;
-            if (c->cutsceneDstLocalTileX < 1) {
-                c->cutsceneDstLocalTileX = 1;
-            }
-        } else if (c->shell->action_key[2] == 1) {
-            // right
-            c->cutsceneDstLocalTileX += 1 * modifier;
-            if (c->cutsceneDstLocalTileX > 102) {
-                c->cutsceneDstLocalTileX = 102;
-            }
-        }
-
-        if (c->shell->action_key[3] == 1) {
-            // up
-            if (c->shell->action_key[7] == 1) {
-                // holding alt
-                c->cutsceneDstHeight += 2 * modifier;
-            } else {
-                c->cutsceneDstLocalTileZ += 1;
-                if (c->cutsceneDstLocalTileZ > 102) {
-                    c->cutsceneDstLocalTileZ = 102;
-                }
-            }
-        } else if (c->shell->action_key[4] == 1) {
-            // down
-            if (c->shell->action_key[7] == 1) {
-                // holding alt
-                c->cutsceneDstHeight -= 2 * modifier;
-            } else {
-                c->cutsceneDstLocalTileZ -= 1;
-                if (c->cutsceneDstLocalTileZ < 1) {
-                    c->cutsceneDstLocalTileZ = 1;
-                }
-            }
-        }
-    } else {
-        if (c->shell->action_key[1] == 1) {
-            // left
-            c->cutsceneSrcLocalTileX -= 1 * modifier;
-            if (c->cutsceneSrcLocalTileX < 1) {
-                c->cutsceneSrcLocalTileX = 1;
-            }
-        } else if (c->shell->action_key[2] == 1) {
-            // right
-            c->cutsceneSrcLocalTileX += 1 * modifier;
-            if (c->cutsceneSrcLocalTileX > 102) {
-                c->cutsceneSrcLocalTileX = 102;
-            }
-        }
-
-        if (c->shell->action_key[3] == 1) {
-            // up
-            if (c->shell->action_key[7] == 1) {
-                // holding alt
-                c->cutsceneSrcHeight += 2 * modifier;
-            } else {
-                c->cutsceneSrcLocalTileZ += 1 * modifier;
-                if (c->cutsceneSrcLocalTileZ > 102) {
-                    c->cutsceneSrcLocalTileZ = 102;
-                }
-            }
-        } else if (c->shell->action_key[4] == 1) {
-            // down
-            if (c->shell->action_key[7] == 1) {
-                // holding alt
-                c->cutsceneSrcHeight -= 2 * modifier;
-            } else {
-                c->cutsceneSrcLocalTileZ -= 1 * modifier;
-                if (c->cutsceneSrcLocalTileZ < 1) {
-                    c->cutsceneSrcLocalTileZ = 1;
-                }
-            }
-        }
-    }
-
-    c->cameraX = c->cutsceneSrcLocalTileX * 128 + 64;
-    c->cameraZ = c->cutsceneSrcLocalTileZ * 128 + 64;
-    c->cameraY = getHeightmapY(c, c->currentLevel, c->cutsceneSrcLocalTileX, c->cutsceneSrcLocalTileZ) - c->cutsceneSrcHeight;
-
-    int sceneX = c->cutsceneDstLocalTileX * 128 + 64;
-    int sceneZ = c->cutsceneDstLocalTileZ * 128 + 64;
-    int sceneY = getHeightmapY(c, c->currentLevel, c->cutsceneDstLocalTileX, c->cutsceneDstLocalTileZ) - c->cutsceneDstHeight;
-    int deltaX = sceneX - c->cameraX;
-    int deltaY = sceneY - c->cameraY;
-    int deltaZ = sceneZ - c->cameraZ;
-    int distance = (int)sqrt(deltaX * deltaX + deltaZ * deltaZ);
-
-    c->cameraPitch = (int)(atan2(deltaY, distance) * RADIANS_TO_RS) & 0x7ff;
-    c->cameraYaw = (int)(atan2(deltaX, deltaZ) * -RADIANS_TO_RS) & 0x7ff;
-    if (c->cameraPitch < 128) {
-        c->cameraPitch = 128;
-    }
-
-    if (c->cameraPitch > 383) {
-        c->cameraPitch = 383;
-    }
-} */
 
 void draw_info_overlay(Client *c) {
     int x = 507;
