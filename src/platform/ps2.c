@@ -934,8 +934,23 @@ void platform_poll_events(Client *c) {
         c->shell->mouse_y = MAX(0, MIN(SCREEN_HEIGHT - 1, c->shell->mouse_y + dy));
         c->shell->idle_cycles = 0;
         if (c->menu_visible) c->controller_menu_index = -1;
-        // Analog motion intentionally exits D-pad grid ownership. A later D-pad press will choose
-        // whichever visible inventory/bank/shop grid the cursor now points at.
+        // Analog motion is an authoritative exit from D-pad grid ownership. Sidebar/chat panels
+        // are retained PixMaps, so dirty the panel that contained the old focus rectangle BEFORE
+        // dropping the grid state; otherwise the yellow box remains baked into the panel and makes
+        // it appear that snapping is still active even though the logical selection was cleared.
+        if (c->controller_grid_component >= 0) {
+            int focus_x = c->controller_grid_screen_valid ? c->controller_grid_screen_x : c->shell->mouse_x;
+            int focus_y = c->controller_grid_screen_valid ? c->controller_grid_screen_y : c->shell->mouse_y;
+            if (focus_x >= 553 && focus_x < 743 && focus_y >= 205 && focus_y < 466) {
+                c->redraw_sidebar = true;
+            } else if (focus_x >= 17 && focus_x < 496 && focus_y >= 357 && focus_y < 453) {
+                c->redraw_chatback = true;
+            } else {
+                // Viewport interfaces repaint with the viewport path; mark the surrounding chrome
+                // dirty as a conservative one-frame cleanup for modal bank/shop layouts.
+                c->redraw_background = true;
+            }
+        }
         c->controller_grid_component = -1;
         c->controller_grid_slot = -1;
         c->controller_grid_screen_valid = false;
