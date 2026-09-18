@@ -4386,6 +4386,8 @@ static void handleMouseInput(Client *c) {
     }
 
     int button = c->shell->mouse_click_button;
+    bool controller_primary = c->controller_primary_action;
+    c->controller_primary_action = false;
     if (c->spell_selected == 1 && c->shell->mouse_click_x >= 516 && c->shell->mouse_click_y >= 160 && c->shell->mouse_click_x <= 765 && c->shell->mouse_click_y <= 205) {
         button = 0;
     }
@@ -4491,7 +4493,9 @@ static void handleMouseInput(Client *c) {
             }
         }
 
-        if (button == 1 && (c->mouseButtonsOption == 1 || isAddFriendOption(c, c->menu_size - 1)) && c->menu_size > 2) {
+        if (button == 1 && !controller_primary &&
+            (c->mouseButtonsOption == 1 || isAddFriendOption(c, c->menu_size - 1)) &&
+            c->menu_size > 2) {
             button = 2;
         }
 

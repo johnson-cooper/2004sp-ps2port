@@ -951,6 +951,7 @@ void platform_poll_events(Client *c) {
         } else if (c->controller_settings_visible || c->menu_visible) {
             c->controller_confirm_pressed = true;
         } else {
+            c->controller_primary_action = true;
             c->shell->mouse_click_x = c->shell->mouse_x;
             c->shell->mouse_click_y = c->shell->mouse_y;
             c->shell->mouse_click_button = 1;
