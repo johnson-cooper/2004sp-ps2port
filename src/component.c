@@ -402,7 +402,7 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
     rs2_log("PS2 interfaces indexed: definitions=%d count=%d raw=%d bytes loaded=%d\n",
             indexed, _Component.count, _Component.interfaceDataLength, _Component.loadedCount);
     return;
-#endif
+#else
     _Component.imageCache = lrucache_new(50000);
     _Component.modelCache = lrucache_new(50000);
 #ifdef __PS2__
@@ -724,6 +724,7 @@ void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts) {
     // component_ensure_model()), not just a transient dedup structure for this unpack pass
     lrucache_free(_Component.imageCache);
     lrucache_free(_Component.modelCache);
+#endif
 #endif
 }
 
