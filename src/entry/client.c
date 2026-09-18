@@ -1301,7 +1301,7 @@ void handleInterfaceInput(Client *c, Component *com, int mouseX, int mouseY, int
     for (int i = 0; i < children; i++) {
         int childX = com->childX[i] + x;
         int childY = com->childY[i] + y - scrollPosition;
-        Component *child = _Component.instances[com->childId[i]];
+        Component *child = component_get(com->childId[i]);
 
         childX += child->x;
         childY += child->y;
@@ -3389,11 +3389,11 @@ static void useMenuOption(Client *cl, int optionId) {
         cl->selectedItem = b;
         cl->selected_area = 2;
 
-        if (_Component.instances[c]->layer == cl->viewport_interface_id) {
+        if (component_get(c)->layer == cl->viewport_interface_id) {
             cl->selected_area = 1;
         }
 
-        if (_Component.instances[c]->layer == cl->chat_interface_id) {
+        if (component_get(c)->layer == cl->chat_interface_id) {
             cl->selected_area = 3;
         }
     } else if (action == 728 || action == 542 || action == 6 || action == 963 || action == 245) {
@@ -3494,11 +3494,11 @@ static void useMenuOption(Client *cl, int optionId) {
         cl->selectedItem = b;
         cl->selected_area = 2;
 
-        if (_Component.instances[c]->layer == cl->viewport_interface_id) {
+        if (component_get(c)->layer == cl->viewport_interface_id) {
             cl->selected_area = 1;
         }
 
-        if (_Component.instances[c]->layer == cl->chat_interface_id) {
+        if (component_get(c)->layer == cl->chat_interface_id) {
             cl->selected_area = 3;
         }
     } else if (action == 391) {
@@ -3514,11 +3514,11 @@ static void useMenuOption(Client *cl, int optionId) {
         cl->selectedItem = b;
         cl->selected_area = 2;
 
-        if (_Component.instances[c]->layer == cl->viewport_interface_id) {
+        if (component_get(c)->layer == cl->viewport_interface_id) {
             cl->selected_area = 1;
         }
 
-        if (_Component.instances[c]->layer == cl->chat_interface_id) {
+        if (component_get(c)->layer == cl->chat_interface_id) {
             cl->selected_area = 3;
         }
     } else if (action == 660) {
@@ -3703,7 +3703,7 @@ static void useMenuOption(Client *cl, int optionId) {
         // OPLOC2
         interactWithLoc(cl, 213, b, c, a); // OPLOC2
     } else if (action == 930) {
-        Component *com = _Component.instances[c];
+        Component *com = component_get(c);
         cl->spell_selected = 1;
         cl->activeSpellId = c;
         cl->activeSpellFlags = com->actionTarget;
@@ -3742,7 +3742,7 @@ static void useMenuOption(Client *cl, int optionId) {
 
         return;
     } else if (action == 951) {
-        Component *com = _Component.instances[c];
+        Component *com = component_get(c);
         bool notify = true;
 
         if (com->clientCode > 0) {
@@ -3801,11 +3801,11 @@ static void useMenuOption(Client *cl, int optionId) {
         cl->selectedItem = b;
         cl->selected_area = 2;
 
-        if (_Component.instances[c]->layer == cl->viewport_interface_id) {
+        if (component_get(c)->layer == cl->viewport_interface_id) {
             cl->selected_area = 1;
         }
 
-        if (_Component.instances[c]->layer == cl->chat_interface_id) {
+        if (component_get(c)->layer == cl->chat_interface_id) {
             cl->selected_area = 3;
         }
     } else if (action == 581) {
@@ -3866,7 +3866,7 @@ static void useMenuOption(Client *cl, int optionId) {
         p1isaac(cl->out, 244); // IF_BUTTON
         p2(cl->out, c);
 
-        Component *com = _Component.instances[c];
+        Component *com = component_get(c);
         if (com->scripts && com->scripts[0][0] == 5) {
             int varp = com->scripts[0][1];
             if (cl->varps[varp] != com->scriptOperand[0]) {
@@ -3886,12 +3886,8 @@ static void useMenuOption(Client *cl, int optionId) {
             strtrim(cl->reportAbuseInput);
             cl->reportAbuseMuteOption = false;
 
-            for (int i = 0; i < _Component.count; i++) {
-                if (_Component.instances[i] && _Component.instances[i]->clientCode == 600) {
-                    cl->reportAbuseInterfaceID = cl->viewport_interface_id = _Component.instances[i]->layer;
-                    break;
-                }
-            }
+            Component *report = component_find_by_client_code(600);
+            if (report) cl->reportAbuseInterfaceID = cl->viewport_interface_id = report->layer;
         }
     } else if (action == 947) {
         closeInterfaces(cl);
@@ -3917,7 +3913,7 @@ static void useMenuOption(Client *cl, int optionId) {
         p1isaac(cl->out, 244); // IF_BUTTON
         p2(cl->out, c);
 
-        Component *com = _Component.instances[c];
+        Component *com = component_get(c);
         if (com->scripts && com->scripts[0][0] == 5) {
             int varp = com->scripts[0][1];
             cl->varps[varp] = 1 - cl->varps[varp];
@@ -5077,11 +5073,10 @@ static void handleChatSettingsInput(Client *c) {
         c->reportAbuseInput[0] = '\0';
         c->reportAbuseMuteOption = false;
 
-        for (int i = 0; i < _Component.count; i++) {
-            if (_Component.instances[i] && _Component.instances[i]->clientCode == 600) {
-                c->reportAbuseInterfaceID = c->viewport_interface_id = _Component.instances[i]->layer;
-                return;
-            }
+        Component *report = component_find_by_client_code(600);
+        if (report) {
+            c->reportAbuseInterfaceID = c->viewport_interface_id = report->layer;
+            return;
         }
     }
 }
@@ -5304,7 +5299,7 @@ void client_update_game(Client *c) {
                     c->hoveredSlotParentId = -1;
                     client_handle_input(c);
                     if (c->hoveredSlotParentId == c->objDragInterfaceId && c->hoveredSlot != c->objDragSlot) {
-                        Component *com = _Component.instances[c->objDragInterfaceId];
+                        Component *com = component_get(c->objDragInterfaceId);
                         int obj = com->invSlotObjId[c->hoveredSlot];
                         com->invSlotObjId[c->hoveredSlot] = com->invSlotObjId[c->objDragSlot];
                         com->invSlotObjId[c->objDragSlot] = obj;
@@ -5791,18 +5786,16 @@ static int8_t *client_load_raw_file(const char *filename_only, int *out_size) {
 // Several IF_SET* server packets carry a raw component id straight from the network. rev254's
 // Progressive server can reference interfaces/components Client3 hasn't instantiated locally (or
 // ids past the loaded interface archive's range), which is an out-of-bounds/NULL dereference on
-// _Component.instances[id] - this was the root cause of a real crash during login. Every direct
+// component_get(id) - this was the root cause of a real crash during login. Every direct
 // network-supplied component id must be checked with this before dereferencing.
 static inline bool component_valid(int id) {
-    return id >= 0 && id < _Component.count && _Component.instances[id] != NULL;
+    return component_exists(id);
 }
 
-// Same rationale as component_valid() above, but for the many call sites that index
-// _Component.instances[] directly with a *stored* interface id (viewport/sidebar/chat/tab/sticky
-// chat interface ids set earlier from a server packet) rather than one just read off the wire -
-// returns NULL instead of an out-of-bounds/garbage pointer when the id turns out to be invalid.
+// Centralized lookup is also the PS2 lazy-definition boundary. Invalid Progressive-only ids remain
+// safely rejected; valid serialized definitions are materialized the first time they are referenced.
 static inline Component *component_get(int id) {
-    return component_valid(id) ? _Component.instances[id] : NULL;
+    return component_get_by_id(id);
 }
 
 bool client_read(Client *c) {
@@ -6272,7 +6265,7 @@ bool client_read(Client *c) {
             c->packet_type = -1;
             return true;
         }
-        component_set_dynamic_model(_Component.instances[com], playerentity_get_headmodel(c->local_player));
+        component_set_dynamic_model(component_get(com), playerentity_get_headmodel(c->local_player));
         c->packet_type = -1;
         return true;
     }
@@ -6446,7 +6439,7 @@ bool client_read(Client *c) {
         if (seqId == 65535 || seqId < 0 || seqId >= _SeqType.count) {
             seqId = -1;
         }
-        _Component.instances[com]->anim = seqId;
+        component_get(com)->anim = seqId;
         c->packet_type = -1;
         return true;
     }
@@ -6507,7 +6500,7 @@ bool client_read(Client *c) {
             c->packet_type = -1;
             return true;
         }
-        Component *inv = _Component.instances[com];
+        Component *inv = component_get(com);
         int size = g1(c->in);
         for (int i = 0; i < size; i++) {
             inv->invSlotObjId[i] = g2(c->in);
@@ -6547,7 +6540,7 @@ bool client_read(Client *c) {
             c->packet_type = -1;
             return true;
         }
-        Component *inv = _Component.instances[com];
+        Component *inv = component_get(com);
         for (int i = 0; i < inv->width * inv->height; i++) {
             inv->invSlotObjId[i] = -1;
             inv->invSlotObjId[i] = 0;
@@ -6575,12 +6568,8 @@ bool client_read(Client *c) {
             }
             c->reportAbuseInput[0] = '\0';
             c->reportAbuseMuteOption = false;
-            for (int i = 0; i < _Component.count; i++) {
-                if (_Component.instances[i] && _Component.instances[i]->clientCode == clientCode) {
-                    c->viewport_interface_id = _Component.instances[i]->layer;
-                    break;
-                }
-            }
+            Component *welcome = component_find_by_client_code(clientCode);
+            if (welcome) c->viewport_interface_id = welcome->layer;
         }
         c->packet_type = -1;
         return true;
@@ -6646,7 +6635,7 @@ bool client_read(Client *c) {
             return true;
         }
         NpcType *npc = npctype_get(npcId);
-        component_set_dynamic_model(_Component.instances[com], npctype_get_headmodel(npc));
+        component_set_dynamic_model(component_get(com), npctype_get_headmodel(npc));
         c->packet_type = -1;
         return true;
     }
@@ -6666,7 +6655,7 @@ bool client_read(Client *c) {
             c->packet_type = -1;
             return true;
         }
-        Component *inter = _Component.instances[com];
+        Component *inter = component_get(com);
 #ifdef __PS2__
         component_ensure_model(inter);
 #endif
@@ -6732,7 +6721,7 @@ bool client_read(Client *c) {
             c->packet_type = -1;
             return true;
         }
-        Component *inter = _Component.instances[com];
+        Component *inter = component_get(com);
         inter->x = x;
         inter->y = z;
         c->packet_type = -1;
@@ -6866,7 +6855,7 @@ bool client_read(Client *c) {
             c->packet_type = -1;
             return true;
         }
-        component_set_dynamic_model(_Component.instances[com], model_from_id(model, false));
+        component_set_dynamic_model(component_get(com), model_from_id(model, false));
         c->packet_type = -1;
         return true;
     }
@@ -6970,10 +6959,10 @@ bool client_read(Client *c) {
             return true;
         }
         ObjType *obj = objtype_get(objId);
-        component_set_dynamic_model(_Component.instances[com], objtype_get_interfacemodel(obj, 50, false));
-        _Component.instances[com]->xan = obj->xan2d;
-        _Component.instances[com]->yan = obj->yan2d;
-        _Component.instances[com]->zoom = obj->zoom2d * 100 / zoom;
+        component_set_dynamic_model(component_get(com), objtype_get_interfacemodel(obj, 50, false));
+        component_get(com)->xan = obj->xan2d;
+        component_get(com)->yan = obj->yan2d;
+        component_get(com)->zoom = obj->zoom2d * 100 / zoom;
         c->packet_type = -1;
         return true;
     }
@@ -7010,7 +6999,7 @@ bool client_read(Client *c) {
         int r = color >> 10 & 0x1f;
         int g = color >> 5 & 0x1f;
         int b = color & 0x1f;
-        _Component.instances[com]->colour = (r << 19) + (g << 11) + (b << 3);
+        component_get(com)->colour = (r << 19) + (g << 11) + (b << 3);
         c->packet_type = -1;
         return true;
     }
@@ -7037,7 +7026,7 @@ bool client_read(Client *c) {
             c->packet_type = -1;
             return true;
         }
-        _Component.instances[com]->hide = hide;
+        component_get(com)->hide = hide;
         c->packet_type = -1;
         return true;
     }
@@ -7088,13 +7077,13 @@ bool client_read(Client *c) {
             c->packet_type = -1;
             return true;
         }
-        if (!_Component.instances[com]->text) {
-            _Component.instances[com]->text = malloc(DOUBLE_STR);
+        if (!component_get(com)->text) {
+            component_get(com)->text = malloc(DOUBLE_STR);
         }
-        strncpy(_Component.instances[com]->text, text, DOUBLE_STR - 1);
-        _Component.instances[com]->text[DOUBLE_STR - 1] = '\0';
+        strncpy(component_get(com)->text, text, DOUBLE_STR - 1);
+        component_get(com)->text[DOUBLE_STR - 1] = '\0';
         free(text);
-        if (_Component.instances[com]->layer == c->tab_interface_id[c->selected_tab]) {
+        if (component_get(com)->layer == c->tab_interface_id[c->selected_tab]) {
             c->redraw_sidebar = true;
         }
         c->packet_type = -1;
@@ -7163,7 +7152,7 @@ bool client_read(Client *c) {
             c->packet_type = -1;
             return true;
         }
-        Component *inv = _Component.instances[com];
+        Component *inv = component_get(com);
         while (c->in->pos < c->packet_size) {
             int slot = g1(c->in);
             int id = g2(c->in);
@@ -8963,12 +8952,12 @@ void reset_interface_animation(int id) {
     if (!component_valid(id)) {
         return;
     }
-    Component *parent = _Component.instances[id];
+    Component *parent = component_get(id);
     for (int i = 0; i < parent->childCount && parent->childId[i] != -1; i++) {
         if (!component_valid(parent->childId[i])) {
             continue;
         }
-        Component *child = _Component.instances[parent->childId[i]];
+        Component *child = component_get(parent->childId[i]);
         if (child->type == 1) {
             reset_interface_animation(child->id);
         }
@@ -10000,12 +9989,12 @@ bool client_update_interface_animation(Client *c, int id, int delta) {
     if (!component_valid(id)) {
         return false;
     }
-    Component *parent = _Component.instances[id];
+    Component *parent = component_get(id);
     for (int i = 0; i < parent->childCount && parent->childId[i] != -1; i++) {
         if (!component_valid(parent->childId[i])) {
             continue;
         }
-        Component *child = _Component.instances[parent->childId[i]];
+        Component *child = component_get(parent->childId[i]);
         if (child->type == 1) {
             updated |= client_update_interface_animation(c, child->id, delta);
         }
@@ -10092,7 +10081,7 @@ int client_execute_clientscript1(Client *c, Component *component, int scriptId) 
         } else if (opcode == 3) { // load_skill_exp {skill}
             _register += c->skillExperience[script[pc++]];
         } else if (opcode == 4) { // load_inv_count {interface id} {obj id}
-            Component *com = _Component.instances[script[pc++]];
+            Component *com = component_get(script[pc++]);
             int obj = script[pc++] + 1;
 
             for (int i = 0; i < com->width * com->height; i++) {
@@ -10118,7 +10107,7 @@ int client_execute_clientscript1(Client *c, Component *component, int scriptId) 
                 _register += c->skillBaseLevel[i];
             }
         } else if (opcode == 10) { // load_inv_contains {interface id} {obj id}
-            Component *com = _Component.instances[script[pc++]];
+            Component *com = component_get(script[pc++]);
             int obj = script[pc++] + 1;
 
             for (int i = 0; i < com->width * com->height; i++) {
@@ -11973,7 +11962,7 @@ static void client_draw_interface(Client *c, Component *com, int x, int y, int s
         int childX = com->childX[i] + x;
         int childY = com->childY[i] + y - scrollY;
 
-        Component *child = _Component.instances[com->childId[i]];
+        Component *child = component_get(com->childId[i]);
         childX += child->x;
         childY += child->y;
 

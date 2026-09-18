@@ -188,11 +188,23 @@ typedef struct {
     LruCache *modelCache;
 #ifdef __PS2__
     Jagfile *media; // kept resident (not freed after component_unpack) for lazy graphic decode
+    // Compact serialized interface database. Definitions are materialized only on first reference
+    // and then remain resident so packet-written state is never discarded.
+    int8_t *interfaceData;
+    int interfaceDataLength;
+    int *interfaceOffsets;
+    int *interfaceLayers;
+    int *interfaceClientCodes;
+    PixFont *fonts[4];
+    int loadedCount;
 #endif
 } ComponentData;
 
 void component_free_global(void);
 void component_unpack(Jagfile *jag, Jagfile *media, PixFont **fonts);
+bool component_exists(int id);
+Component *component_get_by_id(int id);
+Component *component_find_by_client_code(int clientCode);
 Pix24 *component_get_image(Jagfile *media, char *sprite, int spriteId);
 Model *component_get_model(int id);
 Model *component_get_model2(Component *com, int primaryFrame, int secondaryFrame, bool active, bool *_free);
