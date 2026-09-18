@@ -262,6 +262,8 @@ struct Client {
     int controller_cursor_deadzone;   // left stick per-axis deadzone, 0..127 units around center
     int controller_cursor_speed;      // virtual cursor max pixels/tick
     int controller_camera_deadzone;   // right stick per-axis deadzone
+    int controller_grid_component;    // active TYPE_INV component id, -1 until D-pad enters a grid
+    int controller_grid_slot;         // selected row-major slot inside that component
 
     // On-screen virtual keyboard (see gameshell.h's has_keyboard) - the only way a controller-only
     // player can enter text. State lives here (not a separate file) since every operation needs

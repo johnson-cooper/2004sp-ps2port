@@ -24,6 +24,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "../client.h"
 #include "../custom.h"
@@ -933,6 +934,10 @@ void platform_poll_events(Client *c) {
         c->shell->mouse_y = MAX(0, MIN(SCREEN_HEIGHT - 1, c->shell->mouse_y + dy));
         c->shell->idle_cycles = 0;
         if (c->menu_visible) c->controller_menu_index = -1;
+        // Analog motion intentionally exits D-pad grid ownership. A later D-pad press will choose
+        // whichever visible inventory/bank/shop grid the cursor now points at.
+        c->controller_grid_component = -1;
+        c->controller_grid_slot = -1;
 
         if (_InputTracking.enabled) {
             inputtracking_mouse_moved(&_InputTracking, c->shell->mouse_x, c->shell->mouse_y);

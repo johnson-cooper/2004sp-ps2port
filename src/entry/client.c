@@ -138,6 +138,7 @@ static inline Component *component_get(int id);
 static void useMenuOption(Client *cl, int optionId);
 static void handleControllerTabInput(Client *c);
 static void handleControllerButtonInput(Client *c);
+static void handleControllerGridInput(Client *c);
 static void controller_settings_draw(Client *c);
 static void virtual_keyboard_maybe_open(Client *c, int target);
 static void virtual_keyboard_close(Client *c, bool submit);
@@ -4648,6 +4649,8 @@ static void handleControllerTabInput(Client *c) {
             c->redraw_sidebar = true;
             c->selected_tab = next;
             c->redraw_sideicons = true;
+            c->controller_grid_component = -1;
+            c->controller_grid_slot = -1;
             break;
         }
     }
@@ -4717,6 +4720,9 @@ static void handleControllerButtonInput(Client *c) {
     }
 
     if (c->menu_visible) {
+        if (c->controller_dpad_x != 0) {
+            c->controller_dpad_x = 0;
+        }
         if (c->controller_dpad_y != 0) {
             if (c->controller_menu_index < 0 || c->controller_menu_index >= c->menu_size) {
                 c->controller_menu_index = c->menu_size - 1;
@@ -4749,6 +4755,8 @@ static void handleControllerButtonInput(Client *c) {
             c->redraw_sidebar = true;
             c->selected_tab = 3;
             c->redraw_sideicons = true;
+            c->controller_grid_component = -1;
+            c->controller_grid_slot = -1;
         }
     }
 
@@ -4878,6 +4886,268 @@ static void vkb_commit_cell(Client *c, int row, int col) {
 
     char ch = vkb_row_char(c, row, col);
     key_pressed(c->shell, 0, (int)ch);
+}
+
+
+typedef struct {
+    Component *grid;
+    int x;
+    int y;
+    Component *scroll_owner;
+    int clip_top;
+    int clip_bottom;
+    int best_distance;
+    bool found;
+} ControllerGridTarget;
+
+static void controller_grid_search(Component *layer, int x, int y, int scroll_position,
+                                   int mouse_x, int mouse_y, int wanted_id, bool require_point,
+                                   Component *scroll_owner, int clip_top, int clip_bottom,
+                                   ControllerGridTarget *best) {
+    if (!layer || layer->type != TYPE_LAYER || layer->hide || !layer->childId) {
+        return;
+    }
+
+    Component *owner = scroll_owner;
+    int owner_top = clip_top;
+    int owner_bottom = clip_bottom;
+    if (layer->scroll > layer->height) {
+        owner = layer;
+        owner_top = y;
+        owner_bottom = y + layer->height;
+    }
+
+    for (int i = 0; i < layer->childCount; i++) {
+        Component *child = component_get(layer->childId[i]);
+        if (!child) continue;
+
+        int child_x = x + layer->childX[i] + child->x;
+        int child_y = y + layer->childY[i] + child->y - scroll_position;
+
+        if (child->type == TYPE_LAYER) {
+            controller_grid_search(child, child_x, child_y, child->scrollPosition,
+                                   mouse_x, mouse_y, wanted_id, require_point,
+                                   owner, owner_top, owner_bottom, best);
+            continue;
+        }
+        if (child->type != TYPE_INV || child->width <= 0 || child->height <= 0) {
+            continue;
+        }
+        if (wanted_id >= 0 && child->id != wanted_id) {
+            continue;
+        }
+
+        int cols = child->width;
+        int rows = child->height;
+        int min_x = child_x;
+        int min_y = child_y;
+        int max_x = child_x + cols * 32 + (cols - 1) * child->marginX;
+        int max_y = child_y + rows * 32 + (rows - 1) * child->marginY;
+        // The first twenty slots may have archive-defined offsets. Widen the hit envelope enough
+        // to include those real slot rectangles instead of assuming a perfectly regular grid.
+        int offset_slots = cols * rows;
+        if (offset_slots > 20) offset_slots = 20;
+        for (int slot = 0; slot < offset_slots; slot++) {
+            int sx = child_x + (slot % cols) * (child->marginX + 32);
+            int sy = child_y + (slot / cols) * (child->marginY + 32);
+            if (child->invSlotOffsetX) sx += child->invSlotOffsetX[slot];
+            if (child->invSlotOffsetY) sy += child->invSlotOffsetY[slot];
+            if (sx < min_x) min_x = sx;
+            if (sy < min_y) min_y = sy;
+            if (sx + 32 > max_x) max_x = sx + 32;
+            if (sy + 32 > max_y) max_y = sy + 32;
+        }
+
+        bool inside = mouse_x >= min_x && mouse_x < max_x && mouse_y >= min_y && mouse_y < max_y;
+        if (require_point && !inside) continue;
+
+        int dx = 0;
+        int dy = 0;
+        if (mouse_x < min_x) dx = min_x - mouse_x;
+        else if (mouse_x >= max_x) dx = mouse_x - max_x + 1;
+        if (mouse_y < min_y) dy = min_y - mouse_y;
+        else if (mouse_y >= max_y) dy = mouse_y - max_y + 1;
+        int distance = dx * dx + dy * dy;
+
+        if (!best->found || distance < best->best_distance) {
+            best->found = true;
+            best->best_distance = distance;
+            best->grid = child;
+            best->x = child_x;
+            best->y = child_y;
+            best->scroll_owner = owner;
+            best->clip_top = owner_top;
+            best->clip_bottom = owner_bottom;
+        }
+    }
+}
+
+static bool controller_find_grid(Client *c, int wanted_id, bool require_point, ControllerGridTarget *out) {
+    memset(out, 0, sizeof(*out));
+    out->best_distance = 0x7fffffff;
+
+    // If the cursor is already over a grid, respect that before applying modal/default priority.
+    Component *viewport = c->viewport_interface_id != -1 ? component_get(c->viewport_interface_id) : NULL;
+    Component *sidebar = NULL;
+    if (c->sidebar_interface_id != -1) {
+        sidebar = component_get(c->sidebar_interface_id);
+    } else if (c->selected_tab >= 0 && c->selected_tab < 14 && c->tab_interface_id[c->selected_tab] != -1) {
+        sidebar = component_get(c->tab_interface_id[c->selected_tab]);
+    }
+    Component *chat = c->chat_interface_id != -1 ? component_get(c->chat_interface_id) : NULL;
+
+    if (viewport) controller_grid_search(viewport, 4, 4, 0, c->shell->mouse_x, c->shell->mouse_y,
+                                         wanted_id, require_point, NULL, 4, 338, out);
+    if (sidebar) controller_grid_search(sidebar, 553, 205, 0, c->shell->mouse_x, c->shell->mouse_y,
+                                        wanted_id, require_point, NULL, 205, 466, out);
+    if (chat) controller_grid_search(chat, 17, 357, 0, c->shell->mouse_x, c->shell->mouse_y,
+                                     wanted_id, require_point, NULL, 357, 453, out);
+    return out->found;
+}
+
+static bool controller_find_default_grid(Client *c, ControllerGridTarget *out) {
+    // A viewport interface is modal gameplay UI (bank/shop/trade/etc.), so prefer its inventory
+    // grid when the cursor is not already sitting on a particular grid. Otherwise use the sidebar.
+    memset(out, 0, sizeof(*out));
+    out->best_distance = 0x7fffffff;
+    if (c->viewport_interface_id != -1) {
+        Component *viewport = component_get(c->viewport_interface_id);
+        if (viewport) {
+            controller_grid_search(viewport, 4, 4, 0, c->shell->mouse_x, c->shell->mouse_y,
+                                   -1, false, NULL, 4, 338, out);
+            if (out->found) return true;
+        }
+    }
+
+    Component *sidebar = NULL;
+    if (c->sidebar_interface_id != -1) {
+        sidebar = component_get(c->sidebar_interface_id);
+    } else if (c->selected_tab >= 0 && c->selected_tab < 14 && c->tab_interface_id[c->selected_tab] != -1) {
+        sidebar = component_get(c->tab_interface_id[c->selected_tab]);
+    }
+    if (sidebar) {
+        controller_grid_search(sidebar, 553, 205, 0, c->shell->mouse_x, c->shell->mouse_y,
+                               -1, false, NULL, 205, 466, out);
+        if (out->found) return true;
+    }
+
+    if (c->chat_interface_id != -1) {
+        Component *chat = component_get(c->chat_interface_id);
+        if (chat) {
+            controller_grid_search(chat, 17, 357, 0, c->shell->mouse_x, c->shell->mouse_y,
+                                   -1, false, NULL, 357, 453, out);
+        }
+    }
+    return out->found;
+}
+
+static void controller_grid_slot_center(ControllerGridTarget *target, int slot, int *cx, int *cy) {
+    Component *grid = target->grid;
+    int col = slot % grid->width;
+    int row = slot / grid->width;
+    int x = target->x + col * (grid->marginX + 32);
+    int y = target->y + row * (grid->marginY + 32);
+    if (slot < 20) {
+        if (grid->invSlotOffsetX) x += grid->invSlotOffsetX[slot];
+        if (grid->invSlotOffsetY) y += grid->invSlotOffsetY[slot];
+    }
+    *cx = x + 16;
+    *cy = y + 16;
+}
+
+static int controller_grid_nearest_slot(ControllerGridTarget *target, int mouse_x, int mouse_y) {
+    int count = target->grid->width * target->grid->height;
+    int best_slot = 0;
+    int best_distance = 0x7fffffff;
+    for (int slot = 0; slot < count; slot++) {
+        int cx, cy;
+        controller_grid_slot_center(target, slot, &cx, &cy);
+        int dx = cx - mouse_x;
+        int dy = cy - mouse_y;
+        int distance = dx * dx + dy * dy;
+        if (distance < best_distance) {
+            best_distance = distance;
+            best_slot = slot;
+        }
+    }
+    return best_slot;
+}
+
+static void handleControllerGridInput(Client *c) {
+    if (c->controller_dpad_x == 0 && c->controller_dpad_y == 0) return;
+    if (c->virtual_keyboard_visible || c->controller_settings_visible || c->menu_visible) return;
+
+    int dpad_x = c->controller_dpad_x;
+    int dpad_y = c->controller_dpad_y;
+    c->controller_dpad_x = 0;
+    c->controller_dpad_y = 0;
+
+    ControllerGridTarget target;
+    bool active = c->controller_grid_component >= 0 &&
+                  controller_find_grid(c, c->controller_grid_component, false, &target);
+    if (!active) {
+        // First preference is the grid physically under the cursor. This makes analog -> D-pad
+        // handoff natural even when a bank screen contains more than one TYPE_INV component.
+        if (!controller_find_grid(c, -1, true, &target) && !controller_find_default_grid(c, &target)) {
+            c->controller_grid_component = -1;
+            c->controller_grid_slot = -1;
+            return;
+        }
+        c->controller_grid_component = target.grid->id;
+        c->controller_grid_slot = controller_grid_nearest_slot(&target, c->shell->mouse_x, c->shell->mouse_y);
+    }
+
+    Component *grid = target.grid;
+    int count = grid->width * grid->height;
+    if (count <= 0) return;
+    int slot = c->controller_grid_slot;
+    if (slot < 0 || slot >= count) {
+        slot = controller_grid_nearest_slot(&target, c->shell->mouse_x, c->shell->mouse_y);
+    }
+
+    int col = slot % grid->width;
+    int row = slot / grid->width;
+    col += dpad_x;
+    row += dpad_y;
+    if (col < 0) col = 0;
+    if (col >= grid->width) col = grid->width - 1;
+    if (row < 0) row = 0;
+    if (row >= grid->height) row = grid->height - 1;
+    slot = row * grid->width + col;
+    if (slot >= count) slot = count - 1;
+    c->controller_grid_slot = slot;
+
+    int cx, cy;
+    controller_grid_slot_center(&target, slot, &cx, &cy);
+
+    // Auto-scroll the containing bank/shop layer when D-pad navigation reaches a slot just outside
+    // its visible clip. Re-find geometry afterward because changing scrollPosition moves the grid.
+    if (target.scroll_owner) {
+        int desired = cy;
+        int top = target.clip_top + 16;
+        int bottom = target.clip_bottom - 16;
+        if (cy < top) desired = top;
+        if (cy > bottom) desired = bottom;
+        if (desired != cy) {
+            target.scroll_owner->scrollPosition += cy - desired;
+            int max_scroll = target.scroll_owner->scroll - target.scroll_owner->height;
+            if (target.scroll_owner->scrollPosition < 0) target.scroll_owner->scrollPosition = 0;
+            if (target.scroll_owner->scrollPosition > max_scroll) target.scroll_owner->scrollPosition = max_scroll;
+            if (controller_find_grid(c, c->controller_grid_component, false, &target)) {
+                controller_grid_slot_center(&target, slot, &cx, &cy);
+            }
+            c->redraw_sidebar = true;
+            c->redraw_chatback = true;
+        }
+    }
+
+    c->shell->mouse_x = MAX(0, MIN(SCREEN_WIDTH - 1, cx));
+    c->shell->mouse_y = MAX(0, MIN(SCREEN_HEIGHT - 1, cy));
+    c->shell->idle_cycles = 0;
+
+    // Refresh RuneScape's native menu/hover state immediately at the snapped slot. Cross and Circle
+    // therefore operate on the new item even if the player presses them before the next rendered frame.
+    client_handle_input(c);
 }
 
 static void virtual_keyboard_maybe_open(Client *c, int target) {
@@ -5459,6 +5729,7 @@ void client_update_game(Client *c) {
         handleTabInput(c);
         handleControllerTabInput(c);
         handleControllerButtonInput(c);
+        handleControllerGridInput(c);
         handleChatSettingsInput(c);
 
         if (c->shell->mouse_button == 1 || c->shell->mouse_click_button == 1) {
@@ -12993,6 +13264,8 @@ Client *client_new(void) {
     c->controller_cursor_deadzone = 20;
     c->controller_cursor_speed = 5;
     c->controller_camera_deadzone = 40;
+    c->controller_grid_component = -1;
+    c->controller_grid_slot = -1;
 
     c->minimap_level = -1;
     c->sticky_chat_interface_id = -1;
