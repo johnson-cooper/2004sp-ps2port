@@ -1,293 +1,645 @@
-# RuneScape 2 revision #225 (18 May 2004) C99 port
-Portable single-threaded C client for early RS2, the last update before a new cache format and ondemand protocol.
+# 2004Scape / RuneScape 2 for PlayStation 2
 
-Compatible with [LostCity](https://github.com/LostCityRS/Server) (previously [2004Scape](https://github.com/2004Scape/Server)), the most accurate runescape remake!
+A native PlayStation 2 port of the early RuneScape 2 C client, adapted for the PS2's 32 MiB of main memory, IOP-driven networking and storage, GS video output, and DualShock 2 controls.
 
-Features:
-- should work on any 32 bit system with 64 MB of RAM on lowmem, networking and a (read-only) filesystem.
-- webassembly build to avoid javascript code being optimized out by the browser.
-- WIP ports for most game consoles from 1998 until 2013! See [docs](/docs) for images.
-- optional [config.ini](example.ini) file to change client behaviour. Create an empty config.ini to avoid passing cli args.
-- OpenGL renderer, build with GL=1 in make or -gl in batchfile. ::gl ingame lets you toggle it visually. Do not build with GL support if you only want to use the software rasterizer to avoid continuous ram>vram copies!
+This branch currently targets **revision 254** protocol/cache compatibility and is developed alongside the 2004Scape/Lost City ecosystem.
 
-## Platforms and Compilers
-To move the executable you have to take the correct `SDL.dll`, `config.ini`, and the `rom/` directory along with it. The consoles will load it from sdcard if they don't embed the files already.
+> **Real-hardware status:** playable on a real PlayStation 2.  
+> **Hardware-known-good baseline:** `2c6fb1c8f20d92f834dce3b3b4463dcac27a707d`  
+> **Confirmed:** September 18, 2026  
+> **Development branch:** `ps2-hardware-integration`
 
-type `::perf` command ingame to see fps and lrucache size
+Real PS2 hardware is the acceptance target for this port. PCSX2 is extremely useful for debugging, but an emulator result is not considered proof that a change works on the console.
 
-all home consoles (wii, dreamcast, xbox) should be able to run the game at higher res or even full res on PAL TVs so you don't have to pan, but this isn't set up and emulators don't support many video modes.
+## What works
 
-When adding a new platform also add system ttf font closest to helvetica in gameshell_draw_string when available to avoid Roboto dependency.
+The current hardware-tested build can boot from USB, initialize PS2 networking, read the RuneScape cache from mass storage, connect to a revision-254 server, load into the world, traverse normal map rebuilds, render terrain/water/static locations and players, interact with the normal RuneScape UI, and play with a DualShock 2 without requiring a mouse or keyboard.
 
-To be able to run some emulators on WSL2 you may need to prefix `MESA_GL_VERSION_OVERRIDE=4.6 MESA_GLSL_VERSION_OVERRIDE=460`.
+The PS2-specific client includes:
 
-If tcc from your package manager isn't working you should build latest [tcc](#tools) from source
+- Real DEV9/SMAP Ethernet networking with DHCP.
+- USB mass-storage cache/config loading.
+- A 32 MiB gameplay-first memory profile.
+- Bounded terrain and static-location residency.
+- Textured water using a one-slot low-memory texture pool.
+- Camera-aware scene visibility tuned for the PS2 software renderer.
+- Correct model/object picking in the reduced PS2 viewport.
+- Animated local-player rendering with normal world occlusion.
+- A PS2 virtual cursor.
+- Controller-native context-menu navigation.
+- Controller-native inventory/bank/shop grid navigation.
+- On-screen focus outline for the selected grid slot.
+- R3 escape from grid navigation without closing the interface.
+- True L2/R2 camera-distance zoom.
+- Right-stick camera rotation and tilt.
+- Configurable cursor speed and analog deadzones.
+- An on-screen virtual keyboard path for controller-only text entry.
+- Real-hardware file logging for difficult boot/runtime failures.
 
-[v86](#tools) is a x86 PC emulator running in the browser, including older windows.
+Some expensive desktop-client features are deliberately reduced or disabled. This is a PS2 port, not a bit-for-bit desktop rendering profile.
 
-### Windows 95 to Windows 11
-To build simply run `build.bat` to get the client.exe, tinyc compiler and SDL dlls are provided (only SDL1 works prior to winXP and is only 32 bit)
+---
 
-On windows 95/98 you should set your display to 32 bit true-color for the game to look correct
+## Quick start
 
-If the client fails to start you either aren't passing cli args and don't have a config.ini OR you are using a SDL dll for the wrong architecture. Delete it and it'll be copied during next build
+You need:
 
-SDL1 is default for tcc and old mingw-gcc to target windows 9x, This (unofficial) release doesn't require msys install: https://github.com/fsb4000/gcc-for-Windows98/releases. mingw-gcc 11 optimizations seem to only be slightly faster than tcc though.
+- A PlayStation 2 capable of launching homebrew ELFs. Free McBoot with wLaunchELF/uLaunchELF is a common setup.
+- A USB mass-storage device for the client/cache, unless you are using another supported launcher setup.
+- Ethernet connectivity. Fat PS2 systems require a compatible network adapter; Slim systems have Ethernet built in.
+- A DHCP-capable local network.
+- A PC/server running a compatible revision-254 2004Scape/Lost City server.
+- [PS2BUILD SDK](https://ps2.techwritescode.dev/) if you want to compile the client yourself.
 
-To reproduce the tcc binary you have to build tcc with `-t 32`, using gcc from EG [w64devkit](#tools), then once more with tcc to fix system lib linking. Optionally use `TCC_C=..\tcc.c` env var to not depend on libtcc. Example:
-```
-build-tcc.bat -t 32 -i your/bindir
-build-tcc.bat -t 32 -c tcc -i your/bindir
-```
+### 1. Build
 
-You might want the updated [PowerShell](#tools) for run.ps1 (let's you run the game from shell process without terminate batch job message)
+Clone the repository and use the PS2 hardware branch:
 
-```
-TODO: make win9x compatible batch file (no delayed expansion?), also tcc for win9x requires replacing _strtoui64
-TODO: clean up ps1 script so it doesn't need to be modified
-
-NOTE: on v86 PC emulator the cursor flickers on win95
-```
-
-### Linux GNU or musl
-Makefile: gcc, clang, tcc, mingw-gcc, emcc
-
-arm+musl platforms like postmarketOS can use tcc but it requires some small tweaks:
-- comment out wchar_t in include/stddef.h
-- build with: https://lists.gnu.org/archive/html/tinycc-devel/2022-02/msg00038.html
-TODO SDL3 fails to init?
-
-### FreeBSD
-Install sdl1/sdl2 or sdl3+pkgconf and run `gmake SDL=1/2/3`
-
-### MacOS
-for GL:
-`brew install libsdl12-compat`
-`make GL=1 SDL=1`
-
-### Web (clang)
-Install clang and get [wasmlite](#tools) (you need the libc and generated index.html)
-then run `make -f wasm.mk DEBUG=0` with correct sysroot path to find libc.
-
-- Copy client.wasm, index.html, and config.ini with same port as the server and no socketip set to `Server/engine/public/client` (see make cpclients target)
-- Run server and visit `localhost:port/client/index.html?client` (or another entrypoint) and optionally append `&arg 1&arg 2&arg 3&arg 4` if no config.
-
-You can press shift-enter to switch pixel scaling, alt-enter for fullscreen toggle.
-
-```
-TODO: fwrite maps like emscripten
-TODO: add to build.bat/ps1 to replace emscripten
-```
-
-### Web (emscripten)
-Install [emsdk](#tools)
-run `emmake make DEBUG=0`/`make CC=emcc DEBUG=0` or `build.bat -c emcc -r` for windows
-
-Clang+wasmlite is recommended over emscripten for many reasons: avoids random issues, codesize, performance etc. But it works.
-
-- Copy client.html and config.ini with correct port to `Server/engine/public/client`, it embeds the js and wasm at slight cost of code size.
-- Run server and visit `localhost:port/client/client.html` (or another entrypoint)
-
-```
-TODO: audio stream is pushed to on same thread causing scape_main stutters, and lowmem w/o audio speeds up (typescript client uses absolute time for idlecycles)
-TODO: use indexeddb (add cacheload and cachesave), and maybe add [web worker clientstream](https://emscripten.org/docs/api_reference/wasm_workers.html)
-TODO: mobile controls: touch on release + touch to rotate + osk + mouse+kbd, PWA manifest
-
-NOTE: runnable on older browsers by swapping -sJSPI with -sASYNCIFY
-NOTE: could replace sdl3 audio (codesize) with https://emscripten.org/docs/api_reference/wasm_audio_worklets.html and decodeAudioData for wavs
-NOTE: unused old worldlist code: [shell.html](https://github.com/lesleyrs/Client3/commit/5da924b9f766005e82163d899e52a5df2f771584#diff-c878553ed816480a5e85ff602ff3c5d38788ca1d21095cd8f8ebc36a4dbc07ee) maybe re-add argv from url to not require config
-```
-
-### Android
-1. `mkdir ~/android && cd ~/android` and download [android command line tools](#tools) to it + accept licenses whenever it asks
-2. enable developer options by tapping build number, then you can pair and connect to the device through wifi:
-`$HOME/android/platform-tools/adb pair IP:PORT`
-`$HOME/android/platform-tools/adb connect IP:PORT`
-3. In Client3/android-project run `ANDROID_HOME="$HOME/android/" ./gradlew installDebug`
-4. The APK will be in android-project/app/build/outputs/apk/debug/ and installed on the device
-
-- you can also start it remotely: `$HOME/android/platform-tools/adb shell am start -n org.libsdl.app/.SDLActivity`
-- show error/fatal logging with:  `$HOME/android/platform-tools/adb logcat *:E | grep 'org.libsdl.app'`
-
-#### Steps to update/reproduce the current android setup:
-1. in Client3/android-project/app/jni run `mkdir SDL`
-2. git clone SDL, git checkout SDL2 branch and run `cp -r Android.mk include src SDL`
-3. symlink src and rom directories:
 ```sh
-cd android-project/app/jni/src && ln -s ../../../../src src
-cd android-project/app/src/main && ln -s ../../../../rom assets
-```
-5. set Client LOCAL_CFLAGS and LOCAL_SRC_FILES app/jni/src/Android.mk
-6. enable networking in app/src/main/AndroidManifest.xml `<uses-permission android:name="android.permission.INTERNET" />`
-
-https://github.com/libsdl-org/SDL/blob/SDL2/docs/README-android.md - from "For more complex projects"
-
-https://github.com/libsdl-org/SDL/blob/SDL2/docs/README-touch.md
-```
-TODO: long press right click? click on touch release? hold in viewport to rotate? share code with postmarketos
-TODO: osk by adding using custom.c funcs (move them to gameshell?)
-```
-### Nintendo consoles (devkitPro)
-Install [devkitpro](#tools) with (nds/wii/3ds/wiiu/switch)-dev package and run `make -f (nds/wii/3ds/wiiu/switch).mk -j$(nproc) -B`.
-
-Wii U and Switch also need the (wiiu/switch)-sdl2 package.
-
-#### Wii
-in dolphin emulator you can find the sdcard path in `options>configuration>wii>sd card` settings and after moving the files there you have to click `Convert Folder to File Now` to format it.
-
-Controls: wiimote IR pointer works as mouse, A for left click, B for right click, Dpad works as arrow keys, minus for control, plus to pan by moving your wiimote to a side of the screen, 1 to center screen, home button to exit. The nunchuck joystick can also be used as arrow keys.
-
-```
-TODO: support usb keyboard (dolphin doesn't emulate it yet)
-TODO: add game offset expected for real hardware?
-TODO: shutdown on dolphin X (same as retail games)
+git clone https://github.com/johnson-cooper/2004sp-ps2port.git
+cd 2004sp-ps2port
+git checkout ps2-hardware-integration
 ```
 
-#### NDS (not yet functional)
-The NDS target only works on a 2DS/3DS using `TWiLight Menu++` as it exposes the additional 16 MB of RAM.
+Install PS2BUILD, then from the repository root run:
 
-melonDS doesn't yet emulate 3ds/debugger ram.
-
-TODO: make nds playable by manually writing to 0x0D000000-0x0E000000 on client_load https://blocksds.skylyrac.net/docs/technical/memory_map/#4-main-ram
-
-#### 3DS
-in citra emulator click `file>open citra folder` for sdmc dir https://citra-emulator.com/wiki/user-directory/
-
-on real hardware move the contents of the rom/ dir next to the 3dsx file.
-
-Controls:
-- Touch to left click + hold A to right click
-- Circle/Dpad for arrow keys + hold L/R to pan top/bot screens
-- B for control (run)
-- Start to align bottom screen, Select to toggle ::perf stats
-
-```
-TODO: fix crashing sometimes on home button exit
-TODO: enable audio in lowmem, swkbd to type, backlight toggle? pica gpu hw accel
-TODO: possible to toggle top screen console? right now requires 2 loc changes
-TODO: see new 2ds/3ds performance with higher cpu clock, old 2ds runs at ~10-20
+```sh
+ps2build build
 ```
 
-#### Wii U
-in cemu emulator click `file>open mlc folder`, go 1 directory up to see sdcard dir
+PS2BUILD uses `ps2.yaml` and produces:
 
-```
-TODO: Touch input not working yet, might be fixed by last wiiu-sdl2 commit.
-NOTE: libtom encryption fails when it works on old wii? (tiny-bignum is ok)
-NOTE: highmem doesn't start due to tinysoundfont not working on powerpc
+```text
+build/bin/client.elf
 ```
 
-#### Switch
-in suyu emulator (yuzu fork) click `file->open suyu folder` for sdmc dir
+The PS2 target intentionally builds the EE executable at `-O1`. Do not assume aggressive compiler flags are a free performance upgrade: real hardware has exposed correctness and layout problems that PCSX2 did not.
 
-### Sony PSP
-Install [pspdev](#tools) and run `make -f psp.mk -j$(nproc) -B`.
+There is also a Windows helper, `build-ps2-local.bat`, which checks that the local PS2BUILD environment is available.
 
-ppsspp emulator loads relative dir as memstick, so the filesystem works automatically. Also you should probably enable printf logging with `settings>tools>developer tools>logging channels>printf` to EG verbose
+### 2. Prepare the runtime files
 
-Controls: move cursor with analog stick, O for left click, X for right click, /\ for control, Dpad as arrow keys, Rtrigger + analog stick to pan, Ltrigger to reset screen position
+The install should be self-contained. A recommended USB layout is:
 
-Works on real hardware but requires at least model 2000 due to only 24MB (28MB with kernel mode not sure if safe to use?) being accessible on model 1000, only lowmem fits in memory so we force lowmem in custom.c
-
-```
-NOTE: Could add sfx and/or midi in lowmem, since it's the most important highmem feature
-```
-
-### Sony PS Vita
-Install [vitasdk](#tools) and run `make -f vita.mk -j$(nproc) -B`.
-
-For OpenGL to work you need to build with GL=1 and install `libshacccg.suprx`: https://github.com/Rinnegatamante/vitaGL/tree/master#prerequisites
-
-can test with Vita3K, instead of decompressing the vpk you can copy just the eboot.bin after changes (pass `-r VSDK20225` to run directly)
-
-NOTE: https://github.com/Vita3K/Vita3K/issues/4064 vita3k emu doesn't support glScissor so scene appears as white unless removed
-
-Controls: touch as mouse, X for right click, /\ for control, Dpad as arrow keys
-
-icon0.png is favicon.ico scaled 2x, extents are based off template:
-
-`magick favicon.ico -resize 200% -background none -gravity center -extent 128x128 sce_sys/icon0.png`
-
-bg.png is title.jpg from Server/content/binary or client_load_title_background(), with top cut off to fit
-
-`magick title.jpg \( title.jpg -flop \) +append -background none -gravity south -extent 840x500 sce_sys/livearea/contents/bg.png`
-
-```
-TODO: backside touch input, osk input
-TODO: add sdl3 to makefile or remove sdl altogether, it annoyingly saves sdl logs
+```text
+mass0:/
+└── 2004sp/
+    ├── client.elf
+    ├── config.ini
+    └── rom/
+        └── cache/
+            └── client/
+                ├── crc
+                └── ...
 ```
 
-### Sega Dreamcast
-Install [kallistios and mkdcdisc](#tools) and run `make -f dreamcast.mk -j$(nproc) -B`. Necessary files are built into the cdi.
+The exact cache tree from the build/runtime package should remain under `rom/`. The PS2 port validates an installation by looking for:
 
-To try on real hardware you'd need networking support and the 32 MB ram expansion mod, which seems involved and maybe less compatible with some other games. Flycast seems to be the best emulator and supports both.
-
-See defines.h for inauthentic changes to get below 32MB RAM usage. The city of Ardougne isn't accessible as it uses up to 12MB ram in allocator.
-
-Controls: joystick = move cursor, Dpad = arrow keys, B = left click, A = right click, Y = control, Ltrig = center screen, Rtrig+joystick = pan screen
-
-There's currently no way to type. But it's not required to play the game and you can set your login details in rom/config.ini
-
-```
-TODO: finish opengl 1.1 port for dreamcast?
-TODO: support mouse/keyboard for dreamcast. For mouse and keyboard in flycast you have to set the physical device ports to dreamcast device port, but mouse is not very useful in emu until they hide the system cursor.
-
-NOTE: if the cdi doesn't load you might have to remove --no-padding in Makefile? untested on hardware
-NOTE: local servers don't work on emulator? only remote servers work
-NOTE: fopen path was changed due to the mkdcdisc tool adding dots to files without extension https://gitlab.com/simulant/mkdcdisc/-/issues/14
+```text
+rom/cache/client/crc
 ```
 
-### Microsoft Xbox
-Install [nxdk](#tools) and run `make -f xbox.mk -j$(nproc) -B`. Necessary files are built into the iso.
+When launched from a USB subdirectory, the client attempts to keep using that exact directory. It can also fall back to the historical `mass0:/` / `mass:/` root layout.
 
-To run with xemu use `-dvd_path client.iso` as args.
+**Keep `config.ini` beside `client.elf`.** A subfolder installation is expected to contain both its config and cache.
 
-Controls: right analog stick to move the mouse, dpad to rotate camera, B = left click, A = right click, Y = control, X = toggle fps, back = logout, start = login, white = center screen pan, black = pan with right analog stick
+### 3. Configure the server
 
+Create `config.ini` from `example.ini`.
+
+At minimum, set the server address:
+
+```ini
+socketip = 192.168.1.100
+username = your_username
+password = your_password
 ```
-TODO: audio on highmem (for 128mb ram expansion?)
 
-NOTE: local servers don't work on emulator? only remote servers work
-NOTE: default.xbe stays around in rom dir when it's junk for other consoles that embed that directory. Can remove it after building.
-NOTE: fopen had to be separated due to the need for backwards slashes, also there's no chdir equivalent?
+Replace `192.168.1.100` with the **LAN IP address of the machine running your game server**.
+
+Do **not** use:
+
+```ini
+socketip = localhost
 ```
 
-## Java client
-The 2004 jar is stored for comparisons, run with EG: `java -cp bin/runescape.jar client 10 0 highmem members` but:
-- there is no audio, it saves audio files for the browser to play which is no longer applicable
-- right clicking breaks past java 8
-- window insets on modern systems are causing the sides of the game to be cut off slightly
-- outside of windows it saves the cache to `/tmp` so every reboot you may have to redownload it
-- it only connects to localhost if it's not running as applet
-- server http port needs to be set to 80 (2004scape on linux defaults to 8888 right now to avoid sudo)
-- TODO confirm: to connect to local java servers on WSL from Windows you might need to add `-Djava.net.preferIPv6Addresses=true` when running client
+on a real PS2. From the console, `localhost` refers to the PS2 itself.
 
-## libraries
-* [micro-bunzip](https://landley.net/code/) | https://landley.net/code/bunzip-4.1.c
-* [isaac](https://burtleburtle.net/bob/rand/isaacafa.html) | https://burtleburtle.net/bob/c/readable.c
-* [TinySoundFont](https://github.com/schellingb/TinySoundFont) - with fix for attack1.mid by skipping RIFF header and android support
-* [tiny-bignum-c](https://github.com/kokke/tiny-bignum-c) - prefer libtom/openssl/bigint, but works fine with smaller exponent
-* [LibTomMath](https://github.com/libtom/libtommath) | mpi.c is from gen.pl script in [releases](https://github.com/libtom/libtommath/releases/latest). with added ifdefs to fix non-gcc builds.
-* [ini](https://github.com/rxi/ini)
-* [stb_image and stb_truetype](https://github.com/nothings/stb)
+The native game socket uses:
 
-## optional libraries
-* [OpenSSL](https://github.com/openssl/openssl) | https://wiki.openssl.org/index.php/Binaries
+```text
+43594 + portoff
+```
 
-* [SDL-1.2](https://github.com/libsdl-org/SDL-1.2) | [SDL-2/SDL-3](https://github.com/libsdl-org/SDL) | https://libsdl.org/release/
+so with the default:
 
-Using prebuilt SDL but removed tests, SDL1 mingw dotfiles + SDL1 tcc fixes in VC (fixed upstream but no new releases since 2012)
+```ini
+portoff = 0
+```
 
-## tools
-* [tcc](https://github.com/TinyCC/tinycc) | https://bellard.org/tcc/
-* [emsdk](https://github.com/emscripten-core/emsdk) | https://emscripten.org/docs/getting_started/downloads.html
-* [devkitpro](https://github.com/devkitPro) | https://devkitpro.org/
-* [pspdev](https://github.com/pspdev/pspdev) | https://pspdev.github.io/
-* [vitasdk](https://github.com/vitasdk/vdpm) | https://vitasdk.org/
-* [kallistios](https://github.com/KallistiOS/KallistiOS) | [mkdcdisc](https://gitlab.com/simulant/mkdcdisc)
-* [nxdk](https://github.com/XboxDev/nxdk)
-* [android command line tools](https://developer.android.com/studio)
-* [powershell](https://github.com/PowerShell/PowerShell)
-* [v86](https://github.com/copy/v86.git) | https://copy.sh/v86/
-* [wasmlite](https://github.com/lesleyrs/wasmlite)
-* [w64devkit](https://github.com/skeeto/w64devkit)
+the server must be reachable on TCP port **43594**.
+
+The client currently has an automatic PS2 login path, so putting working credentials in `config.ini` is the most predictable hardware setup.
+
+A useful basic config is:
+
+```ini
+socketip = 192.168.1.100
+portoff = 0
+
+username = shared
+password = pazazword
+
+remember_username = 1
+remember_password = 1
+allow_commands = 1
+```
+
+Use credentials that actually exist on your server.
+
+### 4. Copy to USB and launch
+
+Copy the prepared folder to a FAT-formatted USB drive, insert it into the PS2, and launch `client.elf` with your ELF launcher.
+
+The port remembers the directory from which `client.elf` was launched. When possible it inherits the launcher's already-working FILEIO/USB environment. If that cannot be proven usable, the client falls back to initializing its own IOP/network/storage stack.
+
+Connect Ethernet before booting. The PS2 networking path waits for the physical link and then requests an address through DHCP.
+
+---
+
+## DualShock 2 controls
+
+The controller layer is designed around normal RuneScape actions rather than inventing a second gameplay system.
+
+| Control | Action |
+| --- | --- |
+| **Left stick** | Move the virtual cursor |
+| **Right stick** | Rotate / tilt the game camera |
+| **D-pad** | Navigate inventory/bank/shop grids, context menus, controller settings, and virtual keyboard depending on context |
+| **X / Cross** | Primary/default RuneScape action; confirm highlighted menu/grid/keyboard choices |
+| **Circle** | Open the normal RuneScape right-click/Options menu; press again to close it |
+| **Triangle** | Back / close the current normal modal context |
+| **Square** | Jump directly to the Inventory tab |
+| **L1 / R1** | Cycle backward/forward through available sidebar tabs |
+| **L2** | Zoom camera out |
+| **R2** | Zoom camera in |
+| **L3** | Open/close PS2 controller settings |
+| **R3** | **Exit D-pad grid navigation and return to the free cursor without closing the current inventory/bank/shop panel** |
+| **Select** | Snap the camera orientation behind the local player |
+| **Start** | Open/submit the controller text-entry keyboard where applicable |
+
+### Primary action
+
+Cross is intentionally treated as the normal top/default RuneScape action even if the client's one-button-mouse option would otherwise turn a left click into a context menu.
+
+For example, when the cursor is over a tree, Cross should perform the normal top action such as **Chop down** rather than unnecessarily opening Options.
+
+Circle always remains the explicit Options/right-click control.
+
+### Context menus
+
+After opening a RuneScape Options menu with Circle:
+
+- D-pad Up/Down moves through the menu.
+- Cross activates the selected option.
+- Circle closes the Options menu.
+- Triangle can also act as normal Back.
+
+Moving the pointer normally hands menu highlighting back to the cursor.
+
+### Inventory, bank and shop grid navigation
+
+Pressing the D-pad while an item grid is available enters controller grid navigation.
+
+The client:
+
+1. Finds the appropriate visible `TYPE_INV` interface.
+2. Selects a slot in row/column order.
+3. Draws a black/yellow focus outline around the selected 32x32 slot.
+4. Aligns the controller interaction hotspot with the selected slot.
+5. Lets Cross and Circle use RuneScape's existing item actions.
+6. Scrolls supported containing interfaces as selection moves beyond the visible clip.
+
+The grid system works with empty slots as well as occupied slots.
+
+**Press R3 to leave grid mode.** R3 is intentionally separate from Triangle/Back so the bank, inventory, shop, or other active panel remains open when pointer control is returned.
+
+The explicit R3 escape is the real-hardware-confirmed way to switch back to the free cursor.
+
+### Controller settings
+
+Press **L3** to open the PS2 controller settings overlay.
+
+Current settings include:
+
+- Left-stick cursor deadzone.
+- Cursor speed.
+- Right-stick camera deadzone.
+- Reset to defaults.
+
+Current defaults are:
+
+```text
+Cursor deadzone: 20
+Cursor speed:     5
+Camera deadzone: 40
+```
+
+These settings are currently session-local; they are not yet persisted to `config.ini`.
+
+---
+
+## Camera
+
+The PS2 port separates camera movement from pointer movement:
+
+- **Right stick:** yaw/pitch camera control.
+- **L2:** increase camera distance.
+- **R2:** decrease camera distance.
+- **Select:** immediately orient the camera behind the player.
+
+L2/R2 change the actual distance passed to the orbit camera. They do not fake zoom by changing camera pitch.
+
+The zoom range is clamped so the camera cannot be moved unreasonably close to the player or so far away that it creates an excessive rendering burden.
+
+---
+
+## Networking
+
+Networking was one of the largest real-hardware differences encountered during development.
+
+The working PS2 path uses:
+
+- DEV9
+- NETMAN
+- SMAP
+- PS2IP
+- DHCP
+
+The relevant IRX modules are embedded through `ps2.yaml`. Do not casually remove or reorder them.
+
+The proven boot order is intentionally conservative:
+
+```text
+initialize RPC/IOP
+        ↓
+DEV9 / NETMAN / SMAP
+        ↓
+wait for Ethernet link
+        ↓
+PS2IP + DHCP
+        ↓
+network is fully established
+        ↓
+USB mass-storage stack
+        ↓
+load game/cache data
+```
+
+This order exists because real hardware repeatedly stalled when USB activity was introduced during network bring-up. The same behavior was not reliably reproduced in PCSX2.
+
+### Why networking is nonblocking
+
+An earlier version of the live client could appear catastrophically slow while connected even though rendering and scene management were healthy.
+
+Profiling showed `recv()` calls taking roughly **8-16 seconds** while the TCP socket was alive. When the socket died, the same build immediately returned to stable full-speed updates.
+
+The networking path was changed so game updates are not held hostage by a blocking receive. A network problem should not freeze the entire render/update loop.
+
+---
+
+## USB and cache loading
+
+Real hardware also exposed storage behavior that emulator testing did not.
+
+An earlier `usbhdfsd` path could hang during sustained real-hardware I/O. This occurred in more than one pattern, including large numbers of map reads and seeking through a combined archive.
+
+The current port uses the BDM stack:
+
+```text
+USBD
+IOMANX
+BDM
+BDMFS FATFS
+USBMASS_BD
+```
+
+These modules are embedded because they are the components that provide the filesystem access needed to load anything else.
+
+The client supports:
+
+- Launcher-inherited USB/FILEIO when the launched directory can be proven readable.
+- Self-initialized BDM mass storage when inheritance is unavailable.
+- `mass0:/` and `mass:/` device naming.
+- Subfolder installs beside `client.elf`.
+- Root-layout compatibility.
+
+For real-hardware postmortems the port can write `boot.log` to the USB device when writable storage is available.
+
+---
+
+## The 32 MiB problem
+
+A retail PlayStation 2 has only **32 MiB of EE RAM**. The desktop-style client was never designed around that budget.
+
+The port therefore follows a gameplay-first policy:
+
+> Preserve the world, collision, interaction and nearby gameplay first. Spend memory on cosmetic fidelity only after the game is stable.
+
+### Current PS2 memory/render profile
+
+The current baseline includes:
+
+- Compact PS2-specific scene structures.
+- Qword-aligned scene arena allocations.
+- **80x80** bounded terrain residency.
+- **72x72** static-location placement window.
+- Camera-aware visibility with an approximately **18-tile** forward-facing radius.
+- Smaller back/side margins rather than an expensive full square visibility area.
+- **One** low-memory terrain texture slot.
+- Textured water retained as the important terrain texture case.
+- Minimap disabled.
+- Simplified decorative UI/chrome.
+- Normal interactive inventory/sidebar/chat UI retained.
+- Dynamic entities culled/capped before unnecessary renderer insertion.
+- Login flames disabled.
+- Scene rendering performed through the known-good EE software path.
+
+The game still keeps the information needed to play; expensive presentation data is where compromises are made first.
+
+### Software render target
+
+The gameplay viewport is software-rendered at:
+
+```text
+512 x 334
+```
+
+The complete RuneScape UI is then composed into the PS2 presentation path and displayed on the physical GS output.
+
+The GS screen texture uses 16-bit color to reduce VRAM pressure. The expensive software 3D presentation is throttled by the PS2 render divisor while game logic/network updates continue independently.
+
+---
+
+## Major hardware problems solved
+
+Getting from "the ELF launches" to "RuneScape is playable on a real PS2" required solving several failures that were either invisible or substantially different in PCSX2.
+
+### 1. Scene-arena alignment
+
+Terrain loading was once layout-sensitive and could crash only on hardware.
+
+The scene arena had been using insufficient alignment. Moving the arena base and bump allocations to **16-byte/qword alignment** fixed that class of terrain failure.
+
+Qword alignment is now a hard requirement for PS2 scene allocations.
+
+### 2. World-rebuild lifetime leak
+
+The scene arena was being reset before the old `World3D` was torn down.
+
+The `Ground` nodes themselves lived in the arena, but some wall/decor/ground-decoration attachments they owned lived on the normal heap. Resetting the arena first destroyed the owner pointers before teardown could free those attachments.
+
+Repeated `REBUILD_NORMAL` traversal therefore leaked static-world data.
+
+The order was fixed so the old world is properly torn down before its backing arena bytes are recycled.
+
+### 3. Terrain traversal window
+
+Smaller fixed terrain windows could render the starting area but failed to bridge ordinary server-driven scene recentering.
+
+Testing progressed through small windows until an **80x80 terrain residency window** proved large enough for continuous traversal while still fitting the PS2 budget.
+
+Static locations use a smaller **72x72** window to reduce dense-scene memory pressure.
+
+### 4. Static locations and model pressure
+
+Blindly restoring the desktop static world was too expensive.
+
+The PS2 path bounds residency and prioritizes gameplay-useful world data instead of assuming the full desktop scene can live in memory indefinitely.
+
+### 5. Water/textures
+
+Completely discarding terrain textures saved memory but removed important visual information.
+
+The working compromise uses a **single low-memory texel slot**. Water is retained while avoiding a large desktop-style texture pool.
+
+### 6. Model picking
+
+The PS2 viewport is smaller than the original logical client canvas. Object/model picking initially used mismatched coordinates, so what the player saw and what the client thought the pointer was over could disagree.
+
+The picking path was corrected for the 512x334 PS2 software target without breaking normal UI coordinates.
+
+### 7. Local-player rendering
+
+A dedicated post-scene local-player draw originally behaved like an overlay:
+
+- the player could appear in front of walls that should occlude them;
+- forcing low-memory model behavior suppressed normal sequence transforms/animation.
+
+The local player is now submitted into normal `World3D` ordering so walls/locations occlude correctly and animation works.
+
+### 8. Useful draw distance without square-window cost
+
+Simply increasing a square render radius was too expensive.
+
+The PS2 path instead uses **camera-aware culling**, spending the visibility budget primarily in front of the camera and reducing work behind/to the sides. This increased useful view distance without paying for a much larger square of terrain every frame.
+
+### 9. Network stalls
+
+The live socket path originally allowed blocking `recv()` behavior to stall the game for seconds at a time.
+
+Real timing evidence showed that rendering itself was not the cause. Network reads were made nonblocking/incremental so the game loop can continue.
+
+### 10. IOP module ordering
+
+Networking, controllers, USB and filesystems all involve the PS2's IOP and RPC/module environment.
+
+Several combinations that looked reasonable in code stalled only on real hardware. The current initialization sequence reflects empirical hardware testing, particularly the rule that networking should be brought fully up before the self-initialized USB storage stack.
+
+### 11. Sustained USB I/O
+
+The lighter storage approach was attractive for memory reasons but unreliable under sustained hardware reads.
+
+The current BDM stack costs more memory but has been substantially more dependable.
+
+### 12. Mouse-first UI on a controller
+
+RuneScape's interface assumes a mouse. Simply mapping an analog stick to a cursor works, but it is not enough for comfortable console play.
+
+The PS2 port added:
+
+- direct Cross primary actions;
+- explicit Circle Options;
+- D-pad context-menu selection;
+- D-pad inventory/bank/shop slot navigation;
+- a visible focus outline;
+- exact slot/click alignment;
+- R3 grid escape;
+- L1/R1 tab cycling;
+- controller settings;
+- virtual keyboard support;
+- console-style camera controls.
+
+Importantly, these features still feed RuneScape's existing action/menu system rather than inventing incompatible gameplay packets.
+
+### 13. VU experimentation
+
+A VU1 acceleration path was tested during optimization work. Real-hardware results were worse than the known-good EE software renderer.
+
+The current baseline therefore deliberately stays on the measured, stable EE software path. Future acceleration work should be treated as a separate hardware experiment rather than assumed to be faster because it uses a vector unit.
+
+---
+
+## Real hardware vs PCSX2
+
+PCSX2 is invaluable for:
+
+- logs;
+- rapid iteration;
+- networking diagnostics;
+- register/debugger inspection;
+- detecting ordinary crashes.
+
+But it cannot replace hardware acceptance.
+
+Problems that have differed between emulator and console during this project include:
+
+- IOP module timing/order;
+- DEV9/SMAP bring-up;
+- USB sustained-I/O behavior;
+- memory/layout sensitivity;
+- scene-build hangs;
+- filesystem behavior.
+
+A commit only becomes a project hardware baseline after it has been explicitly tested on a real PS2.
+
+The current confirmed baseline is:
+
+```text
+2c6fb1c8f20d92f834dce3b3b4463dcac27a707d
+```
+
+See `PS2_HARDWARE_WORKFLOW.md` for the development/test discipline used by the project.
+
+---
+
+## Troubleshooting
+
+### "Error connecting to server"
+
+Check:
+
+1. `socketip` is the server PC's LAN address, not `localhost`.
+2. The server is listening on TCP `43594 + portoff`.
+3. The PC firewall allows the server.
+4. PS2 and server PC are on networks that can reach each other.
+5. Ethernet is connected before the client starts.
+6. DHCP is available.
+
+### `connect() error: Host is unreachable (118)`
+
+The PS2 has no usable route to the configured host.
+
+Start with physical Ethernet/link, DHCP/router configuration, `socketip`, and the PC firewall. Do not debug rendering for this error.
+
+### Client cannot find the cache
+
+For a subfolder install, verify:
+
+```text
+<install>/client.elf
+<install>/config.ini
+<install>/rom/cache/client/crc
+```
+
+Keep the rest of the cache/assets under the same `rom/` tree.
+
+### The build works in PCSX2 but hangs on hardware
+
+Treat this as a hardware bug, not a successful build.
+
+Check `boot.log` if it was created, identify the last hardware checkpoint reached, and compare against the known-good baseline before changing multiple systems at once.
+
+### Networking broke after changing IRX modules
+
+Restore the `ps2.yaml` baseline first.
+
+The current embedded DEV9/NETMAN/SMAP and BDM storage setup is intentional. Multiple attempts to reclaim a small amount of memory by changing module placement/order caused worse boot-time hardware failures.
+
+### D-pad grid navigation has captured the UI
+
+Press **R3**.
+
+R3 is the dedicated, real-hardware-confirmed escape from grid navigation. It releases controller grid focus while leaving the current panel open.
+
+### Performance changes heavily by location
+
+This is expected to some extent. Dense static-location/model scenes cost more than open terrain.
+
+Do not judge performance from one scene alone. The project uses real-hardware profiling and isolated changes before raising render distance, entity caps, texture residency or presentation rate.
+
+---
+
+## Development rules
+
+PS2 development is intentionally conservative because the console is much less forgiving than the desktop client.
+
+The core rules are:
+
+1. GitHub is the tracked-source source of truth.
+2. Work on `ps2-hardware-integration` unless another branch is explicitly selected.
+3. Do not modify `main` without explicit approval.
+4. Make one isolated hardware question/change at a time.
+5. Build locally with `ps2.yaml`.
+6. Test the exact commit on a real PS2.
+7. Only then promote it to the hardware-known-good baseline.
+8. Stop stacking unrelated changes after a regression.
+9. Preserve qword scene alignment.
+10. Preserve the proven network/USB initialization order unless new hardware evidence justifies changing it.
+11. Keep the EE optimization baseline at `-O1` while correctness remains the priority.
+12. Do not commit generated ELFs, build directories, local IP addresses, passwords, or test logs.
+
+For the full workflow, read:
+
+```text
+PS2_HARDWARE_WORKFLOW.md
+```
+
+---
+
+## Project lineage
+
+This port is built from the C99 RuneScape client work derived from **Client3** and adapted for the 2004Scape/Lost City ecosystem, with substantial PS2-specific work in rendering, memory management, I/O, networking, filesystem handling, controller UX and hardware diagnostics.
+
+Related projects:
+
+- [2004Scape / Lost City](https://github.com/LostCityRS/Server)
+- [Client3](https://github.com/lesleyrs/Client3)
+- [PS2BUILD SDK](https://ps2.techwritescode.dev/)
+- [PS2SDK](https://github.com/ps2dev/ps2sdk)
+
+The goal is not just to make RuneScape display on a PS2 emulator. The goal is a client that is **actually comfortable and stable enough to play on original PlayStation 2 hardware**.
+
+---
+
+## Current priorities
+
+The current baseline is playable and controller-friendly. Future work should preserve that baseline while focusing on measured improvements such as:
+
+- further EE software-renderer optimization;
+- reducing dense-scene model/cache pressure;
+- restoring remaining effects only under safe caps;
+- improving controller focus/navigation for non-grid dialogue/interface controls;
+- persistent controller settings;
+- additional USB/launcher compatibility where hardware evidence supports it;
+- presentation-rate improvements when real-hardware headroom is proven.
+
+Features such as the minimap or substantially larger cosmetic texture residency should remain lower priority than world traversal, interaction, memory safety and frame time.
+
+---
+
+## Credits
+
+This project stands on work from the RuneScape preservation/reimplementation community and the PS2 homebrew community, including the original Client3 C port, Lost City/2004Scape, PS2SDK, gsKit, PS2BUILD, and the many open-source libraries already credited in the source tree.
+
+Special emphasis for this fork is placed on **real-hardware testing**: many of the most important fixes in the PS2 port were found only by testing exact revisions on an actual console and treating emulator/hardware disagreement as useful evidence rather than noise.
