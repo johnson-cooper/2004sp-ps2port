@@ -255,6 +255,7 @@ struct Client {
     bool controller_keyboard_confirm_pressed; // Cross while the on-screen keyboard owns input
     bool controller_confirm_pressed;  // Cross while a controller-native menu/settings overlay owns input
     bool controller_primary_action;   // Cross normal gameplay click: force RuneScape's top/default action
+    bool controller_options_pressed;  // Circle while context menu is already open: close/cancel it
     bool controller_settings_pressed; // L3 one-shot: toggle PS2 controller settings
     bool controller_settings_visible;
     int controller_settings_row;

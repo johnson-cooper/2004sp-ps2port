@@ -4660,6 +4660,16 @@ static void handleControllerTabInput(Client *c) {
 // one-shot/level field). Each button's real-world meaning lives here, platform-agnostically -
 // ps2.c only knows about hardware bits, never about tabs/camera/chat.
 static void handleControllerButtonInput(Client *c) {
+    if (c->controller_options_pressed) {
+        c->controller_options_pressed = false;
+        if (c->menu_visible) {
+            c->menu_visible = false;
+            c->controller_menu_index = -1;
+            if (c->menu_area == 1) c->redraw_sidebar = true;
+            if (c->menu_area == 2) c->redraw_chatback = true;
+        }
+    }
+
     if (c->controller_settings_pressed) {
         c->controller_settings_pressed = false;
         if (c->ingame && !c->virtual_keyboard_visible) {
@@ -4904,7 +4914,7 @@ static void controller_grid_search(Component *layer, int x, int y, int scroll_po
                                    int mouse_x, int mouse_y, int wanted_id, bool require_point,
                                    Component *scroll_owner, int clip_top, int clip_bottom,
                                    ControllerGridTarget *best) {
-    if (!layer || layer->type != TYPE_LAYER || layer->hide || !layer->childId) {
+    if (!layer || layer->type != TYPE_LAYER || !layer->childId) {
         return;
     }
 
@@ -5086,9 +5096,19 @@ static void handleControllerGridInput(Client *c) {
     bool active = c->controller_grid_component >= 0 &&
                   controller_find_grid(c, c->controller_grid_component, false, &target);
     if (!active) {
-        // First preference is the grid physically under the cursor. This makes analog -> D-pad
-        // handoff natural even when a bank screen contains more than one TYPE_INV component.
-        if (!controller_find_grid(c, -1, true, &target) && !controller_find_default_grid(c, &target)) {
+        // RuneScape's native hover pass already knows the exact TYPE_INV parent when the pointer
+        // starts on a slot. Prefer that authoritative component before doing our generic search.
+        bool found = false;
+        if (c->hoveredSlotParentId >= 0) {
+            found = controller_find_grid(c, c->hoveredSlotParentId, true, &target);
+        }
+        if (!found) {
+            found = controller_find_grid(c, -1, true, &target);
+        }
+        if (!found) {
+            found = controller_find_default_grid(c, &target);
+        }
+        if (!found) {
             c->controller_grid_component = -1;
             c->controller_grid_slot = -1;
             return;
@@ -5144,6 +5164,14 @@ static void handleControllerGridInput(Client *c) {
     c->shell->mouse_x = MAX(0, MIN(SCREEN_WIDTH - 1, cx));
     c->shell->mouse_y = MAX(0, MIN(SCREEN_HEIGHT - 1, cy));
     c->shell->idle_cycles = 0;
+
+    // Sidebar/chatback are retained PixMaps and otherwise may not redraw just because the logical
+    // controller selection moved. Dirty the owning panel so the slot highlight visibly follows D-pad.
+    if (cx >= 553 && cx < 743 && cy >= 205 && cy < 466) {
+        c->redraw_sidebar = true;
+    } else if (cx >= 17 && cx < 496 && cy >= 357 && cy < 453) {
+        c->redraw_chatback = true;
+    }
 
     // Refresh RuneScape's native menu/hover state immediately at the snapped slot. Cross and Circle
     // therefore operate on the new item even if the player presses them before the next rendered frame.
@@ -12489,6 +12517,16 @@ static void client_draw_interface(Client *c, Component *com, int x, int y, int s
                             pix24_draw(image, slotX, slotY);
                         }
                     }
+
+#ifdef __PS2__
+                    // Controller grid focus is drawn by the same interface pass that owns the slot,
+                    // so there is no ambiguity about whether snapping is active. Black outer edge +
+                    // yellow inner edge remains legible over both bright item icons and dark panels.
+                    if (c->controller_grid_component == child->id && c->controller_grid_slot == slot) {
+                        pix2d_draw_rect(slotX - 2, slotY - 2, BLACK, 36, 36);
+                        pix2d_draw_rect(slotX - 1, slotY - 1, YELLOW, 34, 34);
+                    }
+#endif
 
                     slot++;
                 }

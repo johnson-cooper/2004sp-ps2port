@@ -973,12 +973,18 @@ void platform_poll_events(Client *c) {
     }
 
     if (circle && !circle_was_down) {
-        c->shell->mouse_click_x = c->shell->mouse_x;
-        c->shell->mouse_click_y = c->shell->mouse_y;
-        c->shell->mouse_click_button = 2;
-        c->shell->mouse_button = 2;
-        if (_InputTracking.enabled) {
-            inputtracking_mouse_pressed(&_InputTracking, c->shell->mouse_x, c->shell->mouse_y, 1);
+        if (c->menu_visible) {
+            // Console-style toggle/back behavior: Circle opens Options from gameplay and closes
+            // the same menu when pressed again. Do not synthesize another right-click underneath it.
+            c->controller_options_pressed = true;
+        } else {
+            c->shell->mouse_click_x = c->shell->mouse_x;
+            c->shell->mouse_click_y = c->shell->mouse_y;
+            c->shell->mouse_click_button = 2;
+            c->shell->mouse_button = 2;
+            if (_InputTracking.enabled) {
+                inputtracking_mouse_pressed(&_InputTracking, c->shell->mouse_x, c->shell->mouse_y, 1);
+            }
         }
     } else if (!circle && circle_was_down) {
         c->shell->mouse_button = 0;
