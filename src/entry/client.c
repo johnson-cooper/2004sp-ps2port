@@ -10950,7 +10950,14 @@ void client_draw_scene(Client *c) {
     _Model.mouse_x = c->shell->mouse_x - 4;
     _Model.mouse_y = c->shell->mouse_y - 4;
 #endif
+#ifdef __PS2__
+    // Use the viewport clear as a zero-memory sky: terrain/models simply paint over this,
+    // so pixels beyond the world geometry show light blue instead of the old black void.
+    // This replaces (rather than follows) pix2d_clear(), keeping the clear to one framebuffer pass.
+    pix2d_fill_rect(0, 0, 0x87ceeb, PS2_3D_RENDER_WIDTH, PS2_3D_RENDER_HEIGHT);
+#else
     pix2d_clear();
+#endif
 #if defined(__PS2__) && PS2_FLAT_TERRAIN
     // The normal terrain pass is omitted below; give entities a stable, grass-like background
     // without spending time transforming/rasterising hundreds of terrain triangles.
