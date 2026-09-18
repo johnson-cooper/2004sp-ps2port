@@ -21,10 +21,39 @@
 // renderer-local bridge inserts that one actor before tile traversal/sorting.
 #include "client.h"
 
-// PS2 uses a bounded draw radius. A single conservative 51x51 visibility map
-// is enough for the bounded PS2 scene, avoiding the desktop 8x32x51x51 table
-// and its large temporary construction matrix.
+// Keep a single 51x51 PS2 visibility map instead of the desktop 8x32x51x51 table.
+// Rebuild this tiny map from camera yaw each rendered frame: the old PS2 square admitted
+// many tiles behind/off-screen, so a camera-facing wedge can extend the forward horizon
+// without increasing the expensive World3D/model workload.
 static bool ps2_visibility_map[51][51];
+
+static void ps2_update_visibility_map(int sinEyeYaw, int cosEyeYaw) {
+    const int backMargin = PS2_RENDER_BACK_MARGIN << 16;
+    const int sideMargin = PS2_RENDER_SIDE_MARGIN << 16;
+
+    for (int x = 0; x < 51; x++) {
+        int dx = x - 25;
+        for (int z = 0; z < 51; z++) {
+            int dz = z - 25;
+            if (abs(dx) > PS2_RENDER_RADIUS || abs(dz) > PS2_RENDER_RADIUS) {
+                ps2_visibility_map[x][z] = false;
+                continue;
+            }
+
+            // Match World3D's yaw transform. "forward" is camera-space depth and "side"
+            // is camera-space horizontal distance, both still scaled by the 16.16 trig table.
+            int forward = dz * cosEyeYaw - dx * sinEyeYaw;
+            int side = dz * sinEyeYaw + dx * cosEyeYaw;
+
+            // The software projection is narrower than this cone; the extra fixed margin keeps
+            // large/near tile geometry from popping at the screen edges while still rejecting
+            // the large square area that is behind or far to either side of the camera.
+            int maxSide = forward / 2 + sideMargin;
+            ps2_visibility_map[x][z] =
+                forward >= -backMargin && maxSide >= 0 && abs(side) <= maxSide;
+        }
+    }
+}
 
 static bool ps2_ground_is_empty(const Ground *tile) {
     return tile && tile->locCount == 0 && !tile->underlay && !tile->overlay &&
@@ -90,8 +119,7 @@ void world3d_init_global(void) {
     _World3D.drawTileQueue = linklist_new();
     for (int x = 0; x < 51; x++) {
         for (int z = 0; z < 51; z++) {
-            ps2_visibility_map[x][z] =
-                abs(x - 25) <= PS2_RENDER_RADIUS && abs(z - 25) <= PS2_RENDER_RADIUS;
+            ps2_visibility_map[x][z] = false;
         }
     }
     _World3D.visibilityMatrix = NULL;
@@ -205,6 +233,7 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.cosEyePitch = _Pix3D.cos_table[eyePitch];
     _World3D.sinEyeYaw = _Pix3D.sin_table[eyeYaw];
     _World3D.cosEyeYaw = _Pix3D.cos_table[eyeYaw];
+    ps2_update_visibility_map(_World3D.sinEyeYaw, _World3D.cosEyeYaw);
     _World3D.visibilityMap = ps2_visibility_map;
     _World3D.eyeX = eyeX;
     _World3D.eyeY = eyeY;
@@ -233,8 +262,7 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
                 Ground *tile = tiles[x][z];
                 if (!tile) continue;
                 if (tile->drawLevel <= topLevel &&
-                    (ps2_visibility_map[x + 25 - _World3D.eyeTileX][z + 25 - _World3D.eyeTileZ] ||
-                     world3d->levelHeightmaps[level][x][z] - eyeY >= 2000)) {
+                    ps2_visibility_map[x + 25 - _World3D.eyeTileX][z + 25 - _World3D.eyeTileZ]) {
                     tile->visible = true;
                     tile->update = true;
                     tile->containsLocs = tile->locCount > 0;

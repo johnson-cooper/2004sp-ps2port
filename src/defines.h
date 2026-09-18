@@ -73,15 +73,16 @@
 // terrain texture IDs, so this test does not repeat the earlier five-slot (+256 KiB) experiment.
 #define PIX3D_POOL_COUNT 1
 #define DISABLE_FLAMES
-// Radius 14 / 29x29 remains hardware-good. Real hardware established two separate requirements:
-// 80x80 terrain (12..91) is needed to bridge every normal REBUILD_NORMAL boundary without exposing
-// black/unmaterialised ground, while 80x80 static loc placement eventually destabilises dense scenes.
-// Keep terrain at the traversal-good 80x80 size, but retain the lighter 72x72 loc/model window from
-// the last test. world_load_locations is the only legacy call site that still aliases its loc bounds
-// to PS2_TERRAIN_*; the __func__-constant selector below decouples that one function without changing
-// the terrain/arena bounds used everywhere else. This is an isolated hardware bisection; once the
-// size is accepted, replace the selector with dedicated loc-window constants in world.c.
-#define PS2_RENDER_RADIUS 14
+// Radius 14 with a square visibility mask is the hardware-good baseline. This isolated draw-distance
+// experiment extends the camera-centred traversal bound to 18, but world3d.c now admits only a generous
+// camera-facing wedge. Two tiles behind the camera and four tiles of horizontal safety margin remain
+// visible to avoid edge/near-camera popping; the expensive renderer should therefore see fewer candidate
+// tiles than the old radius-14 square even though the forward horizon is longer.
+// Terrain residency remains the traversal-good 80x80 (12..91), while static loc/model residency stays
+// at the lighter 72x72 window. These residency limits are intentionally unchanged by this experiment.
+#define PS2_RENDER_RADIUS 18
+#define PS2_RENDER_BACK_MARGIN 2
+#define PS2_RENDER_SIDE_MARGIN 4
 #define PS2_LOC_MIN_TILE 16
 #define PS2_LOC_MAX_TILE 88
 #define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 12)
