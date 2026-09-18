@@ -5137,14 +5137,29 @@ void client_update_game(Client *c) {
     // normal 50 Hz update loop drain it progressively on the 32 MiB target.
 #ifdef __PS2__
     // During map construction one packet at a time prevents a burst of interface/zone work from
-    // monopolising the EE.  Once the world is live, however, PLAYER_INFO arrives continuously;
-    // a budget of one can permanently starve queued inventory/interface packets behind it.
-    const int packet_budget = c->scene_state == 2 ? 3 : 1;
+    // monopolising the EE. Once the world is live, use the established three-packet budget, but
+    // keep REBUILD_NORMAL + its immediately-following PLAYER_INFO atomic. A hard teleport shifts
+    // every entity into the new local coordinate base in REBUILD_NORMAL; if that packet occupies
+    // the last normal budget slot, running the rest of a PS2 tick before PLAYER_INFO leaves the
+    // local player temporarily far outside the 104x104 scene. Tutorial-skip is a reproducible case
+    // because its interface/varp traffic can place REBUILD_NORMAL at that boundary. Grant exactly
+    // one extra read only when a live scene changes 2 -> 1 during this drain. Initial login remains
+    // one packet per tick and ordinary live traffic remains capped at three.
+    int packet_budget = c->scene_state == 2 ? 3 : 1;
+    for (int i = 0; i < packet_budget; i++) {
+        int scene_state_before = c->scene_state;
+        if (!client_read(c)) {
+            break;
+        }
+        if (scene_state_before == 2 && c->scene_state == 1 && packet_budget == 3) {
+            packet_budget = 4;
+        }
+    }
 #else
     const int packet_budget = 5;
-#endif
     for (int i = 0; i < packet_budget && client_read(c); i++) {
     }
+#endif
 #ifdef __PS2__
     ps2_live_stage = 2; // packet handling returned
     ps2_heap_after_packets_kb = mallinfo().fordblks / 1024;
