@@ -913,6 +913,36 @@ static int ps2_cursor_axis_step(int raw, int deadzone, int speed) {
     return raw < 0 ? -step : step;
 }
 
+static void ps2_release_grid_focus(Client *c) {
+    if (c->controller_grid_component < 0 && c->controller_grid_analog_override) return;
+
+    int focus_x = c->controller_grid_screen_valid ? c->controller_grid_screen_x : c->shell->mouse_x;
+    int focus_y = c->controller_grid_screen_valid ? c->controller_grid_screen_y : c->shell->mouse_y;
+
+    // Preserve a seamless handoff: the free cursor starts exactly where the snapped cursor was.
+    if (c->controller_grid_component >= 0 && c->controller_grid_screen_valid) {
+        c->controller_free_cursor_x = c->controller_grid_screen_x;
+        c->controller_free_cursor_y = c->controller_grid_screen_y;
+        c->controller_free_cursor_valid = true;
+    }
+
+    // Retained UI PixMaps must be repainted once to erase the yellow grid focus rectangle.
+    if (focus_x >= 553 && focus_x < 743 && focus_y >= 205 && focus_y < 466) {
+        c->redraw_sidebar = true;
+    } else if (focus_x >= 17 && focus_x < 496 && focus_y >= 357 && focus_y < 453) {
+        c->redraw_chatback = true;
+    } else {
+        c->redraw_background = true;
+    }
+
+    c->controller_grid_component = -1;
+    c->controller_grid_slot = -1;
+    c->controller_grid_screen_valid = false;
+    c->controller_grid_analog_override = true;
+    c->controller_dpad_x = 0;
+    c->controller_dpad_y = 0;
+}
+
 void platform_poll_events(Client *c) {
     int state = padGetState(0, 0);
     if (state != PAD_STATE_STABLE && state != PAD_STATE_FINDCTP1) {
@@ -921,25 +951,34 @@ void platform_poll_events(Client *c) {
 
     padRead(0, 0, &padData);
 
-    // Left stick drives the virtual cursor with user-tunable deadzone/speed. The settings overlay
-    // is intentionally pointer-free, so freeze cursor motion while it owns input.
+    // Decide input ownership directly from raw DualShock axes before routing any buttons. This is
+    // deliberately independent of calculated cursor dx/dy: a real stick deflection must always be
+    // able to break grid capture, even if cursor scaling/deadzone logic changes later.
+    int raw_lx = padData.ljoy_h - 128;
+    int raw_ly = padData.ljoy_v - 128;
+    int raw_rx = padData.rjoy_h - 128;
+    int raw_ry = padData.rjoy_v - 128;
+    bool left_stick_active = !c->controller_settings_visible &&
+                             (abs(raw_lx) > c->controller_cursor_deadzone ||
+                              abs(raw_ly) > c->controller_cursor_deadzone);
+    bool right_stick_active = !c->controller_settings_visible &&
+                              (abs(raw_rx) > c->controller_camera_deadzone ||
+                               abs(raw_ry) > c->controller_camera_deadzone);
+    bool analog_override_active = left_stick_active || right_stick_active;
+
+    if (analog_override_active && c->controller_grid_component >= 0) {
+        ps2_release_grid_focus(c);
+    }
+
+    // Left stick alone moves the virtual pointer; right stick only rotates/tilts the camera.
     int dx = 0;
     int dy = 0;
-    if (!c->controller_settings_visible) {
-        dx = ps2_cursor_axis_step(padData.ljoy_h - 128, c->controller_cursor_deadzone, c->controller_cursor_speed);
-        dy = ps2_cursor_axis_step(padData.ljoy_v - 128, c->controller_cursor_deadzone, c->controller_cursor_speed);
+    if (left_stick_active) {
+        dx = ps2_cursor_axis_step(raw_lx, c->controller_cursor_deadzone, c->controller_cursor_speed);
+        dy = ps2_cursor_axis_step(raw_ly, c->controller_cursor_deadzone, c->controller_cursor_speed);
     }
     if (dx != 0 || dy != 0) {
-        // Keep analog position separate from shell->mouse_x/y: grid mode deliberately rewrites the
-        // latter to its selected slot for RuneScape's native click/menu logic. Sharing that state
-        // made the renderer able to pull a moving analog cursor straight back onto the grid.
-        //
-        // When leaving grid mode, begin at the visible snapped slot so the handoff is seamless.
-        if (c->controller_grid_component >= 0 && c->controller_grid_screen_valid) {
-            c->controller_free_cursor_x = c->controller_grid_screen_x;
-            c->controller_free_cursor_y = c->controller_grid_screen_y;
-            c->controller_free_cursor_valid = true;
-        } else if (!c->controller_free_cursor_valid) {
+        if (!c->controller_free_cursor_valid) {
             c->controller_free_cursor_x = c->shell->mouse_x;
             c->controller_free_cursor_y = c->shell->mouse_y;
             c->controller_free_cursor_valid = true;
@@ -950,32 +989,6 @@ void platform_poll_events(Client *c) {
         c->shell->mouse_y = c->controller_free_cursor_y;
         c->shell->idle_cycles = 0;
         if (c->menu_visible) c->controller_menu_index = -1;
-        // Analog motion is an authoritative exit from D-pad grid ownership. Sidebar/chat panels
-        // are retained PixMaps, so dirty the panel that contained the old focus rectangle BEFORE
-        // dropping the grid state; otherwise the yellow box remains baked into the panel and makes
-        // it appear that snapping is still active even though the logical selection was cleared.
-        if (c->controller_grid_component >= 0) {
-            int focus_x = c->controller_grid_screen_valid ? c->controller_grid_screen_x : c->shell->mouse_x;
-            int focus_y = c->controller_grid_screen_valid ? c->controller_grid_screen_y : c->shell->mouse_y;
-            if (focus_x >= 553 && focus_x < 743 && focus_y >= 205 && focus_y < 466) {
-                c->redraw_sidebar = true;
-            } else if (focus_x >= 17 && focus_x < 496 && focus_y >= 357 && focus_y < 453) {
-                c->redraw_chatback = true;
-            } else {
-                // Viewport interfaces repaint with the viewport path; mark the surrounding chrome
-                // dirty as a conservative one-frame cleanup for modal bank/shop layouts.
-                c->redraw_background = true;
-            }
-        }
-        c->controller_grid_component = -1;
-        c->controller_grid_slot = -1;
-        c->controller_grid_screen_valid = false;
-        c->controller_grid_analog_override = true;
-        // Drop any unconsumed grid-navigation one-shot from a previous update. Grid mode may only
-        // return after a NEW physical D-pad edge below explicitly releases analog ownership.
-        c->controller_dpad_x = 0;
-        c->controller_dpad_y = 0;
-
         if (_InputTracking.enabled) {
             inputtracking_mouse_moved(&_InputTracking, c->shell->mouse_x, c->shell->mouse_y);
         }
@@ -1111,19 +1124,19 @@ void platform_poll_events(Client *c) {
     bool dpad_right = !(padData.btns & PAD_RIGHT);
     static bool dpad_up_was_down = false, dpad_down_was_down = false, dpad_left_was_down = false, dpad_right_was_down = false;
     if (dpad_up && !dpad_up_was_down) {
-        c->controller_grid_analog_override = false;
+        if (!analog_override_active) c->controller_grid_analog_override = false;
         c->controller_dpad_y = -1;
     }
     if (dpad_down && !dpad_down_was_down) {
-        c->controller_grid_analog_override = false;
+        if (!analog_override_active) c->controller_grid_analog_override = false;
         c->controller_dpad_y = 1;
     }
     if (dpad_left && !dpad_left_was_down) {
-        c->controller_grid_analog_override = false;
+        if (!analog_override_active) c->controller_grid_analog_override = false;
         c->controller_dpad_x = -1;
     }
     if (dpad_right && !dpad_right_was_down) {
-        c->controller_grid_analog_override = false;
+        if (!analog_override_active) c->controller_grid_analog_override = false;
         c->controller_dpad_x = 1;
     }
     dpad_up_was_down = dpad_up;
