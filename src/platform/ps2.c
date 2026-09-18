@@ -118,18 +118,41 @@ static void SleepMsApprox()
 // this ELF) and plain "mass:" as a fallback, in case a given loader/boot path ever exposes it
 // unnumbered instead. Checking both costs nothing once one succeeds.
 static char ps2_launch_relative_dir[192];
+static char ps2_launch_dir[256];
+static bool ps2_inherit_launcher_iop;
 
-// main() calls this before platform_init(). No filesystem access happens here: we only remember
-// the directory portion of a USB launch path such as mass0:/Games/2004sp/client.elf. Once the BDM
-// USB stack is mounted, ps2_cache_prefix() below validates that directory before using it.
+// main() calls this before platform_init(). No filesystem access happens here: retain both the exact
+// launcher-visible USB directory and its device-relative portion. The exact path lets us probe and
+// inherit a launcher's already-working FILEIO/USB environment; the relative portion preserves the
+// self-initialized mass0:/ + mass:/ fallback added for folder installs.
 void ps2_set_launch_path(const char *path) {
     ps2_launch_relative_dir[0] = '\0';
+    ps2_launch_dir[0] = '\0';
     if (!path || strncmp(path, "mass", 4) != 0) {
         return;
     }
 
+    size_t full_length = strlen(path);
+    if (full_length == 0 || full_length >= sizeof(ps2_launch_dir)) {
+        return;
+    }
+    memcpy(ps2_launch_dir, path, full_length + 1);
+    for (size_t i = 0; i < full_length; i++) {
+        if (ps2_launch_dir[i] == '\\') {
+            ps2_launch_dir[i] = '/';
+        }
+    }
+
+    char *full_last_slash = strrchr(ps2_launch_dir, '/');
+    if (!full_last_slash) {
+        ps2_launch_dir[0] = '\0';
+        return;
+    }
+    full_last_slash[1] = '\0';
+
     const char *colon = strchr(path, ':');
     if (!colon) {
+        ps2_launch_dir[0] = '\0';
         return;
     }
 
@@ -181,12 +204,44 @@ static bool ps2_install_prefix_valid(const char *candidate, bool require_config)
     return true;
 }
 
+// Do not call fioInit()/stdio blindly to detect an inherited filesystem: PS2SDK's FILEIO client
+// deliberately keeps trying to bind when no FILEIO server exists, which would make detection itself
+// hang on launchers that reset the IOP. Probe that RPC server a bounded number of times first. Only
+// after it is proven alive do we verify that this exact ELF directory can read our self-contained
+// config + cache marker. That is the evidence required to preserve the launcher's IOP environment.
+static bool ps2_probe_inherited_launcher_io(void) {
+    if (!ps2_launch_dir[0]) {
+        return false;
+    }
+
+    SifRpcClientData_t fileio_probe;
+    memset(&fileio_probe, 0, sizeof(fileio_probe));
+    for (int attempt = 0; attempt < 8; attempt++) {
+        int result = sceSifBindRpc(&fileio_probe, 0x80000001, 0);
+        if (result < 0) {
+            return false;
+        }
+        if (fileio_probe.server) {
+            return ps2_install_prefix_valid(ps2_launch_dir, true);
+        }
+        DelayThread(1000);
+    }
+    return false;
+}
+
 const char *ps2_cache_prefix(void) {
     static bool checked = false;
     static char prefix[256] = "";
     if (!checked) {
         checked = true;
         static const char *const devices[] = {"mass0:/", "mass:/"};
+
+        // In inheritance mode the launcher already proved this exact directory readable. Keep its
+        // device spelling and mount instead of waiting for or probing our own replacement USB stack.
+        if (ps2_inherit_launcher_iop && ps2_launch_dir[0]) {
+            snprintf(prefix, sizeof(prefix), "%s", ps2_launch_dir);
+            return prefix;
+        }
 
         // Give the BDM mass-storage stack the same bounded settling window used by the proven
         // root-level path. On each pass, prefer the directory client.elf was launched from, then
@@ -489,11 +544,20 @@ bool platform_init(void) {
     // network completely up first, USB loaded only once that's done, matching how this project's
     // very first working real-hardware boot was structured before any of this reordering began.
     SifInitRpc(0);
-    while (!SifIopReset("", 0)) {
+
+    // Prefer the IOP environment that successfully launched this ELF from USB. Launchers such as
+    // wLaunchELF historically leave filesystem/SIO2/PAD services resident for non-HDD homebrew;
+    // resetting here discards that known-working hardware-specific environment. If FILEIO cannot
+    // prove the install beside client.elf is readable, retain the established clean-room fallback.
+    ps2_inherit_launcher_iop = ps2_probe_inherited_launcher_io();
+    if (!ps2_inherit_launcher_iop) {
+        while (!SifIopReset("", 0)) {
+        }
+        while (!SifIopSync()) {
+        }
+        SifInitRpc(0);
     }
-    while (!SifIopSync()) {
-    }
-    SifInitRpc(0);
+    ps2_boot_progress(3);
 
     // SIO2MAN/PADMAN moved to AFTER network bring-up (below), matching httpechotest's exact
     // sequence (which never loads them at all, being network-only) - this file previously loaded
@@ -506,6 +570,8 @@ bool platform_init(void) {
     SifLoadFileInit();
     SifInitIopHeap();
     sbv_patch_enable_lmb();
+    rs2_log("iop: %s launcher drivers\n",
+            ps2_inherit_launcher_iop ? "inheriting" : "self-initializing");
     ps2_boot_progress(5);
 
     extern unsigned char dev9_embed_irx[];
@@ -632,33 +698,43 @@ bool platform_init(void) {
     extern unsigned char usbmass_bd_embed_irx[];
     extern unsigned int size_usbmass_bd_embed_irx;
 
-    int iomanx_modres = -1;
-    int iomanx_ret = SifExecModuleBuffer(iomanx_embed_irx, size_iomanx_embed_irx, 0, NULL, &iomanx_modres);
-    rs2_log("usb: iomanX ret=%d/%d\n", iomanx_ret, iomanx_modres);
-    ps2_boot_progress(78);
+    if (!ps2_inherit_launcher_iop) {
+        int iomanx_modres = -1;
+        int iomanx_ret = SifExecModuleBuffer(iomanx_embed_irx, size_iomanx_embed_irx, 0, NULL, &iomanx_modres);
+        rs2_log("usb: iomanX ret=%d/%d\n", iomanx_ret, iomanx_modres);
+        ps2_boot_progress(78);
 
-    int bdm_modres = -1;
-    int bdm_ret = SifExecModuleBuffer(bdm_embed_irx, size_bdm_embed_irx, 0, NULL, &bdm_modres);
-    rs2_log("usb: bdm ret=%d/%d\n", bdm_ret, bdm_modres);
-    ps2_boot_progress(80);
+        int bdm_modres = -1;
+        int bdm_ret = SifExecModuleBuffer(bdm_embed_irx, size_bdm_embed_irx, 0, NULL, &bdm_modres);
+        rs2_log("usb: bdm ret=%d/%d\n", bdm_ret, bdm_modres);
+        ps2_boot_progress(80);
 
-    int bdmfs_fatfs_modres = -1;
-    int bdmfs_fatfs_ret = SifExecModuleBuffer(bdmfs_fatfs_embed_irx, size_bdmfs_fatfs_embed_irx, 0, NULL, &bdmfs_fatfs_modres);
-    rs2_log("usb: bdmfs_fatfs ret=%d/%d\n", bdmfs_fatfs_ret, bdmfs_fatfs_modres);
-    ps2_boot_progress(83);
+        int bdmfs_fatfs_modres = -1;
+        int bdmfs_fatfs_ret = SifExecModuleBuffer(bdmfs_fatfs_embed_irx, size_bdmfs_fatfs_embed_irx, 0, NULL, &bdmfs_fatfs_modres);
+        rs2_log("usb: bdmfs_fatfs ret=%d/%d\n", bdmfs_fatfs_ret, bdmfs_fatfs_modres);
+        ps2_boot_progress(83);
 
-    int usbd_modres = -1;
-    int usbd_ret = SifExecModuleBuffer(usbd_embed_irx, size_usbd_embed_irx, 0, NULL, &usbd_modres);
-    rs2_log("usb: usbd ret=%d/%d\n", usbd_ret, usbd_modres);
-    ps2_boot_progress(86);
+        int usbd_modres = -1;
+        int usbd_ret = SifExecModuleBuffer(usbd_embed_irx, size_usbd_embed_irx, 0, NULL, &usbd_modres);
+        rs2_log("usb: usbd ret=%d/%d\n", usbd_ret, usbd_modres);
+        ps2_boot_progress(86);
 
-    int usbmass_bd_modres = -1;
-    int usbmass_bd_ret = SifExecModuleBuffer(usbmass_bd_embed_irx, size_usbmass_bd_embed_irx, 0, NULL, &usbmass_bd_modres);
-    rs2_log("usb: usbmass_bd ret=%d/%d\n", usbmass_bd_ret, usbmass_bd_modres);
-    ps2_boot_progress(88);
+        int usbmass_bd_modres = -1;
+        int usbmass_bd_ret = SifExecModuleBuffer(usbmass_bd_embed_irx, size_usbmass_bd_embed_irx, 0, NULL, &usbmass_bd_modres);
+        rs2_log("usb: usbmass_bd ret=%d/%d\n", usbmass_bd_ret, usbmass_bd_modres);
+        ps2_boot_progress(88);
 
-    SifLoadModule("rom0:SIO2MAN", 0, NULL);
-    SifLoadModule("rom0:PADMAN", 0, NULL);
+    } else {
+        // The launcher already needed working USB/file drivers to load this ELF. Do not stack a
+        // second IOMANX/BDM/USBD/usbmass set on top of them; advance to the same boot checkpoint.
+        ps2_boot_progress(88);
+    }
+
+    if (!ps2_inherit_launcher_iop) {
+        SifLoadModule("rom0:SIO2MAN", 0, NULL);
+        SifLoadModule("rom0:PADMAN", 0, NULL);
+    }
+    // Even when the IOP PADMAN is inherited, this new EE process must bind libpad itself.
     padInit(0);
     padPortOpen(0, 0, padDmaBuf);
 
