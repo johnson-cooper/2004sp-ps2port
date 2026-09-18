@@ -4676,8 +4676,8 @@ static void handleControllerButtonInput(Client *c) {
     if (c->controller_grid_cancel_pressed) {
         c->controller_grid_cancel_pressed = false;
 
-        // Release controller focus ONLY. Do not call closeInterfaces(), change any interface ID,
-        // change the selected tab, or feed the press into generic Back handling.
+        // R3 releases controller focus ONLY. Do not call closeInterfaces(), change any interface
+        // ID, change the selected tab, or feed the press into generic Back handling.
         if (c->controller_grid_screen_valid) {
             c->controller_free_cursor_x = c->controller_grid_screen_x;
             c->controller_free_cursor_y = c->controller_grid_screen_y;
@@ -4696,7 +4696,6 @@ static void handleControllerButtonInput(Client *c) {
         c->controller_grid_analog_override = true;
         c->controller_dpad_x = 0;
         c->controller_dpad_y = 0;
-        c->controller_back_pressed = false;
 
         // Only repaint retained surfaces to erase the focus border; this does not close them.
         c->redraw_sidebar = true;

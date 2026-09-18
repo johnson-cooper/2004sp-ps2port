@@ -1076,7 +1076,7 @@ void platform_poll_events(Client *c) {
     l1_was_down = l1;
     r1_was_down = r1;
 
-    // Triangle/Square/Select/Start - one-shot press-edge flags, meaning assigned and consumed in
+    // Triangle/Square/Select/Start/R3 - one-shot press-edge flags, meaning assigned and consumed in
     // handleControllerButtonInput()/the virtual keyboard logic in entry/client.c (kept there so
     // every button's real-world MEANING lives in one platform-agnostic place, while only the
     // hardware bit lives here).
@@ -1085,16 +1085,16 @@ void platform_poll_events(Client *c) {
     bool select = !(padData.btns & PAD_SELECT);
     bool start = !(padData.btns & PAD_START);
     bool l3 = !(padData.btns & PAD_L3);
-    static bool triangle_was_down = false, square_was_down = false, select_was_down = false, start_was_down = false, l3_was_down = false;
+    bool r3 = !(padData.btns & PAD_R3);
+    static bool triangle_was_down = false, square_was_down = false, select_was_down = false, start_was_down = false, l3_was_down = false, r3_was_down = false;
     if (triangle && !triangle_was_down) {
-        // Grid cancellation is NOT generic Back. Keeping it as a separate event guarantees
-        // inventory/bank/shop interface IDs survive when Triangle merely returns pointer control.
-        if (!c->menu_visible && !c->virtual_keyboard_visible &&
-            (c->controller_grid_component >= 0 || !c->controller_grid_analog_override)) {
+        // Triangle is always normal Back/close again. It has no grid-navigation responsibility.
+        c->controller_back_pressed = true;
+    }
+    if (r3 && !r3_was_down) {
+        // Dedicated grid escape: never masquerades as Back and therefore cannot close an interface.
+        if (c->controller_grid_component >= 0 || !c->controller_grid_analog_override) {
             c->controller_grid_cancel_pressed = true;
-            c->controller_back_pressed = false;
-        } else {
-            c->controller_back_pressed = true;
         }
     }
     if (square && !square_was_down) {
@@ -1114,6 +1114,7 @@ void platform_poll_events(Client *c) {
     select_was_down = select;
     start_was_down = start;
     l3_was_down = l3;
+    r3_was_down = r3;
 
     // L2/R2 - true camera distance zoom, held for continuous movement. Right stick retains
     // pitch/yaw control independently; entry/client.c applies this signed bias to orbit distance.
