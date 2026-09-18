@@ -930,8 +930,24 @@ void platform_poll_events(Client *c) {
         dy = ps2_cursor_axis_step(padData.ljoy_v - 128, c->controller_cursor_deadzone, c->controller_cursor_speed);
     }
     if (dx != 0 || dy != 0) {
-        c->shell->mouse_x = MAX(0, MIN(SCREEN_WIDTH - 1, c->shell->mouse_x + dx));
-        c->shell->mouse_y = MAX(0, MIN(SCREEN_HEIGHT - 1, c->shell->mouse_y + dy));
+        // Keep analog position separate from shell->mouse_x/y: grid mode deliberately rewrites the
+        // latter to its selected slot for RuneScape's native click/menu logic. Sharing that state
+        // made the renderer able to pull a moving analog cursor straight back onto the grid.
+        //
+        // When leaving grid mode, begin at the visible snapped slot so the handoff is seamless.
+        if (c->controller_grid_component >= 0 && c->controller_grid_screen_valid) {
+            c->controller_free_cursor_x = c->controller_grid_screen_x;
+            c->controller_free_cursor_y = c->controller_grid_screen_y;
+            c->controller_free_cursor_valid = true;
+        } else if (!c->controller_free_cursor_valid) {
+            c->controller_free_cursor_x = c->shell->mouse_x;
+            c->controller_free_cursor_y = c->shell->mouse_y;
+            c->controller_free_cursor_valid = true;
+        }
+        c->controller_free_cursor_x = MAX(0, MIN(SCREEN_WIDTH - 1, c->controller_free_cursor_x + dx));
+        c->controller_free_cursor_y = MAX(0, MIN(SCREEN_HEIGHT - 1, c->controller_free_cursor_y + dy));
+        c->shell->mouse_x = c->controller_free_cursor_x;
+        c->shell->mouse_y = c->controller_free_cursor_y;
         c->shell->idle_cycles = 0;
         if (c->menu_visible) c->controller_menu_index = -1;
         // Analog motion is an authoritative exit from D-pad grid ownership. Sidebar/chat panels

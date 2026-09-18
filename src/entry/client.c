@@ -5130,6 +5130,11 @@ static void handleControllerGridInput(Client *c) {
             c->controller_grid_screen_valid = false;
             return;
         }
+        if (!c->controller_free_cursor_valid) {
+            c->controller_free_cursor_x = c->shell->mouse_x;
+            c->controller_free_cursor_y = c->shell->mouse_y;
+            c->controller_free_cursor_valid = true;
+        }
         c->controller_grid_component = target.grid->id;
         c->controller_grid_slot = controller_grid_nearest_slot(&target, c->shell->mouse_x, c->shell->mouse_y);
     }
@@ -5421,8 +5426,8 @@ static void virtual_cursor_draw(Client *c) {
         c->controller_grid_screen_valid && c->controller_grid_component >= 0) {
         cursor_x = c->controller_grid_screen_x;
         cursor_y = c->controller_grid_screen_y;
-        c->shell->mouse_x = cursor_x;
-        c->shell->mouse_y = cursor_y;
+        // Do not write shell->mouse_x/y here. The grid click path locks those coordinates only
+        // while processing input; drawing the cursor must never mutate the analog cursor position.
     }
 #endif
     int x = cursor_x - SIZE / 2;
@@ -13359,6 +13364,7 @@ Client *client_new(void) {
     c->controller_grid_slot = -1;
     c->controller_grid_screen_valid = false;
     c->controller_grid_analog_override = true;
+    c->controller_free_cursor_valid = false;
     c->controller_camera_zoom = 0;
 
     c->minimap_level = -1;
