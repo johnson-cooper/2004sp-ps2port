@@ -956,21 +956,18 @@ void platform_poll_events(Client *c) {
     // able to break grid capture, even if cursor scaling/deadzone logic changes later.
     int raw_lx = padData.ljoy_h - 128;
     int raw_ly = padData.ljoy_v - 128;
-    int raw_rx = padData.rjoy_h - 128;
-    int raw_ry = padData.rjoy_v - 128;
     bool left_stick_active = !c->controller_settings_visible &&
                              (abs(raw_lx) > c->controller_cursor_deadzone ||
                               abs(raw_ly) > c->controller_cursor_deadzone);
-    bool right_stick_active = !c->controller_settings_visible &&
-                              (abs(raw_rx) > c->controller_camera_deadzone ||
-                               abs(raw_ry) > c->controller_camera_deadzone);
-    bool analog_override_active = left_stick_active || right_stick_active;
+    // Only the pointer-owning left stick exits grid mode. The right stick remains free to rotate
+    // and tilt the camera while a D-pad-selected inventory/bank/shop slot stays focused.
+    bool analog_override_active = left_stick_active;
 
-    if (analog_override_active && c->controller_grid_component >= 0) {
+    if (left_stick_active && c->controller_grid_component >= 0) {
         ps2_release_grid_focus(c);
     }
 
-    // Left stick alone moves the virtual pointer; right stick only rotates/tilts the camera.
+    // Left stick moves the virtual pointer; right stick remains independent camera control.
     int dx = 0;
     int dy = 0;
     if (left_stick_active) {
