@@ -249,6 +249,7 @@ struct Client {
     bool controller_snap_camera_pressed; // one-shot: Select, face camera with the player
     bool controller_start_pressed;    // one-shot: Start, open chat keyboard / submit active keyboard
     bool controller_back_pressed;     // one-shot: Triangle, close topmost modal/menu (or backspace if keyboard open)
+    bool controller_grid_cancel_pressed; // Triangle while grid focus owns the pointer: release focus only
     int controller_zoom_bias;         // signed L2/R2 hold: negative=zoom out, positive=zoom in
     int controller_dpad_x;            // -1/0/+1, one-shot: D-pad; keyboard/menu/settings consume it contextually
     int controller_dpad_y;

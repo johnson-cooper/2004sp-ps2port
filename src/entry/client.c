@@ -4673,6 +4673,36 @@ static void handleControllerTabInput(Client *c) {
 // one-shot/level field). Each button's real-world meaning lives here, platform-agnostically -
 // ps2.c only knows about hardware bits, never about tabs/camera/chat.
 static void handleControllerButtonInput(Client *c) {
+    if (c->controller_grid_cancel_pressed) {
+        c->controller_grid_cancel_pressed = false;
+
+        // Release controller focus ONLY. Do not call closeInterfaces(), change any interface ID,
+        // change the selected tab, or feed the press into generic Back handling.
+        if (c->controller_grid_screen_valid) {
+            c->controller_free_cursor_x = c->controller_grid_screen_x;
+            c->controller_free_cursor_y = c->controller_grid_screen_y;
+            c->controller_free_cursor_valid = true;
+            c->shell->mouse_x = c->controller_grid_screen_x;
+            c->shell->mouse_y = c->controller_grid_screen_y;
+        } else {
+            c->controller_free_cursor_x = c->shell->mouse_x;
+            c->controller_free_cursor_y = c->shell->mouse_y;
+            c->controller_free_cursor_valid = true;
+        }
+
+        c->controller_grid_component = -1;
+        c->controller_grid_slot = -1;
+        c->controller_grid_screen_valid = false;
+        c->controller_grid_analog_override = true;
+        c->controller_dpad_x = 0;
+        c->controller_dpad_y = 0;
+        c->controller_back_pressed = false;
+
+        // Only repaint retained surfaces to erase the focus border; this does not close them.
+        c->redraw_sidebar = true;
+        c->redraw_chatback = true;
+    }
+
     if (c->controller_options_pressed) {
         c->controller_options_pressed = false;
         if (c->menu_visible) {
@@ -4822,33 +4852,6 @@ static void handleControllerButtonInput(Client *c) {
             if (c->menu_visible) {
                 c->menu_visible = false;
                 c->controller_menu_index = -1;
-            } else if (c->controller_grid_component >= 0 || !c->controller_grid_analog_override) {
-                // Triangle is the explicit console-style escape from D-pad grid navigation.
-                // Preserve the currently visible slot as the free cursor handoff point, then clear
-                // ALL grid ownership just like switching to another sidebar interface does.
-                if (c->controller_grid_screen_valid) {
-                    c->controller_free_cursor_x = c->controller_grid_screen_x;
-                    c->controller_free_cursor_y = c->controller_grid_screen_y;
-                    c->controller_free_cursor_valid = true;
-                    c->shell->mouse_x = c->controller_grid_screen_x;
-                    c->shell->mouse_y = c->controller_grid_screen_y;
-                } else {
-                    c->controller_free_cursor_x = c->shell->mouse_x;
-                    c->controller_free_cursor_y = c->shell->mouse_y;
-                    c->controller_free_cursor_valid = true;
-                }
-                c->controller_grid_component = -1;
-                c->controller_grid_slot = -1;
-                c->controller_grid_screen_valid = false;
-                c->controller_grid_analog_override = true;
-                c->controller_dpad_x = 0;
-                c->controller_dpad_y = 0;
-
-                // The focus rectangle may be baked into one of the retained UI PixMaps. A one-shot
-                // redraw guarantees the yellow outline disappears immediately after Triangle.
-                c->redraw_sidebar = true;
-                c->redraw_chatback = true;
-                c->redraw_background = true;
             } else if (c->modal_message[0]) {
                 c->modal_message[0] = '\0';
                 c->redraw_chatback = true;
@@ -13387,6 +13390,7 @@ Client *client_new(void) {
     c->controller_cursor_deadzone = 20;
     c->controller_cursor_speed = 5;
     c->controller_camera_deadzone = 40;
+    c->controller_grid_cancel_pressed = false;
     c->controller_grid_component = -1;
     c->controller_grid_slot = -1;
     c->controller_grid_screen_valid = false;

@@ -1087,7 +1087,15 @@ void platform_poll_events(Client *c) {
     bool l3 = !(padData.btns & PAD_L3);
     static bool triangle_was_down = false, square_was_down = false, select_was_down = false, start_was_down = false, l3_was_down = false;
     if (triangle && !triangle_was_down) {
-        c->controller_back_pressed = true;
+        // Grid cancellation is NOT generic Back. Keeping it as a separate event guarantees
+        // inventory/bank/shop interface IDs survive when Triangle merely returns pointer control.
+        if (!c->menu_visible && !c->virtual_keyboard_visible &&
+            (c->controller_grid_component >= 0 || !c->controller_grid_analog_override)) {
+            c->controller_grid_cancel_pressed = true;
+            c->controller_back_pressed = false;
+        } else {
+            c->controller_back_pressed = true;
+        }
     }
     if (square && !square_was_down) {
         c->controller_inventory_pressed = true;
