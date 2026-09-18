@@ -954,6 +954,11 @@ void platform_poll_events(Client *c) {
         c->controller_grid_component = -1;
         c->controller_grid_slot = -1;
         c->controller_grid_screen_valid = false;
+        c->controller_grid_analog_override = true;
+        // Drop any unconsumed grid-navigation one-shot from a previous update. Grid mode may only
+        // return after a NEW physical D-pad edge below explicitly releases analog ownership.
+        c->controller_dpad_x = 0;
+        c->controller_dpad_y = 0;
 
         if (_InputTracking.enabled) {
             inputtracking_mouse_moved(&_InputTracking, c->shell->mouse_x, c->shell->mouse_y);
@@ -1090,15 +1095,19 @@ void platform_poll_events(Client *c) {
     bool dpad_right = !(padData.btns & PAD_RIGHT);
     static bool dpad_up_was_down = false, dpad_down_was_down = false, dpad_left_was_down = false, dpad_right_was_down = false;
     if (dpad_up && !dpad_up_was_down) {
+        c->controller_grid_analog_override = false;
         c->controller_dpad_y = -1;
     }
     if (dpad_down && !dpad_down_was_down) {
+        c->controller_grid_analog_override = false;
         c->controller_dpad_y = 1;
     }
     if (dpad_left && !dpad_left_was_down) {
+        c->controller_grid_analog_override = false;
         c->controller_dpad_x = -1;
     }
     if (dpad_right && !dpad_right_was_down) {
+        c->controller_grid_analog_override = false;
         c->controller_dpad_x = 1;
     }
     dpad_up_was_down = dpad_up;

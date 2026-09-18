@@ -268,6 +268,7 @@ struct Client {
     int controller_grid_screen_x;     // renderer-confirmed full-screen center of selected slot
     int controller_grid_screen_y;
     bool controller_grid_screen_valid;
+    bool controller_grid_analog_override; // left stick owns cursor until a fresh D-pad edge
     int controller_camera_zoom;       // orbit distance offset; negative=in, positive=out
 
     // On-screen virtual keyboard (see gameshell.h's has_keyboard) - the only way a controller-only

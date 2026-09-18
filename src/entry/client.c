@@ -4383,7 +4383,8 @@ static void handleInputKey(Client *c) {
 
 static void handleMouseInput(Client *c) {
 #ifdef __PS2__
-    if (c->controller_grid_screen_valid && c->controller_grid_component >= 0) {
+    if (!c->controller_grid_analog_override &&
+        c->controller_grid_screen_valid && c->controller_grid_component >= 0) {
         c->shell->mouse_x = c->controller_grid_screen_x;
         c->shell->mouse_y = c->controller_grid_screen_y;
         if (c->shell->mouse_click_button != 0) {
@@ -4662,6 +4663,7 @@ static void handleControllerTabInput(Client *c) {
             c->controller_grid_component = -1;
             c->controller_grid_slot = -1;
             c->controller_grid_screen_valid = false;
+            c->controller_grid_analog_override = true;
             break;
         }
     }
@@ -4779,6 +4781,7 @@ static void handleControllerButtonInput(Client *c) {
             c->controller_grid_component = -1;
             c->controller_grid_slot = -1;
             c->controller_grid_screen_valid = false;
+            c->controller_grid_analog_override = true;
         }
     }
 
@@ -5092,6 +5095,11 @@ static int controller_grid_nearest_slot(ControllerGridTarget *target, int mouse_
 }
 
 static void handleControllerGridInput(Client *c) {
+    if (c->controller_grid_analog_override) {
+        c->controller_dpad_x = 0;
+        c->controller_dpad_y = 0;
+        return;
+    }
     if (c->controller_dpad_x == 0 && c->controller_dpad_y == 0) return;
     if (c->virtual_keyboard_visible || c->controller_settings_visible || c->menu_visible) return;
 
@@ -5409,7 +5417,8 @@ static void virtual_cursor_draw(Client *c) {
     int cursor_x = c->shell->mouse_x;
     int cursor_y = c->shell->mouse_y;
 #ifdef __PS2__
-    if (c->controller_grid_screen_valid && c->controller_grid_component >= 0) {
+    if (!c->controller_grid_analog_override &&
+        c->controller_grid_screen_valid && c->controller_grid_component >= 0) {
         cursor_x = c->controller_grid_screen_x;
         cursor_y = c->controller_grid_screen_y;
         c->shell->mouse_x = cursor_x;
@@ -12546,7 +12555,8 @@ static void client_draw_interface(Client *c, Component *com, int x, int y, int s
                     // Controller grid focus is drawn by the same interface pass that owns the slot,
                     // so there is no ambiguity about whether snapping is active. Black outer edge +
                     // yellow inner edge remains legible over both bright item icons and dark panels.
-                    if (c->controller_grid_component == child->id && c->controller_grid_slot == slot) {
+                    if (!c->controller_grid_analog_override &&
+                        c->controller_grid_component == child->id && c->controller_grid_slot == slot) {
                         pix2d_draw_rect(slotX - 2, slotY - 2, BLACK, 36, 36);
                         pix2d_draw_rect(slotX - 1, slotY - 1, YELLOW, 34, 34);
 
@@ -13348,6 +13358,7 @@ Client *client_new(void) {
     c->controller_grid_component = -1;
     c->controller_grid_slot = -1;
     c->controller_grid_screen_valid = false;
+    c->controller_grid_analog_override = true;
     c->controller_camera_zoom = 0;
 
     c->minimap_level = -1;
