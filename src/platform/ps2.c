@@ -938,6 +938,7 @@ void platform_poll_events(Client *c) {
         // whichever visible inventory/bank/shop grid the cursor now points at.
         c->controller_grid_component = -1;
         c->controller_grid_slot = -1;
+        c->controller_grid_screen_valid = false;
 
         if (_InputTracking.enabled) {
             inputtracking_mouse_moved(&_InputTracking, c->shell->mouse_x, c->shell->mouse_y);
@@ -1060,8 +1061,8 @@ void platform_poll_events(Client *c) {
     start_was_down = start;
     l3_was_down = l3;
 
-    // L2/R2 - fine zoom, held (level, not edge) since it's a continuous nudge rather than a
-    // discrete action. Independent of the right stick's pitch-based zoom, for finer control.
+    // L2/R2 - true camera distance zoom, held for continuous movement. Right stick retains
+    // pitch/yaw control independently; entry/client.c applies this signed bias to orbit distance.
     bool l2 = !(padData.btns & PAD_L2);
     bool r2 = !(padData.btns & PAD_R2);
     c->controller_zoom_bias = c->controller_settings_visible ? 0 : (r2 ? 1 : (l2 ? -1 : 0));

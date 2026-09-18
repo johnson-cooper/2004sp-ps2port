@@ -249,7 +249,7 @@ struct Client {
     bool controller_snap_camera_pressed; // one-shot: Select, face camera with the player
     bool controller_start_pressed;    // one-shot: Start, open chat keyboard / submit active keyboard
     bool controller_back_pressed;     // one-shot: Triangle, close topmost modal/menu (or backspace if keyboard open)
-    int controller_zoom_bias;         // signed, from L2/R2 hold: negative=zoom out, positive=zoom in
+    int controller_zoom_bias;         // signed L2/R2 hold: negative=zoom out, positive=zoom in
     int controller_dpad_x;            // -1/0/+1, one-shot: D-pad; keyboard/menu/settings consume it contextually
     int controller_dpad_y;
     bool controller_keyboard_confirm_pressed; // Cross while the on-screen keyboard owns input
@@ -265,6 +265,10 @@ struct Client {
     int controller_camera_deadzone;   // right stick per-axis deadzone
     int controller_grid_component;    // active TYPE_INV component id, -1 until D-pad enters a grid
     int controller_grid_slot;         // selected row-major slot inside that component
+    int controller_grid_screen_x;     // renderer-confirmed full-screen center of selected slot
+    int controller_grid_screen_y;
+    bool controller_grid_screen_valid;
+    int controller_camera_zoom;       // orbit distance offset; negative=in, positive=out
 
     // On-screen virtual keyboard (see gameshell.h's has_keyboard) - the only way a controller-only
     // player can enter text. State lives here (not a separate file) since every operation needs

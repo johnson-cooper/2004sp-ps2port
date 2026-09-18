@@ -4382,6 +4382,16 @@ static void handleInputKey(Client *c) {
 }
 
 static void handleMouseInput(Client *c) {
+#ifdef __PS2__
+    if (c->controller_grid_screen_valid && c->controller_grid_component >= 0) {
+        c->shell->mouse_x = c->controller_grid_screen_x;
+        c->shell->mouse_y = c->controller_grid_screen_y;
+        if (c->shell->mouse_click_button != 0) {
+            c->shell->mouse_click_x = c->controller_grid_screen_x;
+            c->shell->mouse_click_y = c->controller_grid_screen_y;
+        }
+    }
+#endif
     if (c->obj_drag_area != 0) {
         return;
     }
@@ -4651,6 +4661,7 @@ static void handleControllerTabInput(Client *c) {
             c->redraw_sideicons = true;
             c->controller_grid_component = -1;
             c->controller_grid_slot = -1;
+            c->controller_grid_screen_valid = false;
             break;
         }
     }
@@ -4767,6 +4778,7 @@ static void handleControllerButtonInput(Client *c) {
             c->redraw_sideicons = true;
             c->controller_grid_component = -1;
             c->controller_grid_slot = -1;
+            c->controller_grid_screen_valid = false;
         }
     }
 
@@ -4780,15 +4792,11 @@ static void handleControllerButtonInput(Client *c) {
     }
 
     if (c->controller_zoom_bias != 0) {
-        // Same clamp as client_update_orbit_camera()'s own pitch integration (entry/client.c) -
-        // this is a supplementary fine-zoom nudge independent of the right stick's pitch axis.
-        c->orbit_camera_pitch += c->controller_zoom_bias * 2;
-        if (c->orbit_camera_pitch < 128) {
-            c->orbit_camera_pitch = 128;
-        }
-        if (c->orbit_camera_pitch > 383) {
-            c->orbit_camera_pitch = 383;
-        }
+        // True zoom: R2 (+1) moves the orbit camera toward the player; L2 (-1) moves it away.
+        // Pitch remains exclusively controlled by the right stick.
+        c->controller_camera_zoom -= c->controller_zoom_bias * 12;
+        if (c->controller_camera_zoom < -400) c->controller_camera_zoom = -400;
+        if (c->controller_camera_zoom > 600) c->controller_camera_zoom = 600;
     }
 
     if (c->controller_start_pressed) {
@@ -5111,6 +5119,7 @@ static void handleControllerGridInput(Client *c) {
         if (!found) {
             c->controller_grid_component = -1;
             c->controller_grid_slot = -1;
+            c->controller_grid_screen_valid = false;
             return;
         }
         c->controller_grid_component = target.grid->id;
@@ -5136,6 +5145,8 @@ static void handleControllerGridInput(Client *c) {
     slot = row * grid->width + col;
     if (slot >= count) slot = count - 1;
     c->controller_grid_slot = slot;
+    // The interface renderer will publish the authoritative on-screen center on the next draw.
+    c->controller_grid_screen_valid = false;
 
     int cx, cy;
     controller_grid_slot_center(&target, slot, &cx, &cy);
@@ -5395,8 +5406,18 @@ static void virtual_cursor_draw(Client *c) {
         cursor_panel = pixmap_new(SIZE, SIZE);
     }
 
-    int x = c->shell->mouse_x - SIZE / 2;
-    int y = c->shell->mouse_y - SIZE / 2;
+    int cursor_x = c->shell->mouse_x;
+    int cursor_y = c->shell->mouse_y;
+#ifdef __PS2__
+    if (c->controller_grid_screen_valid && c->controller_grid_component >= 0) {
+        cursor_x = c->controller_grid_screen_x;
+        cursor_y = c->controller_grid_screen_y;
+        c->shell->mouse_x = cursor_x;
+        c->shell->mouse_y = cursor_y;
+    }
+#endif
+    int x = cursor_x - SIZE / 2;
+    int y = cursor_y - SIZE / 2;
 
 #ifdef __PS2__
     // Restore whatever the cursor covered last frame BEFORE drawing it at the new position -
@@ -11317,7 +11338,10 @@ void client_draw_scene(Client *c) {
         }
 
         int yaw = c->orbit_camera_yaw + c->camera_anticheat_angle & 0x7ff;
-        orbitCamera(c, c->orbitCameraX, getHeightmapY(c, c->currentLevel, c->local_player->pathing_entity.x, c->local_player->pathing_entity.z) - 50, c->orbitCameraZ, yaw, pitch, pitch * 3 + 600);
+        int camera_distance = pitch * 3 + 600 + c->controller_camera_zoom;
+        if (camera_distance < 500) camera_distance = 500;
+        if (camera_distance > 2350) camera_distance = 2350;
+        orbitCamera(c, c->orbitCameraX, getHeightmapY(c, c->currentLevel, c->local_player->pathing_entity.x, c->local_player->pathing_entity.z) - 50, c->orbitCameraZ, yaw, pitch, camera_distance);
 
         _Client.cyclelogic2++;
         if (_Client.cyclelogic2 > 1802) {
@@ -12525,6 +12549,25 @@ static void client_draw_interface(Client *c, Component *com, int x, int y, int s
                     if (c->controller_grid_component == child->id && c->controller_grid_slot == slot) {
                         pix2d_draw_rect(slotX - 2, slotY - 2, BLACK, 36, 36);
                         pix2d_draw_rect(slotX - 1, slotY - 1, YELLOW, 34, 34);
+
+                        // Publish the final displayed slot center from the exact render pass. This
+                        // eliminates coordinate drift between local interface PixMaps and the global
+                        // controller cursor/click coordinate system.
+                        int origin_x = 0;
+                        int origin_y = 0;
+                        if (c->area_sidebar && _Pix2D.pixels == c->area_sidebar->pixels) {
+                            origin_x = 553;
+                            origin_y = 205;
+                        } else if (c->area_chatback && _Pix2D.pixels == c->area_chatback->pixels) {
+                            origin_x = 17;
+                            origin_y = 357;
+                        } else if (c->area_viewport && _Pix2D.pixels == c->area_viewport->pixels) {
+                            origin_x = 4;
+                            origin_y = 4;
+                        }
+                        c->controller_grid_screen_x = origin_x + slotX + 16;
+                        c->controller_grid_screen_y = origin_y + slotY + 16;
+                        c->controller_grid_screen_valid = true;
                     }
 #endif
 
@@ -13304,6 +13347,8 @@ Client *client_new(void) {
     c->controller_camera_deadzone = 40;
     c->controller_grid_component = -1;
     c->controller_grid_slot = -1;
+    c->controller_grid_screen_valid = false;
+    c->controller_camera_zoom = 0;
 
     c->minimap_level = -1;
     c->sticky_chat_interface_id = -1;
