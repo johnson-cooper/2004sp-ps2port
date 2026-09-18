@@ -135,8 +135,10 @@ static int8_t *client_load_raw_file(const char *filename_only, int *out_size);
 #endif
 static inline bool component_valid(int id);
 static inline Component *component_get(int id);
+static void useMenuOption(Client *cl, int optionId);
 static void handleControllerTabInput(Client *c);
 static void handleControllerButtonInput(Client *c);
+static void controller_settings_draw(Client *c);
 static void virtual_keyboard_maybe_open(Client *c, int target);
 static void virtual_keyboard_close(Client *c, bool submit);
 static void virtual_keyboard_handle_input(Client *c);
@@ -2292,6 +2294,7 @@ void showContextMenu(Client *c) {
         }
 
         c->menu_visible = true;
+        c->controller_menu_index = c->menu_size - 1;
         c->menu_area = 0;
         c->menu_x = x;
         c->menu_y = y;
@@ -2314,6 +2317,7 @@ void showContextMenu(Client *c) {
         }
 
         c->menu_visible = true;
+        c->controller_menu_index = c->menu_size - 1;
         c->menu_area = 1;
         c->menu_x = x;
         c->menu_y = y;
@@ -2336,6 +2340,7 @@ void showContextMenu(Client *c) {
         }
 
         c->menu_visible = true;
+        c->controller_menu_index = c->menu_size - 1;
         c->menu_area = 2;
         c->menu_x = x;
         c->menu_y = y;
@@ -4386,7 +4391,7 @@ static void handleMouseInput(Client *c) {
     }
 
     if (c->menu_visible) {
-        if (button != 1) {
+        if (button != 1 && c->controller_menu_index < 0) {
             int x = c->shell->mouse_x;
             int y = c->shell->mouse_y;
 
@@ -4444,6 +4449,7 @@ static void handleMouseInput(Client *c) {
             }
 
             c->menu_visible = false;
+            c->controller_menu_index = -1;
             if (c->menu_area == 1) {
                 c->redraw_sidebar = true;
             } else if (c->menu_area == 2) {
@@ -4627,6 +4633,9 @@ static void handleControllerTabInput(Client *c) {
 
     int step = c->controller_tab_step;
     c->controller_tab_step = 0;
+    if (c->controller_settings_visible || c->virtual_keyboard_visible || c->menu_visible) {
+        return;
+    }
 
     int next = c->selected_tab;
     for (int tries = 0; tries < 14; tries++) {
@@ -4644,6 +4653,92 @@ static void handleControllerTabInput(Client *c) {
 // one-shot/level field). Each button's real-world meaning lives here, platform-agnostically -
 // ps2.c only knows about hardware bits, never about tabs/camera/chat.
 static void handleControllerButtonInput(Client *c) {
+    if (c->controller_settings_pressed) {
+        c->controller_settings_pressed = false;
+        if (c->ingame && !c->virtual_keyboard_visible) {
+            c->controller_settings_visible = !c->controller_settings_visible;
+            c->controller_settings_row = 0;
+            if (c->controller_settings_visible && c->menu_visible) {
+                c->menu_visible = false;
+                c->controller_menu_index = -1;
+            }
+        }
+    }
+
+    if (c->controller_settings_visible) {
+        int dpad_x = c->controller_dpad_x;
+        int dpad_y = c->controller_dpad_y;
+        c->controller_dpad_x = 0;
+        c->controller_dpad_y = 0;
+
+        if (dpad_y != 0) {
+            c->controller_settings_row += dpad_y;
+            if (c->controller_settings_row < 0) c->controller_settings_row = 0;
+            if (c->controller_settings_row > 3) c->controller_settings_row = 3;
+        }
+        if (dpad_x != 0) {
+            if (c->controller_settings_row == 0) {
+                c->controller_cursor_deadzone += dpad_x * 4;
+                if (c->controller_cursor_deadzone < 4) c->controller_cursor_deadzone = 4;
+                if (c->controller_cursor_deadzone > 48) c->controller_cursor_deadzone = 48;
+            } else if (c->controller_settings_row == 1) {
+                c->controller_cursor_speed += dpad_x;
+                if (c->controller_cursor_speed < 2) c->controller_cursor_speed = 2;
+                if (c->controller_cursor_speed > 10) c->controller_cursor_speed = 10;
+            } else if (c->controller_settings_row == 2) {
+                c->controller_camera_deadzone += dpad_x * 4;
+                if (c->controller_camera_deadzone < 16) c->controller_camera_deadzone = 16;
+                if (c->controller_camera_deadzone > 64) c->controller_camera_deadzone = 64;
+            }
+        }
+
+        if (c->controller_confirm_pressed) {
+            c->controller_confirm_pressed = false;
+            if (c->controller_settings_row == 3) {
+                c->controller_cursor_deadzone = 20;
+                c->controller_cursor_speed = 5;
+                c->controller_camera_deadzone = 40;
+            }
+        }
+        if (c->controller_back_pressed) {
+            c->controller_back_pressed = false;
+            c->controller_settings_visible = false;
+        }
+
+        c->controller_inventory_pressed = false;
+        c->controller_snap_camera_pressed = false;
+        c->controller_start_pressed = false;
+        c->controller_zoom_bias = 0;
+        return;
+    }
+
+    if (c->menu_visible) {
+        if (c->controller_dpad_y != 0) {
+            if (c->controller_menu_index < 0 || c->controller_menu_index >= c->menu_size) {
+                c->controller_menu_index = c->menu_size - 1;
+            }
+            // Menu storage is bottom-to-top; visual Down therefore decrements the option index.
+            c->controller_menu_index -= c->controller_dpad_y;
+            if (c->controller_menu_index < 0) c->controller_menu_index = c->menu_size - 1;
+            if (c->controller_menu_index >= c->menu_size) c->controller_menu_index = 0;
+            c->controller_dpad_y = 0;
+            c->controller_dpad_x = 0;
+        }
+        if (c->controller_confirm_pressed) {
+            c->controller_confirm_pressed = false;
+            int option = c->controller_menu_index;
+            if (option < 0 || option >= c->menu_size) option = c->menu_size - 1;
+            c->menu_visible = false;
+            c->controller_menu_index = -1;
+            if (c->menu_area == 1) c->redraw_sidebar = true;
+            if (c->menu_area == 2) c->redraw_chatback = true;
+            if (option >= 0) useMenuOption(c, option);
+            return;
+        }
+    } else {
+        c->controller_confirm_pressed = false;
+    }
+
     if (c->controller_inventory_pressed) {
         c->controller_inventory_pressed = false;
         if (c->tab_interface_id[3] != -1) {
@@ -4693,6 +4788,7 @@ static void handleControllerButtonInput(Client *c) {
             c->controller_back_pressed = false;
             if (c->menu_visible) {
                 c->menu_visible = false;
+                c->controller_menu_index = -1;
             } else if (c->modal_message[0]) {
                 c->modal_message[0] = '\0';
                 c->redraw_chatback = true;
@@ -4847,18 +4943,17 @@ static void virtual_keyboard_close(Client *c, bool submit) {
 }
 
 static void virtual_keyboard_handle_input(Client *c) {
-    // These one-shots are consumed exactly once per tick regardless of visibility, so a stale
-    // press from before the keyboard opened (or after it closed) never leaks into a later session.
+    if (!c->virtual_keyboard_visible) {
+        c->controller_keyboard_confirm_pressed = false;
+        return;
+    }
+
     int dpad_x = c->controller_dpad_x;
     int dpad_y = c->controller_dpad_y;
     c->controller_dpad_x = 0;
     c->controller_dpad_y = 0;
     bool confirm = c->controller_keyboard_confirm_pressed;
     c->controller_keyboard_confirm_pressed = false;
-
-    if (!c->virtual_keyboard_visible) {
-        return;
-    }
 
     // The left-stick-driven cursor (shell->mouse_x/mouse_y) hovers a cell just by being inside
     // it - converges on the same cursor_row/cursor_col the D-pad drives, so either input method
@@ -9567,6 +9662,10 @@ void client_draw(Client *c) {
         c->drag_cycles = 0;
     }
 
+    if (c->controller_settings_visible && c->ingame) {
+        controller_settings_draw(c);
+    }
+
     // On-screen virtual keyboard overlay (see gameshell.h's has_keyboard) - drawn last so it
     // paints over the 3D scene, sidebar, chatback, and any context menu regardless of which of
     // the two branches above ran, matching how both the login screen and in-game chat need it.
@@ -9575,7 +9674,7 @@ void client_draw(Client *c) {
     }
 
 #if !defined(__PS2__) || (!PS2_NULL_UI && !PS2_SAFE_INTERFACE)
-    if (!c->shell->has_keyboard) {
+    if (!c->shell->has_keyboard && !c->controller_settings_visible) {
         virtual_cursor_draw(c);
     }
 #endif
@@ -9612,6 +9711,51 @@ static void client_draw_ps2_safe_ui(Client *c) {
     _Pix3D.line_offset = c->area_viewport_offsets;
 }
 #endif
+
+
+static void controller_settings_draw(Client *c) {
+    pixmap_bind(c->area_viewport);
+    _Pix3D.line_offset = c->area_viewport_offsets;
+
+    const int x = 92;
+    const int y = 54;
+    const int w = 328;
+    const int h = 218;
+    pix2d_fill_rect(x, y, 0x20252d, w, h);
+    pix2d_draw_rect(x, y, WHITE, w, h);
+    pix2d_fill_rect(x + 1, y + 1, 0x303946, w - 2, 25);
+    drawStringTaggableCenter(c->font_bold12, "PlayStation 2 Controller Settings", x + w / 2, y + 18, WHITE, true);
+
+    const char *labels[4] = {
+        "Left stick deadzone",
+        "Cursor speed",
+        "Right stick deadzone",
+        "Reset defaults"
+    };
+    char value[32];
+    for (int row = 0; row < 4; row++) {
+        int rowY = y + 52 + row * 31;
+        int color = row == c->controller_settings_row ? YELLOW : WHITE;
+        if (row == 0) {
+            snprintf(value, sizeof(value), "%d", c->controller_cursor_deadzone);
+        } else if (row == 1) {
+            snprintf(value, sizeof(value), "%d", c->controller_cursor_speed);
+        } else if (row == 2) {
+            snprintf(value, sizeof(value), "%d", c->controller_camera_deadzone);
+        } else {
+            strcpy(value, "X");
+        }
+        if (row == c->controller_settings_row) {
+            pix2d_fill_rect(x + 12, rowY - 15, 0x394757, w - 24, 22);
+        }
+        drawString(c->font_plain12, x + 22, rowY, labels[row], color);
+        drawStringTaggable(c->font_bold12, x + w - 62, rowY, value, color, true);
+    }
+
+    drawStringTaggableCenter(c->font_plain12, "D-Pad: Navigate / Adjust", x + w / 2, y + h - 34, 0xc0c0c0, true);
+    drawStringTaggableCenter(c->font_plain12, "L3 or Triangle: Close", x + w / 2, y + h - 17, 0xc0c0c0, true);
+    pixmap_draw(c->area_viewport, 4, 4);
+}
 
 void client_draw_game(Client *c) {
     if (c->redraw_background) {
@@ -12327,7 +12471,9 @@ void client_draw_menu(Client *c) {
     for (int i = 0; i < c->menu_size; i++) {
         int optionY = y + (c->menu_size - 1 - i) * 15 + 31;
         int rgb = WHITE;
-        if (mouseX > x && mouseX < x + w && mouseY > optionY - 13 && mouseY < optionY + 3) {
+        if (c->controller_menu_index == i ||
+            (c->controller_menu_index < 0 && mouseX > x && mouseX < x + w &&
+             mouseY > optionY - 13 && mouseY < optionY + 3)) {
             rgb = YELLOW;
         }
         drawStringTaggable(c->font_bold12, x + 3, optionY, c->menu_option[i], rgb, true);
@@ -12839,6 +12985,10 @@ Client *client_new(void) {
     c->in = packet_alloc(1);
     c->login = packet_alloc(1);
     c->orbit_camera_pitch = 128;
+    c->controller_menu_index = -1;
+    c->controller_cursor_deadzone = 20;
+    c->controller_cursor_speed = 5;
+    c->controller_camera_deadzone = 40;
 
     c->minimap_level = -1;
     c->sticky_chat_interface_id = -1;

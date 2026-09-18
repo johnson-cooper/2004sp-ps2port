@@ -902,6 +902,16 @@ void platform_restore_region(int x, int y, int w, int h, const uint16_t *in) {
     }
 }
 
+static int ps2_cursor_axis_step(int raw, int deadzone, int speed) {
+    int magnitude = abs(raw);
+    if (magnitude <= deadzone) return 0;
+    int range = 127 - deadzone;
+    if (range < 1) range = 1;
+    int active = magnitude - deadzone;
+    int step = 1 + active * (speed - 1) / range;
+    return raw < 0 ? -step : step;
+}
+
 void platform_poll_events(Client *c) {
     int state = padGetState(0, 0);
     if (state != PAD_STATE_STABLE && state != PAD_STATE_FINDCTP1) {
@@ -910,15 +920,19 @@ void platform_poll_events(Client *c) {
 
     padRead(0, 0, &padData);
 
-    // Left stick drives a virtual mouse cursor - TODO: no on-screen cursor sprite drawn yet.
-    // Text entry is covered by entry/client.c's on-screen virtual keyboard (see has_keyboard
-    // above) - the left stick doubles as its cursor too when the keyboard is open.
-    int dx = (padData.ljoy_h - 128) / 24;
-    int dy = (padData.ljoy_v - 128) / 24;
+    // Left stick drives the virtual cursor with user-tunable deadzone/speed. The settings overlay
+    // is intentionally pointer-free, so freeze cursor motion while it owns input.
+    int dx = 0;
+    int dy = 0;
+    if (!c->controller_settings_visible) {
+        dx = ps2_cursor_axis_step(padData.ljoy_h - 128, c->controller_cursor_deadzone, c->controller_cursor_speed);
+        dy = ps2_cursor_axis_step(padData.ljoy_v - 128, c->controller_cursor_deadzone, c->controller_cursor_speed);
+    }
     if (dx != 0 || dy != 0) {
         c->shell->mouse_x = MAX(0, MIN(SCREEN_WIDTH - 1, c->shell->mouse_x + dx));
         c->shell->mouse_y = MAX(0, MIN(SCREEN_HEIGHT - 1, c->shell->mouse_y + dy));
         c->shell->idle_cycles = 0;
+        if (c->menu_visible) c->controller_menu_index = -1;
 
         if (_InputTracking.enabled) {
             inputtracking_mouse_moved(&_InputTracking, c->shell->mouse_x, c->shell->mouse_y);
@@ -933,10 +947,9 @@ void platform_poll_events(Client *c) {
 
     if (cross && !cross_was_down) {
         if (c->virtual_keyboard_visible) {
-            // Keyboard intercepts Cross entirely while open, instead of the normal click path -
-            // otherwise a key commit at these screen coordinates could also land on whatever UI
-            // happens to be underneath the overlay (e.g. the login screen's buttons).
             c->controller_keyboard_confirm_pressed = true;
+        } else if (c->controller_settings_visible || c->menu_visible) {
+            c->controller_confirm_pressed = true;
         } else {
             c->shell->mouse_click_x = c->shell->mouse_x;
             c->shell->mouse_click_y = c->shell->mouse_y;
@@ -979,16 +992,15 @@ void platform_poll_events(Client *c) {
     // whereas re-deriving a second velocity curve from raw stick magnitude would just be a second,
     // uncoordinated easing curve stacked on top of the existing one for no real benefit (the
     // existing targets are small, +-24 yaw / +-12 pitch out of a 2048-unit circle).
-    // Deadzone +-40 (of 0-255, center 128): comfortably outside real analog stick idle drift while
-    // still reachable well short of full deflection. Independent per axis, matching how ljoy_h/v
-    // are already handled for the cursor above (not a circular deadzone).
-    const int CAM_DEADZONE = 40;
+    // Right-stick camera keeps the existing eased camera path, but its per-axis deadzone is now
+    // controller-configurable. Freeze it while the settings overlay is open.
+    int camera_deadzone = c->controller_camera_deadzone;
     int rh = padData.rjoy_h - 128;
     int rv = padData.rjoy_v - 128;
-    c->shell->action_key[1] = rh < -CAM_DEADZONE ? 1 : 0; // yaw left
-    c->shell->action_key[2] = rh > CAM_DEADZONE ? 1 : 0;  // yaw right
-    c->shell->action_key[3] = rv < -CAM_DEADZONE ? 1 : 0; // pitch up (zoom in/tilt down)
-    c->shell->action_key[4] = rv > CAM_DEADZONE ? 1 : 0;  // pitch down (zoom out/tilt up)
+    c->shell->action_key[1] = !c->controller_settings_visible && rh < -camera_deadzone ? 1 : 0;
+    c->shell->action_key[2] = !c->controller_settings_visible && rh > camera_deadzone ? 1 : 0;
+    c->shell->action_key[3] = !c->controller_settings_visible && rv < -camera_deadzone ? 1 : 0;
+    c->shell->action_key[4] = !c->controller_settings_visible && rv > camera_deadzone ? 1 : 0;
 
     // L1/R1 cycle sidebar tabs (see handleControllerTabInput() in entry/client.c) - edge-detected
     // (not level, unlike the camera above) so holding the button doesn't rapid-fire tab changes;
@@ -1013,7 +1025,8 @@ void platform_poll_events(Client *c) {
     bool square = !(padData.btns & PAD_SQUARE);
     bool select = !(padData.btns & PAD_SELECT);
     bool start = !(padData.btns & PAD_START);
-    static bool triangle_was_down = false, square_was_down = false, select_was_down = false, start_was_down = false;
+    bool l3 = !(padData.btns & PAD_L3);
+    static bool triangle_was_down = false, square_was_down = false, select_was_down = false, start_was_down = false, l3_was_down = false;
     if (triangle && !triangle_was_down) {
         c->controller_back_pressed = true;
     }
@@ -1026,19 +1039,23 @@ void platform_poll_events(Client *c) {
     if (start && !start_was_down) {
         c->controller_start_pressed = true;
     }
+    if (l3 && !l3_was_down) {
+        c->controller_settings_pressed = true;
+    }
     triangle_was_down = triangle;
     square_was_down = square;
     select_was_down = select;
     start_was_down = start;
+    l3_was_down = l3;
 
     // L2/R2 - fine zoom, held (level, not edge) since it's a continuous nudge rather than a
     // discrete action. Independent of the right stick's pitch-based zoom, for finer control.
     bool l2 = !(padData.btns & PAD_L2);
     bool r2 = !(padData.btns & PAD_R2);
-    c->controller_zoom_bias = r2 ? 1 : (l2 ? -1 : 0);
+    c->controller_zoom_bias = c->controller_settings_visible ? 0 : (r2 ? 1 : (l2 ? -1 : 0));
 
-    // D-pad - only meaningful to the virtual keyboard's grid navigation (dead input otherwise);
-    // edge-detected like the tab triggers above, one step per press.
+    // D-pad is routed contextually by the client: virtual keyboard, context menus, and PS2
+    // controller settings all use the same one-shot direction fields.
     bool dpad_up = !(padData.btns & PAD_UP);
     bool dpad_down = !(padData.btns & PAD_DOWN);
     bool dpad_left = !(padData.btns & PAD_LEFT);

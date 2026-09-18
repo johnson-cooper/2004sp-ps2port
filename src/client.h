@@ -250,13 +250,17 @@ struct Client {
     bool controller_start_pressed;    // one-shot: Start, open chat keyboard / submit active keyboard
     bool controller_back_pressed;     // one-shot: Triangle, close topmost modal/menu (or backspace if keyboard open)
     int controller_zoom_bias;         // signed, from L2/R2 hold: negative=zoom out, positive=zoom in
-    int controller_dpad_x;            // -1/0/+1, one-shot: D-pad, consumed by the virtual keyboard's grid navigation only
+    int controller_dpad_x;            // -1/0/+1, one-shot: D-pad; keyboard/menu/settings consume it contextually
     int controller_dpad_y;
-    bool controller_keyboard_confirm_pressed; // one-shot: Cross, but ONLY while the virtual keyboard
-                                               // is visible (see ps2.c) - kept separate from the
-                                               // normal mouse_click_button path so a keyboard commit
-                                               // can never also register as a click on whatever UI
-                                               // happens to sit underneath the overlay.
+    bool controller_keyboard_confirm_pressed; // Cross while the on-screen keyboard owns input
+    bool controller_confirm_pressed;  // Cross while a controller-native menu/settings overlay owns input
+    bool controller_settings_pressed; // L3 one-shot: toggle PS2 controller settings
+    bool controller_settings_visible;
+    int controller_settings_row;
+    int controller_menu_index;        // context-menu option index; -1 hands highlight back to pointer
+    int controller_cursor_deadzone;   // left stick per-axis deadzone, 0..127 units around center
+    int controller_cursor_speed;      // virtual cursor max pixels/tick
+    int controller_camera_deadzone;   // right stick per-axis deadzone
 
     // On-screen virtual keyboard (see gameshell.h's has_keyboard) - the only way a controller-only
     // player can enter text. State lives here (not a separate file) since every operation needs
