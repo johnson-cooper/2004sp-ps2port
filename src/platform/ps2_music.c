@@ -866,6 +866,9 @@ void ps2_audio_update_late(void)
     }
 
     if (!ps2_music_state.ready) {
+        if (ps2_music_state.init_polls == UINT32_MAX) {
+            return;
+        }
         if (++ps2_music_state.init_polls < 251) {
             return;
         }
