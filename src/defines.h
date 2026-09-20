@@ -81,8 +81,12 @@
 // Terrain residency remains the traversal-good 80x80 (12..91), while static loc/model residency stays
 // at the lighter 72x72 window. These residency limits are intentionally unchanged by this experiment.
 #define PS2_RENDER_RADIUS 18
-#define PS2_RENDER_BACK_MARGIN 2
-#define PS2_RENDER_SIDE_MARGIN 4
+// Slightly relax the camera-facing visibility wedge. The previous 2-tile rear / 4-tile side
+// guard could reject a wall's owning tile while part of the wall was still visibly crossing the
+// screen near oblique camera angles. These small margins keep that edge geometry alive without
+// returning to the expensive radius-18 square.
+#define PS2_RENDER_BACK_MARGIN 3
+#define PS2_RENDER_SIDE_MARGIN 6
 // Dense-scene test: keep all active/actionable map locs at the full camera radius, but stop sending
 // distant inactive scenery into the expensive EE model transform/sort/raster path. Walls remain
 // uncapped by these detail radii so buildings retain their silhouette; collision is completely

@@ -1,11 +1,3 @@
-#if defined(__PS2__) && defined(__GNUC__)
-// Keep the project-wide PS2 baseline at -O1, but compile this renderer translation unit at -O2
-// as an isolated hardware experiment. model_impl.inc is included below, so its model transform,
-// face classification, depth sorting and raster submission code receives the same local setting.
-#pragma GCC push_options
-#pragma GCC optimize ("O2")
-#endif
-
 /*
  * Renderer safety wrapper.
  *
@@ -529,6 +521,3 @@ void model_draw2(Model *m, bool projected, bool hasInput, int bitset) {
         priority_depth = priority_face < priority_face_count ? priorities[priority_face] : -1000;
     }
 }
-#if defined(__PS2__) && defined(__GNUC__)
-#pragma GCC pop_options
-#endif
