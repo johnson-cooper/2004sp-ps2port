@@ -199,3 +199,19 @@ After ingame + scene_state == 2 remains true for 250 polls, ps2_music_update() p
 SifLoadStartModule() of rs2midi.irx from the install/cache prefix. There is no EE-side RPC bind or
 PING in this milestone. This isolates whether a minimally invasive external module load can coexist
 with networking while leaving the PS2 platform/network translation unit unchanged.
+
+
+## Milestone 3E: stop audio changes and diagnose ELF-layout sensitivity
+
+Milestone 3D also failed before rs2midi could be loaded. The only runtime source difference from the
+hardware-good 548b27c checkpoint was the replacement of the existing no-op ps2_music_update() stub.
+That is enough evidence to stop treating the pre-login regression as an rs2midi runtime problem.
+
+The runtime is restored to the exact 548b27c ps2_music.c behavior. A host-only tool,
+`tools/ps2_elf_compare.ps1`, compares a known-good client.elf with a failing client.elf using the
+EE toolchain's size/readelf/nm/objdump utilities. It reports hashes, section addresses/sizes, program
+headers, `_end`, `errno`, and selected network/runtime symbols.
+
+The comparison tool is not part of any PS2Build source glob and therefore cannot affect client.elf.
+Do not resume MIDI integration until the reason tiny EE binary changes break pre-login networking is
+understood or the ELF layout is made robust.
