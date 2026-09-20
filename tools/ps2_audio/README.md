@@ -25,6 +25,32 @@ Usage:
 py -3 tools\ps2_audio\sf2_to_ps2bank.py "Older RuneScape.sf2" build\audio\soundfont
 ```
 
+
+## Compact runtime MIDI bank
+
+The hardware sequencer uses eight tiny SPU2-resident timbre slots. To replace the
+synthetic fallback bank with real timbres derived from the repository SoundFont,
+run from the repository root:
+
+```bat
+prepare-ps2-midi-bank.bat
+ps2build build
+```
+
+`prepare-ps2-midi-bank.bat` reads `rom/SCC1_Florestan.sf2` and regenerates
+`src/platform/ps2_midi_bank.c`. The generator uses the existing SoundFont zone
+resolver, selects one representative bank-0 General MIDI preset per 16-program
+family, extracts a stable periodic waveform, normalizes it, and encodes it with
+the same PS2SDK-compatible ADPCM encoder used elsewhere in this directory.
+
+The runtime footprint intentionally remains fixed at eight 720-byte raw SPU2
+samples (5,760 bytes total). SoundFont parsing and resampling never run on the
+PS2 EE.
+
+The generated C file is source input to the normal `ps2build build`. The
+external `rs2midi.irx` does not need to be rebuilt solely because the sample
+bytes changed, although a normal full build may rebuild it anyway.
+
 ## MIDI -> PS2 sequence
 
 `midi_to_ps2seq.py` is dependency-free. It parses Standard MIDI Files, merges all tracks,

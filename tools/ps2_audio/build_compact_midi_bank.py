@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""Build the tiny runtime PS2 MIDI bank from the repository SoundFont.
+
+This deliberately does all SoundFont parsing/resampling/ADPCM encoding on the
+host. The PS2 runtime keeps only eight 720-byte SPU2 ADPCM wavetables.
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+from pathlib import Path
+
+from build_title_music import SoundFontResolver
+from ps2_adpcm import base_pitch, encode_mono_pcm16
+
+SLOT_COUNT = 8
+OUTPUT_RATE = 22050
+OUTPUT_SAMPLES = 1232          # 44 SPU2 ADPCM data frames
+OUTPUT_CYCLES = 37             # exact loop count; ~662.2 Hz at 22050 Hz
+BASE_NOTE = 76                 # E5, matches ps2_music.c
+
+# Representative GM presets for the eight 16-program families used by the
+# hardware sequencer. If a SoundFont lacks the preferred preset, the first
+# bank-0 preset in that 16-program family is used instead.
+PREFERRED_PROGRAMS = (
+    0,    # Acoustic Grand Piano
+    24,   # Acoustic Guitar (nylon)
+    40,   # Violin
+    56,   # Trumpet
+    73,   # Flute
+    80,   # Lead 1 (square)
+    104,  # Sitar
+    112,  # Tinkle Bell
+)
+
+REFERENCE_NOTES = (60, 64, 67, 69, 72, 55, 48, 76)
+REFERENCE_VELOCITY = 100
+TARGET_PEAK = 0.70
+
+
+def _preset_for_slot(resolver: SoundFontResolver, slot: int) -> tuple[int, str]:
+    preferred = PREFERRED_PROGRAMS[slot]
+    preset = resolver.presets.get((0, preferred))
+    if preset is not None:
+        return preferred, preset[0]
+
+    lo = slot * 16
+    hi = lo + 15
+    candidates = sorted(
+        (program, name_zones[0])
+        for (bank, program), name_zones in resolver.presets.items()
+        if bank == 0 and lo <= program <= hi
+    )
+    if not candidates:
+        # Resolver itself falls back to bank 0/program 0, but fail here so a
+        # malformed/incomplete SoundFont cannot silently duplicate every slot.
+        raise ValueError(f"SoundFont has no bank-0 preset in GM family {lo}..{hi}")
+    return candidates[0]
+
+
+def _region_for_program(resolver: SoundFontResolver, program: int):
+    choices = []
+    for note in REFERENCE_NOTES:
+        regions = resolver.resolve(0, program, note, REFERENCE_VELOCITY)
+        for region in regions:
+            # Prefer a true SoundFont sustain loop, then a centered/quietly
+            # attenuated mono region. Stereo-linked regions remain usable; one
+            # side is enough for this tiny mono hardware bank.
+            score = (
+                0 if region.looping else 1,
+                abs(region.pan),
+                region.attenuation,
+                abs(note - 64),
+            )
+            choices.append((score, note, region))
+        if choices and any(item[2].looping for item in choices):
+            break
+
+    if not choices:
+        raise ValueError(f"no playable SoundFont region for program {program}")
+
+    choices.sort(key=lambda item: item[0])
+    _score, note, region = choices[0]
+    return note, region
+
+
+def _stored_fundamental(region) -> float:
+    """Approximate the PCM's fundamental when played at region.sample_rate."""
+    tuning_cents = (
+        region.coarse_tune * 100.0
+        + region.fine_tune
+        + region.correction
+    )
+    nominal = 440.0 * (2.0 ** ((region.root_key - 69) / 12.0))
+    return nominal * (2.0 ** (-tuning_cents / 1200.0))
+
+
+def _best_period(pcm, region) -> tuple[int, int, int]:
+    """Return (period_samples, stable_start, stable_end)."""
+    if len(pcm) < 64:
+        raise ValueError("SoundFont region is too short for wavetable extraction")
+
+    if region.looping:
+        lo = max(0, region.loop_start - region.start)
+        hi = min(len(pcm), region.loop_end - region.start)
+    else:
+        lo = min(len(pcm) // 5, max(0, len(pcm) - 64))
+        hi = len(pcm)
+
+    if hi - lo < 64:
+        lo, hi = 0, len(pcm)
+
+    fundamental = _stored_fundamental(region)
+    if fundamental <= 1.0:
+        raise ValueError("invalid SoundFont sample tuning")
+
+    estimate = region.sample_rate / fundamental
+    pmin = max(8, int(math.floor(estimate * 0.82)))
+    pmax = max(pmin, int(math.ceil(estimate * 1.18)))
+
+    # Use a stable area near the beginning of the SoundFont loop/sustain.
+    anchor = lo
+    available = hi - anchor
+
+    best = None
+    for period in range(pmin, pmax + 1):
+        pairs = min(8, available // period - 1)
+        if pairs < 2:
+            continue
+
+        error = 0.0
+        signal = 0.0
+        count = pairs * period
+        for i in range(count):
+            a = float(pcm[anchor + i])
+            z = float(pcm[anchor + i + period])
+            d = a - z
+            error += d * d
+            signal += a * a
+
+        normalized = error / max(signal, 1.0)
+        candidate = (normalized, abs(period - estimate), period)
+        if best is None or candidate < best:
+            best = candidate
+
+    if best is None:
+        period = max(8, min(pmax, int(round(estimate))))
+    else:
+        period = best[2]
+
+    return period, anchor, hi
+
+
+def _average_cycle(pcm, period: int, anchor: int, end: int) -> list[float]:
+    cycle_count = min(12, (end - anchor) // period)
+    if cycle_count < 1:
+        raise ValueError("not enough stable PCM for one cycle")
+
+    cycle = [0.0] * period
+    for c in range(cycle_count):
+        base = anchor + c * period
+        for i in range(period):
+            cycle[i] += pcm[base + i]
+
+    inv = 1.0 / cycle_count
+    cycle = [v * inv for v in cycle]
+
+    # Remove DC so the tiny loop does not waste headroom or click around zero.
+    mean = sum(cycle) / len(cycle)
+    return [v - mean for v in cycle]
+
+
+def _sample_cycle(cycle: list[float], phase: float) -> float:
+    pos = phase * len(cycle)
+    i0 = int(pos) % len(cycle)
+    i1 = (i0 + 1) % len(cycle)
+    frac = pos - math.floor(pos)
+    return cycle[i0] * (1.0 - frac) + cycle[i1] * frac
+
+
+def _make_wavetable(cycle: list[float]) -> list[int]:
+    out = []
+    peak = 0.0
+
+    for n in range(OUTPUT_SAMPLES):
+        phase = ((n * OUTPUT_CYCLES) % OUTPUT_SAMPLES) / OUTPUT_SAMPLES
+        value = _sample_cycle(cycle, phase)
+        out.append(value)
+        peak = max(peak, abs(value))
+
+    if peak < 1.0:
+        raise ValueError("extracted SoundFont cycle is effectively silent")
+
+    gain = TARGET_PEAK * 32767.0 / peak
+    return [
+        max(-32768, min(32767, int(round(v * gain))))
+        for v in out
+    ]
+
+
+def _raw_adpcm(pcm: list[int]) -> bytes:
+    encoded = encode_mono_pcm16(
+        pcm,
+        OUTPUT_RATE,
+        loop_start_sample=0,
+        loop_end_sample=len(pcm),
+    )
+    raw = encoded[16:]  # runtime slots contain raw SPU2 frames, not APCM header
+    if len(raw) != 720:
+        raise ValueError(f"expected 720 raw ADPCM bytes, got {len(raw)}")
+    return raw
+
+
+def _c_bytes(blob: bytes, indent: str = "        ") -> str:
+    rows = []
+    for pos in range(0, len(blob), 16):
+        row = ", ".join(f"0x{value:02x}" for value in blob[pos:pos + 16])
+        rows.append(indent + row)
+    return ",\n".join(rows)
+
+
+def build(soundfont: Path, output: Path) -> None:
+    resolver = SoundFontResolver(soundfont)
+    slots = []
+
+    for slot in range(SLOT_COUNT):
+        program, preset_name = _preset_for_slot(resolver, slot)
+        reference_note, region = _region_for_program(resolver, program)
+        pcm = resolver.pcm_for(region)
+
+        period, anchor, stable_end = _best_period(pcm, region)
+        cycle = _average_cycle(pcm, period, anchor, stable_end)
+        wavetable = _make_wavetable(cycle)
+        raw = _raw_adpcm(wavetable)
+
+        slots.append((program, preset_name, reference_note, region, period, raw))
+        print(
+            f"slot {slot}: program={program:3d} {preset_name!r} "
+            f"sample={region.sample_id} root={region.root_key} "
+            f"rate={region.sample_rate} period={period} loop={region.looping}"
+        )
+
+    target_freq = 440.0 * (2.0 ** ((BASE_NOTE - 69) / 12.0))
+    wavetable_freq = OUTPUT_RATE * OUTPUT_CYCLES / OUTPUT_SAMPLES
+    corrected_pitch = int(round(
+        base_pitch(OUTPUT_RATE) * target_freq / wavetable_freq
+    ))
+    corrected_pitch = max(1, min(0x3FFF, corrected_pitch))
+
+    lines = [
+        '#include "ps2_midi_bank.h"',
+        "",
+        "#ifdef __PS2__",
+        '#define PS2_MIDI_BANK_RODATA __attribute__((section(".ps2_audio_rodata"), used))',
+        "#else",
+        "#define PS2_MIDI_BANK_RODATA",
+        "#endif",
+        "",
+        "/*",
+        " * Compact SoundFont-derived PS2 MIDI bank.",
+        " *",
+        " * GENERATED by tools/ps2_audio/build_compact_midi_bank.py from",
+        f" * {soundfont.as_posix()}. Do not hand-edit sample bytes.",
+        " *",
+        " * Each slot is a seamless 37-cycle wavetable extracted from a real",
+        " * SCC1_Florestan preset, then encoded with the PS2SDK-compatible",
+        " * ADPCM predictor. Runtime size remains 8 x 720 bytes.",
+        " */",
+        "const unsigned char ps2_midi_bank_adpcm[PS2_MIDI_BANK_SAMPLE_COUNT][PS2_MIDI_BANK_SAMPLE_BYTES]",
+        "    PS2_MIDI_BANK_RODATA __attribute__((aligned(64))) = {",
+    ]
+
+    for slot, (program, name, note, region, period, raw) in enumerate(slots):
+        safe_name = name.replace("*/", "* /")
+        lines += [
+            f"    /* {slot}: GM {program} {safe_name} (source note {note}, sample {region.sample_id}, period {period}) */",
+            "    {",
+            _c_bytes(raw),
+            "    }" + ("," if slot + 1 < SLOT_COUNT else ""),
+        ]
+
+    lines += [
+        "};",
+        "",
+        "const unsigned int ps2_midi_bank_base_pitch",
+        f"    PS2_MIDI_BANK_RODATA __attribute__((aligned(4))) = {corrected_pitch}u;",
+        "",
+    ]
+
+    output.write_text("\n".join(lines), encoding="utf-8")
+    print(f"base note/pitch: {BASE_NOTE} / {corrected_pitch}")
+    print(f"bank payload:    {SLOT_COUNT * 720:,} bytes")
+    print(f"wrote:           {output}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "soundfont",
+        nargs="?",
+        type=Path,
+        default=Path("rom/SCC1_Florestan.sf2"),
+    )
+    parser.add_argument(
+        "output",
+        nargs="?",
+        type=Path,
+        default=Path("src/platform/ps2_midi_bank.c"),
+    )
+    args = parser.parse_args()
+
+    if not args.soundfont.is_file():
+        raise SystemExit(f"SoundFont not found: {args.soundfont}")
+
+    build(args.soundfont, args.output)
+
+
+if __name__ == "__main__":
+    main()
