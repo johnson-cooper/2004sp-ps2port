@@ -147,6 +147,13 @@ static void virtual_keyboard_handle_input(Client *c);
 static void virtual_keyboard_draw(Client *c);
 static void virtual_cursor_draw(Client *c);
 
+// The stock chatback is always composited at this full-screen origin. Dialogue D-pad navigation is
+// platform-agnostic controller logic, so keep these geometry constants available on every build.
+#define CONTROLLER_CHATBACK_SCREEN_X 17
+#define CONTROLLER_CHATBACK_SCREEN_Y 357
+#define CONTROLLER_CHATBACK_WIDTH 479
+#define CONTROLLER_CHATBACK_HEIGHT 96
+
 #ifdef __PS2__
 // See platform_save_region()/platform_restore_region() in platform/ps2.c - used by
 // virtual_cursor_draw() below to avoid leaving a permanent cursor trail on panels that don't
@@ -167,8 +174,6 @@ static void ps2_runtime_checkpoint(Client *c, const char *status);
 #define PS2_CHAT_BUTTON_Y 79
 #define PS2_CHAT_BUTTON_W 58
 #define PS2_CHAT_BUTTON_H 16
-#define PS2_CHATBACK_SCREEN_X 17
-#define PS2_CHATBACK_SCREEN_Y 357
 #endif
 
 #ifdef __PS2__
@@ -4429,10 +4434,10 @@ static void handleMouseInput(Client *c) {
         !c->show_social_input &&
         !c->chatback_input_open &&
         !c->modal_message[0] &&
-        c->shell->mouse_click_x >= PS2_CHATBACK_SCREEN_X + PS2_CHAT_BUTTON_X &&
-        c->shell->mouse_click_x <  PS2_CHATBACK_SCREEN_X + PS2_CHAT_BUTTON_X + PS2_CHAT_BUTTON_W &&
-        c->shell->mouse_click_y >= PS2_CHATBACK_SCREEN_Y + PS2_CHAT_BUTTON_Y &&
-        c->shell->mouse_click_y <  PS2_CHATBACK_SCREEN_Y + PS2_CHAT_BUTTON_Y + PS2_CHAT_BUTTON_H) {
+        c->shell->mouse_click_x >= CONTROLLER_CHATBACK_SCREEN_X + PS2_CHAT_BUTTON_X &&
+        c->shell->mouse_click_x <  CONTROLLER_CHATBACK_SCREEN_X + PS2_CHAT_BUTTON_X + PS2_CHAT_BUTTON_W &&
+        c->shell->mouse_click_y >= CONTROLLER_CHATBACK_SCREEN_Y + PS2_CHAT_BUTTON_Y &&
+        c->shell->mouse_click_y <  CONTROLLER_CHATBACK_SCREEN_Y + PS2_CHAT_BUTTON_Y + PS2_CHAT_BUTTON_H) {
         c->shell->mouse_click_button = 0;
         virtual_keyboard_maybe_open(c, 2);
         return;
@@ -4729,8 +4734,8 @@ static void controller_dialogue_add_target(ControllerDialogueTarget *targets, in
     // children can otherwise become selectable even though the player cannot see them.
     int right = x + component->width;
     int bottom = y + component->height;
-    if (right <= PS2_CHATBACK_SCREEN_X || x >= PS2_CHATBACK_SCREEN_X + 479 ||
-        bottom <= PS2_CHATBACK_SCREEN_Y || y >= PS2_CHATBACK_SCREEN_Y + 96) {
+    if (right <= CONTROLLER_CHATBACK_SCREEN_X || x >= CONTROLLER_CHATBACK_SCREEN_X + CONTROLLER_CHATBACK_WIDTH ||
+        bottom <= CONTROLLER_CHATBACK_SCREEN_Y || y >= CONTROLLER_CHATBACK_SCREEN_Y + CONTROLLER_CHATBACK_HEIGHT) {
         return;
     }
 
@@ -4788,7 +4793,7 @@ static void handleControllerDialogueInput(Client *c) {
     ControllerDialogueTarget targets[CONTROLLER_DIALOGUE_MAX_TARGETS];
     int count = 0;
     controller_dialogue_collect(component_get(c->chat_interface_id),
-                                PS2_CHATBACK_SCREEN_X, PS2_CHATBACK_SCREEN_Y, 0,
+                                CONTROLLER_CHATBACK_SCREEN_X, CONTROLLER_CHATBACK_SCREEN_Y, 0,
                                 targets, &count);
 
     int dpadX = c->controller_dpad_x;
