@@ -7655,14 +7655,14 @@ bool client_read(Client *c) {
 #endif
             _World.levelBuilt = c->currentLevel;
 #ifdef __PS2__
-            // The initial rebuild has already decoded every landscape level.
-            // On the constrained profile static locations and the minimap are
-            // deferred, so a second synchronous rebuild here only repeats
-            // terrain setup and reallocates the scene arena during a player
-            // update.  Keep the new level marker and defer that work instead.
-#else
-            client_build_scene(c);
+            // The low-memory PS2 scene only materialises the active visual plane.
+            // PLAYER_INFO can move currentLevel (stairs/ladders) without a region
+            // change, so keeping the old scene here leaves the actor at the new
+            // floor height while the old floor remains resident. Rebuild the same
+            // bounded terrain/loc window for the new plane; client_build_scene()
+            // resets and reuses the scene arena rather than retaining both floors.
 #endif
+            client_build_scene(c);
         }
         if (c->currentLevel != c->minimap_level && c->scene_state == 2) {
 #if defined(__PS2__) && PS2_DISABLE_MINIMAP
