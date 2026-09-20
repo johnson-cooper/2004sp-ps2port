@@ -61,7 +61,7 @@ Do not use GitHub Actions or an emulator result as a substitute for the real-har
 Unless a specific experiment requires otherwise:
 
 - Build locally from `ps2.yaml`.
-- Keep the EE optimization baseline at `-O1`. A dedicated `-O2` hardware test reached the title screen and then crashed on real PS2, so higher compiler optimization is currently a regression signal rather than a performance baseline. Treat lower/higher optimization levels as isolated diagnostic experiments only.
+- Keep the EE optimization baseline at `-O1`. A dedicated whole-client `-O2` hardware test reached the title screen and then crashed on real PS2. A dedicated `-O0` test booted but was noticeably slower. Therefore `-O1` remains the hardware performance/stability baseline; lower/higher optimization levels are diagnostic experiments only, and any further `-O2` work should be isolated to individual hot translation units before broader use.
 - Preserve the established DEV9/NETMAN/SMAP and USB/BDM embedded-IRX configuration/order unless new real-hardware evidence justifies changing it.
 - Do not introduce `-O3`, LTO, `-ffast-math`, aggressive aliasing assumptions, or similar compiler experiments together with feature-restoration work. Compiler tuning gets its own isolated hardware test.
 
