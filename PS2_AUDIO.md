@@ -290,3 +290,26 @@ The intended split is:
 Before hardware testing, inspect size/readelf/objdump. Do not test if .data, .rodata, or .bss moved.
 If normal sections stay put but this variant fails, the heap/image-end shift alone is sufficient.
 If it connects, the bug depends on relocation of existing globals/sections rather than only heap start.
+
+
+## Milestone 3H: move only .bss
+
+Real hardware connected and entered the world with Milestone 3G: normal sections/globals stayed at
+their hardware-good addresses while only the loaded-image end moved forward by 0x180. Therefore a
+later heap/image boundary alone is not sufficient to cause the network failure.
+
+This A/B removes the tail section and restores the exact hardware-good ps2_music.c source. The only
+linker experiment is:
+
+`-Wl,--section-start=.bss=0x00200c80`
+
+That is the .bss start address from the failing ELF. .text, .data, .rodata, .sdata and their existing
+contents should remain at the hardware-good addresses.
+
+Interpretation:
+- if networking fails, relocating .bss/global storage alone is sufficient;
+- if networking succeeds, .bss placement is safe and the next split should move .sdata/.rodata/.data
+  progressively until the sensitive region is identified.
+
+Before hardware testing, confirm .bss addr is 2100352 (0x00200c80) while .data remains 1871744 and
+.rodata remains 2047616.

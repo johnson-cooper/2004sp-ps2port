@@ -23,11 +23,11 @@ targets:
   - name: client
     type: ee
     opt: -O1
-    # Milestone 3G: force-retain one inert NOBITS tail symbol. It is never
-    # referenced at runtime; the only purpose is to extend the loaded image end
-    # by 0x180 without moving normal .text/.data/.rodata/.bss placement.
+    # Milestone 3H: move ONLY .bss to the address observed in the failing ELF.
+    # Earlier loaded sections keep their hardware-good placement; no padding
+    # object or runtime code is added.
     ldflags:
-      - -Wl,--undefined=ps2_layout_heap_tail
+      - -Wl,--section-start=.bss=0x00200c80
     sources:
       - src/*.c
       - src/entry/*.c

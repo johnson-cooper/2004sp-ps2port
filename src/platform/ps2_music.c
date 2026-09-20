@@ -34,26 +34,4 @@ void ps2_music_set_volume(float volume) {
 void ps2_music_shutdown(void) {
 }
 
-/*
- * Milestone 3G: isolate heap-boundary movement from global relocation.
- *
- * The inert 3F candidate reproduced the pre-login network failure with no
- * functional change, proving placement alone is sufficient. This variant
- * restores normal .text/.data/.rodata/.bss placement and adds one separate
- * writable NOBITS orphan section immediately after the normal image.
- *
- * The symbol is forced live by ps2.yaml, but is never referenced at runtime.
- * Expected result: all normal section addresses match the hardware-good ELF,
- * while the LOAD MemSiz / effective image end grows by 0x180.
- */
-__asm__(
-    ".section .ps2_heap_tail,\"aw\",@nobits\n"
-    ".global ps2_layout_heap_tail\n"
-    ".type ps2_layout_heap_tail,@object\n"
-    "ps2_layout_heap_tail:\n"
-    ".space 0x180\n"
-    ".size ps2_layout_heap_tail, .-ps2_layout_heap_tail\n"
-    ".previous\n"
-);
-
 #endif
