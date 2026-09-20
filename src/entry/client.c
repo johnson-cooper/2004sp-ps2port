@@ -138,6 +138,7 @@ static inline Component *component_get(int id);
 static void useMenuOption(Client *cl, int optionId);
 static void handleControllerTabInput(Client *c);
 static void handleControllerButtonInput(Client *c);
+static void handleControllerDialogueInput(Client *c);
 static void handleControllerGridInput(Client *c);
 static void controller_settings_draw(Client *c);
 static void virtual_keyboard_maybe_open(Client *c, int target);
@@ -159,6 +160,15 @@ void platform_restore_region(int x, int y, int w, int h, const uint16_t *in);
 const char *ps2_cache_prefix(void);
 static void ps2_draw_large_status(Client *c, const char *status);
 static void ps2_runtime_checkpoint(Client *c, const char *status);
+
+// Small controller-friendly button drawn inside the retained 479x96 chatback PixMap.
+// Local coordinates are converted to screen coordinates by adding the stock chatback origin.
+#define PS2_CHAT_BUTTON_X 402
+#define PS2_CHAT_BUTTON_Y 79
+#define PS2_CHAT_BUTTON_W 58
+#define PS2_CHAT_BUTTON_H 16
+#define PS2_CHATBACK_SCREEN_X 17
+#define PS2_CHATBACK_SCREEN_Y 357
 #endif
 
 #ifdef __PS2__
@@ -2049,7 +2059,7 @@ void client_handle_input(Client *c) {
 
     c->lastHoveredInterfaceId = 0;
 
-    if (c->shell->mouse_x > 17 && c->shell->mouse_y > 357 && c->shell->mouse_x < 426 && c->shell->mouse_y < 453) {
+    if (c->shell->mouse_x > 17 && c->shell->mouse_y > 357 && c->shell->mouse_x < 496 && c->shell->mouse_y < 453) {
         if (c->chat_interface_id == -1) {
             handleChatMouseInput(c, c->shell->mouse_x - 17, c->shell->mouse_y - 357);
         } else {
@@ -4407,6 +4417,28 @@ static void handleMouseInput(Client *c) {
     int button = c->shell->mouse_click_button;
     bool controller_primary = c->controller_primary_action;
     c->controller_primary_action = false;
+
+#ifdef __PS2__
+    // A visible Chat button makes text entry discoverable with the stick/cursor as well as Start.
+    // Keep it out of every modal/dialogue/input state so it can never steal an interface click.
+    if (button == 1 &&
+        c->ingame &&
+        !c->virtual_keyboard_visible &&
+        c->chat_interface_id == -1 &&
+        c->sticky_chat_interface_id == -1 &&
+        !c->show_social_input &&
+        !c->chatback_input_open &&
+        !c->modal_message[0] &&
+        c->shell->mouse_click_x >= PS2_CHATBACK_SCREEN_X + PS2_CHAT_BUTTON_X &&
+        c->shell->mouse_click_x <  PS2_CHATBACK_SCREEN_X + PS2_CHAT_BUTTON_X + PS2_CHAT_BUTTON_W &&
+        c->shell->mouse_click_y >= PS2_CHATBACK_SCREEN_Y + PS2_CHAT_BUTTON_Y &&
+        c->shell->mouse_click_y <  PS2_CHATBACK_SCREEN_Y + PS2_CHAT_BUTTON_Y + PS2_CHAT_BUTTON_H) {
+        c->shell->mouse_click_button = 0;
+        virtual_keyboard_maybe_open(c, 2);
+        return;
+    }
+#endif
+
     if (c->spell_selected == 1 && c->shell->mouse_click_x >= 516 && c->shell->mouse_click_y >= 160 && c->shell->mouse_click_x <= 765 && c->shell->mouse_click_y <= 205) {
         button = 0;
     }
@@ -4676,10 +4708,169 @@ static void handleControllerTabInput(Client *c) {
     }
 }
 
+#define CONTROLLER_DIALOGUE_MAX_TARGETS 24
+
+typedef struct {
+    Component *component;
+    int x;
+    int y;
+    int width;
+    int height;
+} ControllerDialogueTarget;
+
+static void controller_dialogue_add_target(ControllerDialogueTarget *targets, int *count,
+                                           Component *component, int x, int y) {
+    if (*count >= CONTROLLER_DIALOGUE_MAX_TARGETS || !component ||
+        component->buttonType == 0 || component->width <= 0 || component->height <= 0) {
+        return;
+    }
+
+    // Ignore buttons that are fully outside the visible chatback. Clipped/scrolling dialogue
+    // children can otherwise become selectable even though the player cannot see them.
+    int right = x + component->width;
+    int bottom = y + component->height;
+    if (right <= PS2_CHATBACK_SCREEN_X || x >= PS2_CHATBACK_SCREEN_X + 479 ||
+        bottom <= PS2_CHATBACK_SCREEN_Y || y >= PS2_CHATBACK_SCREEN_Y + 96) {
+        return;
+    }
+
+    ControllerDialogueTarget target = {component, x, y, component->width, component->height};
+
+    // Keep visual order deterministic: top-to-bottom, then left-to-right. Dialogue option indices
+    // therefore match what the player sees instead of archive component-id order.
+    int insert = *count;
+    while (insert > 0) {
+        ControllerDialogueTarget *previous = &targets[insert - 1];
+        if (previous->y < target.y ||
+            (previous->y == target.y && previous->x <= target.x)) {
+            break;
+        }
+        targets[insert] = *previous;
+        insert--;
+    }
+    targets[insert] = target;
+    (*count)++;
+}
+
+static void controller_dialogue_collect(Component *layer, int x, int y, int scrollPosition,
+                                        ControllerDialogueTarget *targets, int *count) {
+    if (!layer || layer->type != TYPE_LAYER || !layer->childId || layer->hide) {
+        return;
+    }
+
+    for (int i = 0; i < layer->childCount && *count < CONTROLLER_DIALOGUE_MAX_TARGETS; i++) {
+        Component *child = component_get(layer->childId[i]);
+        if (!child) continue;
+
+        int childX = x + layer->childX[i] + child->x;
+        int childY = y + layer->childY[i] + child->y - scrollPosition;
+
+        if (child->type == TYPE_LAYER) {
+            controller_dialogue_collect(child, childX, childY, child->scrollPosition, targets, count);
+        } else {
+            controller_dialogue_add_target(targets, count, child, childX, childY);
+        }
+    }
+}
+
+static void handleControllerDialogueInput(Client *c) {
+    if (c->chat_interface_id == -1) {
+        c->controller_dialogue_interface_id = -1;
+        c->controller_dialogue_index = 0;
+        return;
+    }
+
+    // Modal controller UI owns the D-pad first. NPC/chat interfaces resume focus as soon as it closes.
+    if (c->virtual_keyboard_visible || c->controller_settings_visible || c->menu_visible) {
+        return;
+    }
+
+    ControllerDialogueTarget targets[CONTROLLER_DIALOGUE_MAX_TARGETS];
+    int count = 0;
+    controller_dialogue_collect(component_get(c->chat_interface_id),
+                                PS2_CHATBACK_SCREEN_X, PS2_CHATBACK_SCREEN_Y, 0,
+                                targets, &count);
+
+    int dpadX = c->controller_dpad_x;
+    int dpadY = c->controller_dpad_y;
+
+    // While a chat interface is open it owns dialogue navigation, even if that particular page has
+    // no selectable child. Do not let the same D-pad edge leak into an inventory grid behind it.
+    c->controller_dpad_x = 0;
+    c->controller_dpad_y = 0;
+
+    if (count <= 0) {
+        c->controller_dialogue_interface_id = c->chat_interface_id;
+        c->controller_dialogue_index = 0;
+        return;
+    }
+
+    bool newInterface = c->controller_dialogue_interface_id != c->chat_interface_id;
+    if (newInterface) {
+        c->controller_dialogue_interface_id = c->chat_interface_id;
+        c->controller_dialogue_index = 0;
+    }
+
+    int step = dpadY != 0 ? dpadY : dpadX;
+    if (step != 0) {
+        c->controller_dialogue_index += step > 0 ? 1 : -1;
+        if (c->controller_dialogue_index < 0) {
+            c->controller_dialogue_index = count - 1;
+        } else if (c->controller_dialogue_index >= count) {
+            c->controller_dialogue_index = 0;
+        }
+    } else if (!newInterface) {
+        return;
+    }
+
+    if (c->controller_dialogue_index >= count) {
+        c->controller_dialogue_index = count - 1;
+    }
+
+    ControllerDialogueTarget *target = &targets[c->controller_dialogue_index];
+    int cx = target->x + target->width / 2;
+    int cy = target->y + target->height / 2;
+    cx = MAX(0, MIN(SCREEN_WIDTH - 1, cx));
+    cy = MAX(0, MIN(SCREEN_HEIGHT - 1, cy));
+
+    // Reuse the normal cursor/click path. Cross remains a real left click, so BUTTON_CONTINUE,
+    // dialogue choices, and any future chat-interface button still use RuneScape's existing
+    // handleInterfaceInput()/useMenuOption() protocol behavior.
+    c->shell->mouse_x = cx;
+    c->shell->mouse_y = cy;
+    c->controller_free_cursor_x = cx;
+    c->controller_free_cursor_y = cy;
+    c->controller_free_cursor_valid = true;
+    c->controller_grid_component = -1;
+    c->controller_grid_slot = -1;
+    c->controller_grid_screen_valid = false;
+    c->controller_grid_analog_override = true;
+    c->redraw_chatback = true;
+
+    // Publish the focused button into the normal menu/default-action state immediately so Cross can
+    // be pressed on the very next controller edge without waiting for an extra rendered frame.
+    client_handle_input(c);
+}
+
 // The rest of the controller button map (see src/platform/ps2.c for which hardware bit sets each
 // one-shot/level field). Each button's real-world meaning lives here, platform-agnostically -
 // ps2.c only knows about hardware bits, never about tabs/camera/chat.
 static void handleControllerButtonInput(Client *c) {
+    if (c->controller_hotkey_run_pressed) {
+        c->controller_hotkey_run_pressed = false;
+        if (c->ingame && !c->virtual_keyboard_visible && !c->controller_settings_visible) {
+            c->controller_run_enabled = !c->controller_run_enabled;
+
+            // Movement packets already encode action_key[5] as the protocol's Ctrl-held bit.
+            // Keeping it asserted is therefore a native "run every click" toggle, not a new packet.
+            c->shell->action_key[5] = c->controller_run_enabled ? 1 : 0;
+            client_add_message(c, 0,
+                               c->controller_run_enabled ? "Run hotkey: ON" : "Run hotkey: OFF",
+                               "");
+            c->redraw_chatback = true;
+        }
+    }
+
     if (c->controller_grid_cancel_pressed) {
         c->controller_grid_cancel_pressed = false;
 
@@ -5828,6 +6019,7 @@ void client_update_game(Client *c) {
         handleTabInput(c);
         handleControllerTabInput(c);
         handleControllerButtonInput(c);
+        handleControllerDialogueInput(c);
         handleControllerGridInput(c);
         handleChatSettingsInput(c);
 
@@ -12253,6 +12445,18 @@ void client_draw_chatback(Client *c) {
         }
 
         pix2d_hline(0, 77, BLACK, 479);
+#ifdef __PS2__
+        if (!c->virtual_keyboard_visible) {
+            pix2d_fill_rect(PS2_CHAT_BUTTON_X, PS2_CHAT_BUTTON_Y, 0x252a33,
+                            PS2_CHAT_BUTTON_W, PS2_CHAT_BUTTON_H);
+            pix2d_draw_rect(PS2_CHAT_BUTTON_X, PS2_CHAT_BUTTON_Y, BLACK,
+                            PS2_CHAT_BUTTON_W, PS2_CHAT_BUTTON_H);
+            drawStringCenter(c->font_bold12,
+                             PS2_CHAT_BUTTON_X + PS2_CHAT_BUTTON_W / 2,
+                             PS2_CHAT_BUTTON_Y + 12,
+                             "CHAT", WHITE);
+        }
+#endif
     } else {
         client_draw_interface(c, component_get(c->sticky_chat_interface_id), 0, 0, 0);
     }
@@ -13534,6 +13738,10 @@ Client *client_new(void) {
     c->controller_cursor_speed = 5;
     c->controller_camera_deadzone = 40;
     c->controller_grid_cancel_pressed = false;
+    c->controller_hotkey_run_pressed = false;
+    c->controller_run_enabled = false;
+    c->controller_dialogue_interface_id = -1;
+    c->controller_dialogue_index = 0;
     c->controller_grid_component = -1;
     c->controller_grid_slot = -1;
     c->controller_grid_screen_valid = false;

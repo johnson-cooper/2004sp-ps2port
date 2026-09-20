@@ -249,10 +249,16 @@ struct Client {
     bool controller_snap_camera_pressed; // one-shot: Select, face camera with the player
     bool controller_start_pressed;    // one-shot: Start, open chat keyboard / submit active keyboard
     bool controller_back_pressed;     // one-shot: Triangle, close topmost modal/menu (or backspace if keyboard open)
-    bool controller_grid_cancel_pressed; // R3 one-shot: release D-pad grid focus without closing UI
+    bool controller_grid_cancel_pressed; // R3 one-shot while a grid is focused: release focus without closing UI
+    // Controller hotkeys are separate one-shot commands so future gameplay shortcuts can be added
+    // without teaching platform/ps2.c any RuneScape protocol/game-state details.
+    bool controller_hotkey_run_pressed; // R3 one-shot when no item grid is focused
+    bool controller_run_enabled;        // persistent "hold Ctrl for movement" run toggle
     int controller_zoom_bias;         // signed L2/R2 hold: negative=zoom out, positive=zoom in
-    int controller_dpad_x;            // -1/0/+1, one-shot: D-pad; keyboard/menu/settings consume it contextually
+    int controller_dpad_x;            // -1/0/+1, one-shot: D-pad; keyboard/menu/dialogue/settings consume it contextually
     int controller_dpad_y;
+    int controller_dialogue_interface_id; // current chat interface receiving D-pad focus, -1 when none
+    int controller_dialogue_index;        // visually ordered selectable/continue child
     bool controller_keyboard_confirm_pressed; // Cross while the on-screen keyboard owns input
     bool controller_confirm_pressed;  // Cross while a controller-native menu/settings overlay owns input
     bool controller_primary_action;   // Cross normal gameplay click: force RuneScape's top/default action

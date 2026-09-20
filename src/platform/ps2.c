@@ -1079,7 +1079,8 @@ void platform_poll_events(Client *c) {
     // Triangle/Square/Select/Start/R3 - one-shot press-edge flags, meaning assigned and consumed in
     // handleControllerButtonInput()/the virtual keyboard logic in entry/client.c (kept there so
     // every button's real-world MEANING lives in one platform-agnostic place, while only the
-    // hardware bit lives here).
+    // hardware bit lives here). R3 remains the dedicated item-grid escape while a grid is focused;
+    // otherwise it feeds the first gameplay hotkey (run toggle).
     bool triangle = !(padData.btns & PAD_TRIANGLE);
     bool square = !(padData.btns & PAD_SQUARE);
     bool select = !(padData.btns & PAD_SELECT);
@@ -1092,9 +1093,12 @@ void platform_poll_events(Client *c) {
         c->controller_back_pressed = true;
     }
     if (r3 && !r3_was_down) {
-        // Dedicated grid escape: never masquerades as Back and therefore cannot close an interface.
-        if (c->controller_grid_component >= 0 || !c->controller_grid_analog_override) {
+        if (c->controller_grid_component >= 0) {
+            // Dedicated grid escape: never masquerades as Back and therefore cannot close an interface.
             c->controller_grid_cancel_pressed = true;
+        } else {
+            // Free R3 is a gameplay-hotkey edge. The client decides what the hotkey means.
+            c->controller_hotkey_run_pressed = true;
         }
     }
     if (square && !square_was_down) {
