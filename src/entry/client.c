@@ -7089,7 +7089,12 @@ bool client_read(Client *c) {
         if (id == 65535) {
             id = -1;
         }
-        if (c->midiActive && !_Client.lowmem) {
+        /*
+         * The PS2 port deliberately runs the gameplay client in low-memory
+         * mode to fit 32 MB. Unlike the original Java lowmem mode, that must
+         * not disable our native SPU2 music backend.
+         */
+        if (c->midiActive) {
             ps2_music_request(id, jingle_delay_ms);
         }
         c->packet_type = -1;

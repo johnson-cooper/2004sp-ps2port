@@ -882,7 +882,7 @@ void ps2_audio_update_late(void)
      * The companion still never loads before the client is fully in-world.
      * This preserves the network-safe boot/login sequence proven on hardware.
      */
-    if (!c || !c->ingame || c->scene_state != 2) {
+    if (!c || !c->ingame) {
         if (ps2_music_state.playing) {
             ps2_midi_stop_song();
         }
@@ -892,6 +892,15 @@ void ps2_audio_update_late(void)
         if (!ps2_music_state.ready) {
             ps2_music_state.init_polls = 1;
         }
+        return;
+    }
+
+    /*
+     * Keep server MIDI requests queued across REBUILD_NORMAL. A MIDI_SONG can
+     * arrive while scene_state is still 1; dropping it here would leave the
+     * player silent until the server happens to send another song change.
+     */
+    if (c->scene_state != 2) {
         return;
     }
 
