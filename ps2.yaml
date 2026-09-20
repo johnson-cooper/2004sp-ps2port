@@ -3,7 +3,7 @@ project: client
 targets:
   - name: client
     type: ee
-    opt: -O1
+    opt: -O2
     sources:
       - src/*.c
       - src/entry/*.c
