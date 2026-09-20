@@ -83,6 +83,14 @@
 #define PS2_RENDER_RADIUS 18
 #define PS2_RENDER_BACK_MARGIN 2
 #define PS2_RENDER_SIDE_MARGIN 4
+// Dense-scene test: keep all active/actionable map locs at the full camera radius, but stop sending
+// distant inactive scenery into the expensive EE model transform/sort/raster path. Walls remain
+// uncapped by these detail radii so buildings retain their silhouette; collision is completely
+// unchanged. These are render-only limits and can be tuned after real-hardware timing.
+#define PS2_INACTIVE_LOC_RENDER_RADIUS 10
+#define PS2_ROOF_RENDER_RADIUS 8
+#define PS2_WALL_DECOR_RENDER_RADIUS 8
+#define PS2_GROUND_DECOR_RENDER_RADIUS 6
 #define PS2_LOC_MIN_TILE 16
 #define PS2_LOC_MAX_TILE 88
 #define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 12)
