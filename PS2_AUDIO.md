@@ -360,3 +360,21 @@ Before hardware testing, verify size/readelf:
 - .bss should start at 0x00200b00;
 - a second PT_LOAD should exist around 0x01fc0000 for .ps2_audio_*;
 - the normal LOAD must not move its BSS to 0x00200c80.
+
+
+## Hardware result: isolated EE shim + external rs2midi PING is good
+
+Real PS2 hardware successfully connected to the server, entered the world, and remained connected
+with commit `ee4a0bd1925019d4f055ee17a8b3fb55d15a9beb`.
+
+Verified layout on that build:
+- normal LOAD MemSiz: `0x14c284` (hardware-good baseline);
+- normal `.data/.rodata/.sdata/.bss` addresses unchanged;
+- normal `.bss` start: `0x00200b00`;
+- isolated audio LOAD at `0x01fc0000`;
+- isolated overlay contains only `.ps2_audio_text/.ps2_audio_rodata/.ps2_audio_data`.
+
+The post-world external `rs2midi.irx` load/RPC PING path did not regress networking. This is now
+the validated architecture for continuing PS2 MIDI work: keep audsrv frozen in voice-only mode,
+keep rs2midi external, and keep all new EE companion-loader code/state in the isolated high-memory
+overlay so the normal hardware-sensitive client BSS is not relocated.
