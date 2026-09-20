@@ -10006,7 +10006,17 @@ void client_login(Client *c, const char *username, const char *password, bool re
 
     p1(c->login, c->out->pos + 36 + 1 + 1);
     p1(c->login, _Client.clientversion);
+#ifdef __PS2__
+    /*
+     * Keep the PS2 renderer/client in local low-memory mode, but advertise
+     * high-memory capability to Engine-TS. On rev254 the server-side
+     * lowMemory flag is used to suppress MIDI_SONG/MIDI_JINGLE entirely;
+     * the PS2 has its own native low-allocation SPU2 music backend.
+     */
+    p1(c->login, 0);
+#else
     p1(c->login, _Client.lowmem ? 1 : 0);
+#endif
 
     for (int i = 0; i < 9; i++) {
         p4(c->login, c->archive_checksum[i]);
