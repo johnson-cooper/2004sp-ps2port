@@ -106,9 +106,10 @@
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
 #define PS2_3D_RENDER_HEIGHT 334
-// Simulation/networking stay at 50 Hz. Present the expensive software 3D view at 10 Hz for now;
-// gameplay remains responsive while we establish a stable memory/performance floor.
-#define PS2_RENDER_DIVISOR 5
+// Simulation/networking stay at 50 Hz. Hardware presentation test: render every second update
+// for a 25 Hz visual target. This increases renderer/presenter demand 2.5x versus the divisor-5
+// baseline, so keep it isolated until real hardware proves enough frame-time headroom.
+#define PS2_RENDER_DIVISOR 2
 // Static-world restoration stays enabled. For this test loc/model placement is 72x72 while terrain
 // returns to the traversal-proven 80x80 bridge window, so black terrain and dense-loc pressure are no
 // longer tied to the same knob.
