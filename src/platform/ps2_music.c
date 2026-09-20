@@ -53,10 +53,10 @@ void ps2_music_shutdown(void) {
  * and 'used' prevents the compiler from discarding them as unreferenced.
  * aligned(1) keeps the payload sizes exact.
  */
-static const unsigned char ps2_layout_text_pad[0xE8]
+const unsigned char ps2_layout_text_pad[0xE8]
     __attribute__((used, section(".text"), aligned(1))) = {0};
 
-static const unsigned char ps2_layout_rodata_pad[0x50]
+const unsigned char ps2_layout_rodata_pad[0x50]
     __attribute__((used, section(".rodata"), aligned(1))) = {0};
 
 #endif

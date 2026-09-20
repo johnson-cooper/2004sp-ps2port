@@ -258,3 +258,17 @@ Do not hardware-test this candidate unless `size -A build/bin/client.elf` report
 - `.rodata` = 52240
 - `.data` = 175780
 - `.bss` = 309124
+
+
+### Milestone 3F linker-retention fix
+
+The second attempt used `used` C objects, but the final ELF still had the exact original section
+sizes after a clean rebuild. That confirms link-time garbage collection, not compiler elimination.
+
+The padding symbols are now external/linker-visible and the client target passes:
+- `-Wl,--undefined=ps2_layout_text_pad`
+- `-Wl,--undefined=ps2_layout_rodata_pad`
+
+Those flags make the symbols GC roots without creating any runtime reference or call. PS2Build
+supports target-level `ldflags`, so this is isolated to the linker and should retain the exact
+0xE8 .text and 0x50 .rodata payloads.
