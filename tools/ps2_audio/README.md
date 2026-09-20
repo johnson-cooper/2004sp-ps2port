@@ -45,3 +45,33 @@ RuneScape cache SFX are intentionally not converted by these scripts yet. Their 
 `wave_generate()/tone_generate()` path is an EE software synthesizer; the planned SFX build
 step will execute that synthesis offline on the host and feed the resulting PCM through the
 same `ps2_adpcm.py` encoder.
+
+
+## Milestone 2: real PS2 title music
+
+The repository already contains both inputs used by the first hardware music test:
+
+- `rom/SCC1_Florestan.sf2`
+- `rom/cache/client/songs/scape_main.mid`
+
+The cache MIDI is Jagex-packed (4-byte uncompressed length plus BZip payload), so the host tools
+decode that container before parsing the Standard MIDI File.
+
+After `ps2build build`, run:
+
+```bat
+prepare-ps2-title-music.bat
+```
+
+This writes the generated runtime pack to:
+
+```
+build\bin\rom\ps2audio\scape_main.ps2m
+```
+
+The pack contains only the SoundFont sample regions actually used by `scape_main`. SoundFont
+loop points are encoded as SPU2 ADPCM repeat flags, while tempo, preset selection, tuning,
+pitch-bend and controller-derived volume/pan changes are resolved on the host. The builder aborts
+instead of emitting a pack if the required ADPCM sample payload exceeds audsrv's usable SPU2 RAM.
+
+The generated `.ps2m` file is build output and should not be committed.

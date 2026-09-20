@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Compile a Standard MIDI File to a compact, tempo-resolved PS2 event stream."""
+"""Compile RuneScape/Standard MIDI data to a compact, tempo-resolved event stream."""
 
 from __future__ import annotations
 
 import argparse
+import bz2
 import struct
 from pathlib import Path
 
@@ -40,6 +41,38 @@ def _u32be(data: bytes, pos: int) -> int:
     return struct.unpack_from(">I", data, pos)[0]
 
 
+def read_midi_bytes(path: Path) -> bytes:
+    """Read either a raw SMF or this client's Jagex-packed .mid file."""
+    data = path.read_bytes()
+    if data.startswith(b"MThd"):
+        return data
+    if len(data) < 5:
+        raise ValueError(f"{path}: too small to contain RuneScape MIDI data")
+
+    expected = _u32be(data, 0)
+    body = data[4:]
+    attempts = [body] + [
+        b"BZh" + str(level).encode("ascii") + body
+        for level in range(1, 10)
+    ]
+    last_error = None
+    for packed in attempts:
+        try:
+            raw = bz2.decompress(packed)
+        except OSError as exc:
+            last_error = exc
+            continue
+        if expected and len(raw) != expected:
+            continue
+        if raw.startswith(b"MThd"):
+            return raw
+
+    raise ValueError(
+        f"{path}: could not decode Jagex-packed MIDI"
+        + (f" ({last_error})" if last_error else "")
+    )
+
+
 def _vlq(data: bytes, pos: int):
     value = 0
     for _ in range(4):
@@ -73,7 +106,6 @@ def _parse_track(track: bytes, track_index: int):
             if status < 0xF0:
                 running = status
             elif status >= 0xF8 and status != 0xFF:
-                # MIDI realtime messages do not cancel channel running status.
                 pass
             else:
                 running = None
@@ -109,9 +141,6 @@ def _parse_track(track: bytes, track_index: int):
             continue
 
         if status >= 0xF0:
-            # System-common/realtime messages are not needed by the RuneScape
-            # sequencer. Consume their fixed data bytes without mis-parsing them
-            # as channel messages.
             system_lengths = {
                 0xF1: 1, 0xF2: 2, 0xF3: 1, 0xF4: 0,
                 0xF5: 0, 0xF6: 0, 0xF8: 0, 0xF9: 0,
@@ -148,7 +177,6 @@ def _parse_track(track: bytes, track_index: int):
         elif kind == 0xE0:
             event_type = EV_PITCH_BEND
         else:
-            # System common/realtime messages do not belong in a normal SMF track.
             order += 1
             continue
 
@@ -158,8 +186,7 @@ def _parse_track(track: bytes, track_index: int):
     return events, tick
 
 
-def _parse_midi(path: Path):
-    data = path.read_bytes()
+def _parse_midi_bytes(data: bytes):
     if len(data) < 14 or data[:4] != b"MThd":
         raise ValueError("not a Standard MIDI File")
     header_len = _u32be(data, 4)
@@ -205,26 +232,39 @@ def _parse_midi(path: Path):
     return midi_format, division, all_events, max_tick
 
 
-def compile_midi(src: Path, dst: Path):
-    midi_format, ppqn, source_events, max_tick = _parse_midi(src)
+def _parse_midi(path: Path):
+    return _parse_midi_bytes(read_midi_bytes(path))
 
-    tempo = 500000  # microseconds per quarter note
+
+def events_with_time(path: Path):
+    """Return parsed events as (time_us, event_tuple) and total duration."""
+    midi_format, ppqn, source_events, max_tick = _parse_midi(path)
+    tempo = 500000
     last_tick = 0
-    elapsed_num = 0  # microseconds * PPQN, kept integral across tempo changes
-    last_emit_us = 0
-    output = []
-    counts = {name: 0 for name in EVENT_NAMES.values()}
+    elapsed_num = 0
+    timed = []
 
     for event in source_events:
         tick = event[0]
         elapsed_num += (tick - last_tick) * tempo
         last_tick = tick
         now_us = elapsed_num // ppqn
-
         if event[3] == "tempo":
             tempo = event[4]
-            continue
+        else:
+            timed.append((now_us, event))
 
+    elapsed_num += (max_tick - last_tick) * tempo
+    return midi_format, ppqn, timed, elapsed_num // ppqn
+
+
+def compile_midi(src: Path, dst: Path):
+    midi_format, ppqn, timed_events, duration_us = events_with_time(src)
+    last_emit_us = 0
+    output = []
+    counts = {name: 0 for name in EVENT_NAMES.values()}
+
+    for now_us, event in timed_events:
         event_type, channel, a, b = event[4], event[5], event[6], event[7]
         delta_us = now_us - last_emit_us
         while delta_us > 0xFFFFFFFF:
@@ -236,20 +276,9 @@ def compile_midi(src: Path, dst: Path):
         last_emit_us = now_us
         counts[EVENT_NAMES[event_type]] += 1
 
-    # Include any silent tail up to the furthest end-of-track tick in duration.
-    elapsed_num += (max_tick - last_tick) * tempo
-    duration_us = elapsed_num // ppqn
-
     dst.parent.mkdir(parents=True, exist_ok=True)
     with dst.open("wb") as out:
-        out.write(HEADER.pack(
-            MAGIC,
-            VERSION,
-            HEADER.size,
-            len(output),
-            ppqn,
-            duration_us,
-        ))
+        out.write(HEADER.pack(MAGIC, VERSION, HEADER.size, len(output), ppqn, duration_us))
         for event in output:
             out.write(EVENT.pack(*event))
 

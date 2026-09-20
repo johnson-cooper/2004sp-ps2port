@@ -30,12 +30,16 @@ def _signed32(value: int) -> int:
     return value - 0x100000000 if value & 0x80000000 else value
 
 
-def encode_mono_pcm16(samples: Sequence[int], sample_rate: int) -> bytes:
-    """Encode signed 16-bit mono PCM as an audsrv .adp buffer.
+def encode_mono_pcm16(
+    samples: Sequence[int],
+    sample_rate: int,
+    loop_start_sample: int | None = None,
+    loop_end_sample: int | None = None,
+) -> bytes:
+    """Encode signed 16-bit mono PCM as an audsrv APCM buffer.
 
-    Loop flags are intentionally not baked into the frames. SoundFont loop points
-    are retained as metadata by sf2_to_ps2bank.py so the runtime can choose the
-    correct loop behavior when a region is assigned to an SPU2 voice.
+    When a loop range is supplied, SPU2 repeat flags are written into the
+    ADPCM frames themselves. SoundFont loop end is exclusive.
     """
     pcm = [max(-32768, min(32767, int(v))) for v in samples]
     raw_s1 = raw_s2 = 0.0
@@ -43,6 +47,20 @@ def encode_mono_pcm16(samples: Sequence[int], sample_rate: int) -> bytes:
     frames = bytearray()
     last_predict = 0
     last_shift = 0
+
+    looped = (
+        loop_start_sample is not None
+        and loop_end_sample is not None
+        and 0 <= loop_start_sample < loop_end_sample <= len(pcm)
+    )
+    if looped:
+        loop_start_frame = int(loop_start_sample) // SAMPLES_PER_FRAME
+        loop_end_frame = max(
+            loop_start_frame,
+            (int(loop_end_sample) - 1) // SAMPLES_PER_FRAME,
+        )
+    else:
+        loop_start_frame = loop_end_frame = -1
 
     frame_count = (len(pcm) + SAMPLES_PER_FRAME - 1) // SAMPLES_PER_FRAME
     for frame_index in range(frame_count):
@@ -76,16 +94,12 @@ def encode_mono_pcm16(samples: Sequence[int], sample_rate: int) -> bytes:
                 best_max = max_abs
                 predictor = candidate
 
-            # PS2SDK's find_predict() explicitly falls back to predictor 0 for
-            # near-silent blocks, regardless of which candidate first crossed
-            # the <= 7 threshold.
             if best_max <= 7.0:
                 predictor = 0
                 break
 
         predictor_samples = candidates[predictor]
 
-        # find_predict()'s history is simply the last two clipped source samples.
         raw_s2 = float(max(-30720, min(30719, block[-2])))
         raw_s1 = float(max(-30720, min(30719, block[-1])))
 
@@ -111,7 +125,19 @@ def encode_mono_pcm16(samples: Sequence[int], sample_rate: int) -> bytes:
             err_s2 = err_s1
             err_s1 = float(shifted) - sample0
 
-        flags = 0x01 if frame_index == frame_count - 1 else 0x00
+        if looped and loop_start_frame == loop_end_frame and frame_index == loop_start_frame:
+            flags = 0x07
+        elif looped and frame_index == loop_start_frame:
+            flags = 0x06
+        elif looped and frame_index == loop_end_frame:
+            flags = 0x03
+        elif looped and loop_start_frame < frame_index < loop_end_frame:
+            flags = 0x02
+        elif not looped and frame_index == frame_count - 1:
+            flags = 0x01
+        else:
+            flags = 0x00
+
         frames.append((predictor << 4) | shift)
         frames.append(flags)
         for i in range(0, SAMPLES_PER_FRAME, 2):
@@ -120,14 +146,13 @@ def encode_mono_pcm16(samples: Sequence[int], sample_rate: int) -> bytes:
         last_predict = predictor
         last_shift = shift
 
-    # Match PS2SDK adpenc: append a terminal frame after the last data frame.
     frames.extend(bytes(((last_predict << 4) | last_shift, 0x07)) + bytes(14))
 
     header = APCM_HEADER.pack(
         b"APCM",
         1,
         1,
-        0,
+        1 if looped else 0,
         0,
         base_pitch(sample_rate),
         len(pcm),
