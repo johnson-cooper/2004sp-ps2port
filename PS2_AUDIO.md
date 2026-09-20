@@ -313,3 +313,19 @@ Interpretation:
 
 Before hardware testing, confirm .bss addr is 2100352 (0x00200c80) while .data remains 1871744 and
 .rodata remains 2047616.
+
+
+## Milestone 3I: BSS +0x80 alignment-phase A/B
+
+Real hardware failed when only .bss was moved from the hardware-good 0x00200b00 to the failing
+0x00200c80 address. That proves BSS/global placement alone is sufficient to trigger the pre-login
+network regression.
+
+This test moves only .bss to 0x00200b80 (+0x80). All earlier sections remain hardware-good.
+The purpose is to distinguish an alignment/modulo problem from sensitivity to the full +0x180
+absolute displacement.
+
+Interpretation:
+- if +0x80 also fails, the shared low-address phase (...80 rather than ...00) is a strong clue;
+- if +0x80 connects, displacement magnitude or a narrower address window matters and we continue
+  with intermediate offsets.

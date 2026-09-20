@@ -23,11 +23,11 @@ targets:
   - name: client
     type: ee
     opt: -O1
-    # Milestone 3H: move ONLY .bss to the address observed in the failing ELF.
-    # Earlier loaded sections keep their hardware-good placement; no padding
-    # object or runtime code is added.
+    # Milestone 3I: alignment-phase A/B. Move ONLY .bss by +0x80 from the
+    # hardware-good address. This gives it the same ...80 low-address phase as
+    # the failing +0x180 layout while minimizing absolute movement.
     ldflags:
-      - -Wl,--section-start=.bss=0x00200c80
+      - -Wl,--section-start=.bss=0x00200b80
     sources:
       - src/*.c
       - src/entry/*.c
