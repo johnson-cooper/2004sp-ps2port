@@ -35,12 +35,34 @@ function Resolve-Tool([string]$name) {
     throw "Could not find mips64r5900el-ps2-elf-$name. Pass -Ps2BuildRoot with the folder containing toolchain\ee\bin."
 }
 
-function Run-Tool([string]$tool, [string[]]$arguments) {
-    $output = & $tool @arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "$tool failed with exit code $LASTEXITCODE"
+function Invoke-NativeTool([string]$tool, [string[]]$arguments, [bool]$AllowFailure = $false) {
+    # Windows PowerShell 5 turns native stderr into ErrorRecord objects. With
+    # $ErrorActionPreference="Stop", tools such as nm can abort the script
+    # before we get a chance to inspect $LASTEXITCODE. Temporarily use
+    # Continue so stripped-ELF diagnostics ("no symbols") can be captured.
+    $oldPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & $tool @arguments 2>&1
+        $exitCode = $LASTEXITCODE
     }
-    return ($output -join [Environment]::NewLine)
+    finally {
+        $ErrorActionPreference = $oldPreference
+    }
+
+    $text = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    if ($exitCode -ne 0 -and !$AllowFailure) {
+        throw ("{0} failed with exit code {1}{2}{3}" -f $tool, $exitCode, [Environment]::NewLine, $text)
+    }
+
+    return [PSCustomObject]@{
+        ExitCode = $exitCode
+        Text = $text
+    }
+}
+
+function Run-Tool([string]$tool, [string[]]$arguments) {
+    return (Invoke-NativeTool $tool $arguments $false).Text
 }
 
 function File-Info([string]$path) {
@@ -81,8 +103,19 @@ $symbols = @(
 )
 
 function Symbol-Report([string]$elf) {
-    $lines = Run-Tool $nm @("-n", "-S", $elf) -split "?
-"
+    $nmResult = Invoke-NativeTool $nm @("-n", "-S", $elf) $true
+
+    # PS2Build strips the final client.elf, so nm legitimately exits non-zero
+    # with "no symbols". That is not a bad ELF and should not abort the layout
+    # comparison. Section/program-header data remains fully useful.
+    if ($nmResult.ExitCode -ne 0) {
+        if ($nmResult.Text -match "no symbols") {
+            return "<stripped ELF: no symbol table available>"
+        }
+        return ("<nm unavailable for this ELF, exit={0}>{1}{2}" -f $nmResult.ExitCode, [Environment]::NewLine, $nmResult.Text)
+    }
+
+    $lines = $nmResult.Text -split "\r?\n"
     $picked = @()
     foreach ($symbol in $symbols) {
         $match = $lines | Where-Object { $_ -match ("\s" + [regex]::Escape($symbol) + "$") } | Select-Object -First 1
@@ -153,5 +186,6 @@ Write-Host ""
 Write-Host "Quick checks:"
 Write-Host "  1. Compare SHA256 first. If identical, the binaries are byte-for-byte identical."
 Write-Host "  2. Compare .text/.rodata/.data/.bss addresses and sizes."
-Write-Host "  3. Compare _end and errno addresses."
-Write-Host "  4. If only code changes but _end moves, the heap base moved too."
+Write-Host "  3. Final PS2Build ELFs may be stripped; KEY SYMBOLS will say so instead of failing."
+Write-Host "  4. Compare the end address of the last allocated section/LOAD segment as the stripped-ELF proxy for _end."
+Write-Host "  5. If that end moves, the initial heap boundary may move too."
