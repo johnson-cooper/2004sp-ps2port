@@ -126,6 +126,21 @@ if not "!INSTALL_RESULT!"=="0" (
     goto :fail
 )
 
+rem PS2Build's audsrv package metadata currently installs a compatibility
+rem audsrv.h that does not necessarily come from the EE RPC include directory
+rem we patch above. Force the installed public header to be the exact patched
+rem EE header that matches libaudsrv.a and audsrv.irx.
+if not exist "!SRCDIR!\ee\rpc\audsrv\include\audsrv.h" (
+    echo ERROR: Patched EE audsrv header is missing:
+    echo   !SRCDIR!\ee\rpc\audsrv\include\audsrv.h
+    goto :fail
+)
+copy /Y "!SRCDIR!\ee\rpc\audsrv\include\audsrv.h" "%DEST%\include\audsrv.h" >nul
+if errorlevel 1 (
+    echo ERROR: Failed to install patched EE audsrv.h.
+    goto :fail
+)
+
 echo.
 echo Verifying installed package...
 
