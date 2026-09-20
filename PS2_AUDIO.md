@@ -82,3 +82,23 @@ volume/pan and pitch-bend math are resolved offline.
 The EE runtime only advances compact timestamped events. Sample playback, pitch and mixing are
 performed by SPU2. This first music milestone intentionally leaves rev254 in-game MIDI_SONG/jingle
 protocol work and RuneScape SFX disabled so title music can be hardware-tested in isolation.
+
+
+## Milestone 2B: defer music bank upload until live world
+
+Real-hardware testing of the first title-music build reproduced the pre-login network failure and
+did not produce audible `scape_main`. The voice-only audsrv backend itself remains proven by the
+earlier single-sample beep test, which connected and entered the world normally.
+
+For the next isolated test, PS2 no longer calls `platform_set_midi("scape_main", ...)` during
+`client_load()`. The backend still initializes in the same hardware-proven boot position, but no
+music pack or bulk ADPCM sample upload occurs during the title/login path.
+
+Once `PLAYER_INFO` has made `scene_state == 2`, the client waits 250 normal game ticks
+(approximately five seconds) and starts `scape_main` once. This separates three outcomes:
+
+- failure before the five-second trigger: regression is not caused by music-pack upload;
+- world remains healthy until the trigger, then network/performance fails: bulk SPU2 sample upload
+  is the remaining IOP/network conflict;
+- world remains healthy and music plays: title-screen timing was the problem and sequencing can be
+  developed safely from an in-world trigger before deciding how to handle title audio.
