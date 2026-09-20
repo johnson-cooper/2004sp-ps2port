@@ -31,7 +31,7 @@ PREFERRED_PROGRAMS = (
     73,   # Flute
     80,   # Lead 1 (square)
     104,  # Sitar
-    112,  # Tinkle Bell
+    114,  # Steel Drums (more stable compact wavetable than Tinkle Bell)
 )
 
 REFERENCE_NOTES = (60, 64, 67, 69, 72, 55, 48, 76)
@@ -39,24 +39,25 @@ REFERENCE_VELOCITY = 100
 TARGET_PEAK = 0.70
 
 
-def _preset_for_slot(resolver: SoundFontResolver, slot: int) -> tuple[int, str]:
+def _preset_candidates_for_slot(
+    resolver: SoundFontResolver,
+    slot: int,
+) -> list[tuple[int, str]]:
+    """Return preferred preset first, then other bank-0 presets in the family."""
     preferred = PREFERRED_PROGRAMS[slot]
-    preset = resolver.presets.get((0, preferred))
-    if preset is not None:
-        return preferred, preset[0]
-
     lo = slot * 16
     hi = lo + 15
-    candidates = sorted(
+
+    candidates = [
         (program, name_zones[0])
         for (bank, program), name_zones in resolver.presets.items()
         if bank == 0 and lo <= program <= hi
-    )
+    ]
     if not candidates:
-        # Resolver itself falls back to bank 0/program 0, but fail here so a
-        # malformed/incomplete SoundFont cannot silently duplicate every slot.
         raise ValueError(f"SoundFont has no bank-0 preset in GM family {lo}..{hi}")
-    return candidates[0]
+
+    candidates.sort(key=lambda item: (item[0] != preferred, item[0]))
+    return candidates
 
 
 def _region_for_program(resolver: SoundFontResolver, program: int):
@@ -254,13 +255,65 @@ def build(soundfont: Path, output: Path) -> None:
     slots = []
 
     for slot in range(SLOT_COUNT):
-        program, preset_name = _preset_for_slot(resolver, slot)
-        reference_note, region = _region_for_program(resolver, program)
-        pcm = resolver.pcm_for(region)
+        selected = None
+        rejected = []
 
-        period, anchor, stable_end, expected_period = _best_period(
-            resolver, pcm, region
-        )
+        for program, preset_name in _preset_candidates_for_slot(resolver, slot):
+            try:
+                reference_note, region = _region_for_program(resolver, program)
+            except ValueError as exc:
+                rejected.append(f"{program}:{preset_name} ({exc})")
+                continue
+
+            fundamental = _stored_fundamental(resolver, region)
+            expected_period = region.sample_rate / fundamental
+            if expected_period < 8.0:
+                rejected.append(
+                    f"{program}:{preset_name} "
+                    f"(native period {expected_period:.2f} < 8 samples)"
+                )
+                continue
+
+            pcm = resolver.pcm_for(region)
+            try:
+                period, anchor, stable_end, expected_period = _best_period(
+                    resolver, pcm, region
+                )
+            except ValueError as exc:
+                rejected.append(f"{program}:{preset_name} ({exc})")
+                continue
+
+            selected = (
+                program,
+                preset_name,
+                reference_note,
+                region,
+                pcm,
+                period,
+                anchor,
+                stable_end,
+                expected_period,
+            )
+            break
+
+        if selected is None:
+            details = "; ".join(rejected[:8])
+            raise ValueError(
+                f"no safe compact-wavetable preset for slot {slot}: {details}"
+            )
+
+        (
+            program,
+            preset_name,
+            reference_note,
+            region,
+            pcm,
+            period,
+            anchor,
+            stable_end,
+            expected_period,
+        ) = selected
+
         cycle = _average_cycle(pcm, period, anchor, stable_end)
         wavetable = _make_wavetable(cycle)
         raw = _raw_adpcm(wavetable)
@@ -275,6 +328,8 @@ def build(soundfont: Path, output: Path) -> None:
             f"period={period} expected={expected_period:.2f} "
             f"ratio={period / expected_period:.4f} loop={region.looping}"
         )
+        if rejected:
+            print(f"  skipped: {rejected[0]}")
 
     target_freq = 440.0 * (2.0 ** ((BASE_NOTE - 69) / 12.0))
     wavetable_freq = OUTPUT_RATE * OUTPUT_CYCLES / OUTPUT_SAMPLES
