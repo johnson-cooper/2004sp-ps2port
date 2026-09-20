@@ -13824,7 +13824,6 @@ Client *client_new(void) {
     c->controller_grid_cancel_pressed = false;
     c->controller_hotkey_run_pressed = false;
     c->controller_run_enabled = false;
-    c->controller_chatbox_focus = false;
     c->controller_dialogue_interface_id = -1;
     c->controller_dialogue_index = 0;
     c->controller_grid_component = -1;
