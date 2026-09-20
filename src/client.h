@@ -608,6 +608,7 @@ void client_tick_phase_reset(void);
 void handleViewportOptions(Client *c);
 bool handleInterfaceAction(Client *c, Component *com);
 void handleChatMouseInput(Client *c, int mouseX, int mouseY);
+void client_open_public_chat_keyboard(Client *c);
 void client_handle_input(Client *c);
 void projectFromGround(Client *c, PathingEntity *entity, int height);
 void projectFromGround2(Client *c, int x, int height, int z);
