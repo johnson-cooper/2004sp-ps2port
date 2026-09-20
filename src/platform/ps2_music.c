@@ -79,7 +79,7 @@ static const char ps2_audio_ping_fmt[] PS2_AUDIO_RODATA =
 static const char ps2_audio_sample_bad_fmt[] PS2_AUDIO_RODATA =
     "audio: rs2midi test sample invalid size=%u raw=%u\n";
 static const char ps2_audio_voice_test_fmt[] PS2_AUDIO_RODATA =
-    "audio: rs2midi voice test load=%d note=%d pitch=%d off=%d basepitch=%u raw=%u\n";
+    "audio: rs2midi voice test xfer=%d load=%d note=%d pitch=%d off=%d basepitch=%u raw=%u\n";
 static const char ps2_audio_state_fmt[] PS2_AUDIO_RODATA =
     "audio: rs2midi state %s rc=%d loaded=%u pitch=%u voll=%u volr=%u ssa=0x%08x endx=0x%06x mv=%u/%u ext=%u/%u\n";
 static const char ps2_audio_state_after_on[] PS2_AUDIO_RODATA = "after-on";
@@ -310,6 +310,7 @@ void ps2_audio_update_late(void)
         RS2MIDI_RPC_LOAD,
         &packet,
         RS2MIDI_RPC_HEADER_BYTES + raw_size);
+    int32_t transfer_result = (int32_t)packet.words[1];
 
     int32_t note_status = -999;
     int32_t pitch_status = -999;
@@ -390,6 +391,7 @@ void ps2_audio_update_late(void)
     }
 
     rs2_log(ps2_audio_voice_test_fmt,
+            (int)transfer_result,
             (int)load_status,
             (int)note_status,
             (int)pitch_status,

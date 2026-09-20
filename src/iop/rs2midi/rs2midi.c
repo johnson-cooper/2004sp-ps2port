@@ -79,6 +79,14 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
     case RS2MIDI_RPC_LOAD: {
         u32 sample_size = words[0];
 
+        /*
+         * Preserve the raw ROM LIBSD return value for the EE diagnostic.
+         * The BIOS implementation is not required to use PS2SDK FreeSD's
+         * "return byte count" convention, so do not treat a non-negative
+         * value smaller than sample_size as failure.
+         */
+        words[1] = (u32)-999;
+
         if (sample_size == 0 ||
             sample_size > RS2MIDI_MAX_SAMPLE_BYTES ||
             (sample_size & 0x0f) != 0 ||
@@ -97,12 +105,17 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
             payload,
             (u32 *)RS2MIDI_SPU_ADDR,
             sample_size);
+        words[1] = (u32)transferred;
 
-        if (transferred != (int)sample_size) {
+        if (transferred < 0) {
             status = RS2MIDI_ERR_DMA;
             break;
         }
 
+        /*
+         * Match audsrv's proven ADPCM upload sequence: once LIBSD accepted
+         * the request, wait for voice transfer completion before playing.
+         */
         sceSdVoiceTransStatus(RS2MIDI_DMA_CHANNEL, 1);
         rs2midi_sample_loaded = 1;
         break;
