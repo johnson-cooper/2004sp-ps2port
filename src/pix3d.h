@@ -5,6 +5,13 @@
 #include "pix2d.h"
 #include "pix8.h"
 
+#ifdef __PS2__
+// Per-depth reciprocal table used by the PS2 model projector to replace the two hot integer
+// divisions performed for every transformed world-model vertex. 4096 entries cover the existing
+// World3D far range with only 16 KiB of EE RAM.
+#define PIX3D_PS2_PROJECTION_RECIP_COUNT 4096
+#endif
+
 typedef struct {
     DoublyLinkable link;
     Pix2D pix2d;
@@ -22,6 +29,9 @@ typedef struct {
     bool jagged;
     int *reciprical15;
     int *reciprical16;
+#ifdef __PS2__
+    unsigned int *projectionReciprocal;
+#endif
     int *sin_table;
     int *cos_table;
     Pix8 **textures;
