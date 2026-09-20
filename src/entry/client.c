@@ -11865,6 +11865,56 @@ void pushPlayers(Client *c) {
         c->flagSceneTileX = 0;
     }
 
+#ifdef __PS2__
+    // Build a tiny distance-ring quota before submission so the hard crowd cap keeps the nearest
+    // ordinary players instead of whichever player ids happen to occur first in the update list.
+    int ps2PlayerRingCount[PS2_PLAYER_RENDER_RADIUS + 1] = {0};
+    int ps2PlayerRingRemaining[PS2_PLAYER_RENDER_RADIUS + 1] = {0};
+    int ps2LocalStx = c->local_player->pathing_entity.x >> 7;
+    int ps2LocalStz = c->local_player->pathing_entity.z >> 7;
+    int ps2LocalTarget = c->local_player->pathing_entity.targetId;
+
+    for (int pi = 0; pi < c->player_count; pi++) {
+        int playerIndex = c->player_ids[pi];
+        PlayerEntity *candidate = c->players[playerIndex];
+        if (!candidate || !playerentity_is_visible(candidate)) {
+            continue;
+        }
+
+        int stx = candidate->pathing_entity.x >> 7;
+        int stz = candidate->pathing_entity.z >> 7;
+        if (stx < 0 || stx >= 104 || stz < 0 || stz >= 104) {
+            continue;
+        }
+
+        int dx = stx - ps2LocalStx;
+        int dz = stz - ps2LocalStz;
+        if (dx < 0) dx = -dx;
+        if (dz < 0) dz = -dz;
+        int distance = dx > dz ? dx : dz;
+
+        bool interactionImportant =
+            ps2LocalTarget == playerIndex + 32768 ||
+            candidate->pathing_entity.targetId == LOCAL_PLAYER_INDEX + 32768 ||
+            candidate->locModel ||
+            (candidate->pathing_entity.spotanimId != -1 && candidate->pathing_entity.spotanimFrame != -1);
+
+        if (!interactionImportant && distance <= PS2_PLAYER_RENDER_RADIUS) {
+            ps2PlayerRingCount[distance]++;
+        }
+    }
+
+    int ps2BudgetLeft = PS2_PLAYER_RENDER_BUDGET;
+    for (int distance = 0; distance <= PS2_PLAYER_RENDER_RADIUS && ps2BudgetLeft > 0; distance++) {
+        int allowed = ps2PlayerRingCount[distance];
+        if (allowed > ps2BudgetLeft) {
+            allowed = ps2BudgetLeft;
+        }
+        ps2PlayerRingRemaining[distance] = allowed;
+        ps2BudgetLeft -= allowed;
+    }
+#endif
+
     for (int i = -1; i < c->player_count; i++) {
         PlayerEntity *player;
         int id;
@@ -11893,28 +11943,27 @@ void pushPlayers(Client *c) {
         }
 
 #ifdef __PS2__
-        // Crowd LOD: player state continues to update normally, but only nearby remote players are
-        // submitted to the expensive software 3D path. Mid-distance players reuse the cached,
-        // unanimated appearance model through PlayerEntity::lowmem. Preserve full detail for combat/
-        // interaction-relevant players and temporary loc-model transformations.
-        int localStx = c->local_player->pathing_entity.x >> 7;
-        int localStz = c->local_player->pathing_entity.z >> 7;
-        int dx = stx - localStx;
-        int dz = stz - localStz;
+        // Crowd LOD plus a nearest-first hard budget. Important players bypass both the ordinary
+        // distance cap and the budget so combat/interaction feedback is never dropped.
+        int dx = stx - ps2LocalStx;
+        int dz = stz - ps2LocalStz;
         if (dx < 0) dx = -dx;
         if (dz < 0) dz = -dz;
         int playerDistance = dx > dz ? dx : dz;
 
         int playerIndex = c->player_ids[i];
-        int localTarget = c->local_player->pathing_entity.targetId;
         bool interactionImportant =
-            localTarget == playerIndex + 32768 ||
+            ps2LocalTarget == playerIndex + 32768 ||
             player->pathing_entity.targetId == LOCAL_PLAYER_INDEX + 32768 ||
             player->locModel ||
             (player->pathing_entity.spotanimId != -1 && player->pathing_entity.spotanimFrame != -1);
 
-        if (!interactionImportant && playerDistance > PS2_PLAYER_RENDER_RADIUS) {
-            continue;
+        if (!interactionImportant) {
+            if (playerDistance > PS2_PLAYER_RENDER_RADIUS ||
+                ps2PlayerRingRemaining[playerDistance] <= 0) {
+                continue;
+            }
+            ps2PlayerRingRemaining[playerDistance]--;
         }
 
         player->lowmem =

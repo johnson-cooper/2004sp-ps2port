@@ -234,6 +234,7 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.sinEyeYaw = _Pix3D.sin_table[eyeYaw];
     _World3D.cosEyeYaw = _Pix3D.cos_table[eyeYaw];
     ps2_update_visibility_map(_World3D.sinEyeYaw, _World3D.cosEyeYaw);
+    ps2_inactive_loc_draw_count = 0;
     _World3D.visibilityMap = ps2_visibility_map;
     _World3D.eyeX = eyeX;
     _World3D.eyeY = eyeY;
