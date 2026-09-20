@@ -217,13 +217,6 @@ int ps2_modern_padRead(int port, int slot, struct padButtonStatus *buttons) {
             ps2_ui_select_tab(c, ps2_ui_tabs[dock_button - 1]);
         }
         ps2_ui_cross_consumed_until_release = true;
-    } else if (!c->virtual_keyboard_visible && c->chat_interface_id == -1 &&
-               ps2_ui_chat_open && raw_cross && !ps2_ui_cross_raw_was_down) {
-        // With the modern Chat panel open, Cross means "start typing" regardless of
-        // cursor position. Enter the client's normal public-chat keyboard path instead
-        // of synthesizing a fragile mouse click inside the legacy chatback.
-        client_open_public_chat_keyboard(c);
-        ps2_ui_cross_consumed_until_release = true;
     }
     if (!raw_cross) {
         ps2_ui_cross_consumed_until_release = false;
@@ -242,10 +235,14 @@ int ps2_modern_padRead(int port, int slot, struct padButtonStatus *buttons) {
         ps2_ui_start_consumed_until_release = false;
     }
 
-    // Square remains the fast inventory toggle, but never steals a keypress while
-    // the on-screen keyboard owns input.
+    // Square remains the fast inventory toggle normally. When the modern Chat
+    // panel is open, Chat owns Square contextually and uses it to start typing.
     if (!c->virtual_keyboard_visible && raw_square && !ps2_ui_square_raw_was_down) {
-        ps2_ui_select_tab(c, 3);
+        if (ps2_ui_chat_open && c->chat_interface_id == -1) {
+            client_open_public_chat_keyboard(c);
+        } else {
+            ps2_ui_select_tab(c, 3);
+        }
     }
 
     // Triangle closes modern overlays first. While typing it intentionally falls
