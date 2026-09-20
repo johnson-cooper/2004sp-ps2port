@@ -9,6 +9,7 @@
 #define RS2MIDI_IRX_IMPORTS_H
 
 #include <irx.h>
+#include <loadcore.h>
 #include <sifcmd.h>
 #include <thbase.h>
 

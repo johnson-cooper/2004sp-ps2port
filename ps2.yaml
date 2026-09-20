@@ -15,6 +15,7 @@ targets:
       - src/iop/rs2midi
     headers:
       # Header-only dependencies for the IOP RPC server/thread declarations.
+      - loadcore
       - sifcmd
       - thbase
     imports_lst: src/iop/rs2midi/imports.lst
