@@ -38,6 +38,21 @@ REFERENCE_NOTES = (60, 64, 67, 69, 72, 55, 48, 76)
 REFERENCE_VELOCITY = 100
 TARGET_PEAK = 0.70
 
+# A single SPU2 wavetable is transposed over a large MIDI range. Rich upper
+# harmonics that sound correct near the base note can alias into whistle/ring
+# tones several octaves higher. Keep more detail for naturally soft families
+# and progressively band-limit the brighter/high-risk families.
+SLOT_MAX_HARMONICS = (
+    12,  # piano / chromatic percussion
+    10,  # organ / guitar
+    10,  # bass / strings
+    9,   # ensemble / brass
+    9,   # reed / pipe
+    7,   # synth lead / pad
+    6,   # synth effects / ethnic
+    5,   # percussive / sound effects
+)
+
 
 def _preset_candidates_for_slot(
     resolver: SoundFontResolver,
@@ -201,6 +216,42 @@ def _average_cycle(pcm, period: int, anchor: int, end: int) -> list[float]:
     return [v - mean for v in cycle]
 
 
+def _bandlimit_cycle(cycle: list[float], max_harmonics: int) -> list[float]:
+    """Rebuild one periodic cycle from a bounded Fourier series.
+
+    This is intentionally dependency-free and runs only on the host. The
+    cycles are tiny, so the direct DFT is fast enough and avoids adding numpy
+    or a DSP library to the asset pipeline.
+    """
+    count = len(cycle)
+    if count < 3:
+        return cycle[:]
+
+    limit = max(1, min(int(max_harmonics), (count - 1) // 2))
+    coefficients = []
+
+    for harmonic in range(1, limit + 1):
+        real = 0.0
+        imag = 0.0
+        for index, value in enumerate(cycle):
+            angle = 2.0 * math.pi * harmonic * index / count
+            real += value * math.cos(angle)
+            imag -= value * math.sin(angle)
+        coefficients.append((real / count, imag / count))
+
+    rebuilt = []
+    for index in range(count):
+        value = 0.0
+        for harmonic, (real, imag) in enumerate(coefficients, start=1):
+            angle = 2.0 * math.pi * harmonic * index / count
+            value += 2.0 * (
+                real * math.cos(angle) - imag * math.sin(angle)
+            )
+        rebuilt.append(value)
+
+    return rebuilt
+
+
 def _sample_cycle(cycle: list[float], phase: float) -> float:
     pos = phase * len(cycle)
     i0 = int(pos) % len(cycle)
@@ -315,6 +366,8 @@ def build(soundfont: Path, output: Path) -> None:
         ) = selected
 
         cycle = _average_cycle(pcm, period, anchor, stable_end)
+        max_harmonics = SLOT_MAX_HARMONICS[slot]
+        cycle = _bandlimit_cycle(cycle, max_harmonics)
         wavetable = _make_wavetable(cycle)
         raw = _raw_adpcm(wavetable)
 
@@ -326,7 +379,8 @@ def build(soundfont: Path, output: Path) -> None:
             f"sample={region.sample_id} sf2_pitch={original_pitch} "
             f"mapped_root={region.root_key} rate={region.sample_rate} "
             f"period={period} expected={expected_period:.2f} "
-            f"ratio={period / expected_period:.4f} loop={region.looping}"
+            f"ratio={period / expected_period:.4f} "
+            f"harmonics={max_harmonics} loop={region.looping}"
         )
         if rejected:
             print(f"  skipped: {rejected[0]}")
@@ -354,8 +408,9 @@ def build(soundfont: Path, output: Path) -> None:
         f" * {soundfont.as_posix()}. Do not hand-edit sample bytes.",
         " *",
         " * Each slot is a seamless 37-cycle wavetable extracted from a real",
-        " * SCC1_Florestan preset, then encoded with the PS2SDK-compatible",
-        " * ADPCM predictor. Runtime size remains 8 x 720 bytes.",
+        " * SCC1_Florestan preset, Fourier-band-limited for safe high-note",
+        " * transposition, then encoded with the PS2SDK-compatible ADPCM",
+        " * predictor. Runtime size remains 8 x 720 bytes.",
         " */",
         "const unsigned char ps2_midi_bank_adpcm[PS2_MIDI_BANK_SAMPLE_COUNT][PS2_MIDI_BANK_SAMPLE_BYTES]",
         "    PS2_MIDI_BANK_RODATA __attribute__((aligned(64))) = {",
