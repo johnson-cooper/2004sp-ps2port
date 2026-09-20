@@ -36,7 +36,7 @@
 #include "../pixfont.h"
 #include "../pixmap.h"
 #include "../thirdparty/bzip.h"
-#include "ps2_audio_test.h"
+#include "ps2_music.h"
 
 extern ClientData _Client;
 extern InputTracking _InputTracking;
@@ -96,11 +96,9 @@ static GSTEXTURE screenTexture;
 static char padDmaBuf[256] __attribute__((aligned(64)));
 static struct padButtonStatus padData;
 
-// Audio milestone 1 is intentionally tiny: prove the standalone audsrv package,
-// embedded IOP module and SPU2 ADPCM path on real hardware before any MIDI/SFX
-// scheduler is allowed to touch the accepted gameplay baseline.
+// Voice-only audsrv is real-hardware proven: SPU2 ADPCM playback works without
+// the stock PCM-stream worker that previously interfered with networking.
 static bool ps2_audio_ready;
-static audsrv_adpcm_t ps2_audio_test_sample;
 
 static void SleepCb(s32 alarmId, u16 time, void *common)
 {
@@ -795,24 +793,7 @@ bool platform_init(void) {
         if (audsrv_init_ret == AUDSRV_ERR_NOERROR &&
             adpcm_init_ret == AUDSRV_ERR_NOERROR) {
             ps2_audio_ready = true;
-
-            // A short, low-volume 660 Hz ADPCM beep is the entire milestone-1 acceptance
-            // test. It was encoded offline in the exact 16-byte APCM format audsrv expects,
-            // so hearing it proves EE RPC -> IOP audsrv -> SPU2 without enabling any costly
-            // RuneScape software synthesis.
-            int load_ret = audsrv_load_adpcm(
-                &ps2_audio_test_sample,
-                (void *)ps2_audio_test_adpcm,
-                (int)ps2_audio_test_adpcm_size);
-            int channel = -1;
-            if (load_ret == AUDSRV_ERR_NOERROR) {
-                channel = audsrv_ch_play_adpcm(-1, &ps2_audio_test_sample);
-                if (channel >= 0) {
-                    audsrv_adpcm_set_volume_and_pan(channel, 35, 0);
-                }
-            }
-            rs2_log("audio: smoke sample load=%d channel=%d size=%u\n",
-                    load_ret, channel, ps2_audio_test_adpcm_size);
+            rs2_log("audio: voice-only backend ready for title MIDI\n");
         }
     } else {
         rs2_log("audio: audsrv module unavailable; continuing without audio\n");
@@ -869,6 +850,7 @@ void platform_new(GameShell *shell) {
 
 void platform_free(void) {
     if (ps2_audio_ready) {
+        ps2_music_shutdown();
         audsrv_quit();
         ps2_audio_ready = false;
     }
@@ -1010,6 +992,10 @@ static void ps2_release_grid_focus(Client *c) {
 }
 
 void platform_poll_events(Client *c) {
+    // The MIDI clock must advance even when no controller is connected/stable.
+    // This is sequencing only; all sample playback, pitching and mixing stays on SPU2.
+    ps2_music_update();
+
     int state = padGetState(0, 0);
     if (state != PAD_STATE_STABLE && state != PAD_STATE_FINDCTP1) {
         return;
@@ -1241,17 +1227,27 @@ void platform_play_wave(int8_t *src, int length) {
 }
 
 void platform_set_midi_volume(float midivol) {
-    (void)midivol;
+    ps2_music_set_volume(midivol);
 }
 
 void platform_set_jingle(int8_t *src, int len) {
+    // Milestone 2 is deliberately title-song only. Rev254 jingle handling is
+    // a separate protocol/runtime test after normal MIDI playback is proven.
     (void)src, (void)len;
 }
 
 void platform_set_midi(const char *name, int crc, int len) {
-    (void)name, (void)crc, (void)len;
+    (void)crc, (void)len;
+    if (!ps2_audio_ready) {
+        rs2_log("audio: MIDI request ignored before audsrv ready: %s\n", name ? name : "(null)");
+        return;
+    }
+    if (!ps2_music_play(name)) {
+        rs2_log("audio: failed to start PS2 MIDI pack: %s\n", name ? name : "(null)");
+    }
 }
 
 void platform_stop_midi(void) {
+    ps2_music_stop();
 }
 #endif
