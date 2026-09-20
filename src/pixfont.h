@@ -18,6 +18,12 @@ typedef struct {
     int *charOffsetY;
     int *charAdvance;
     int *drawWidth;
+#ifdef __PS2__
+    // PS2 fast path: each glyph row is stored as compact opaque horizontal runs.
+    // The original masks remain available for alpha/tooltip rendering and fallback.
+    uint16_t **charSpanRows;
+    uint8_t **charSpans;
+#endif
     int height;
 } PixFont;
 
