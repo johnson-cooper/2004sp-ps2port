@@ -118,3 +118,31 @@ Expected hardware result: title screen has no music, no delayed music is attempt
 connection should match the proven voice-only checkpoint. If this connects again, do not extend
 audsrv further; implement MIDI controls in a separate companion IOP module loaded only after the
 world is live.
+
+
+## Milestone 3A: separate rs2midi companion IRX, PING only
+
+Real hardware confirmed the rollback at
+`1e6cbfeff8aef0b6d5bcfdd39129860bfdf4ec65`: the exact voice-only audsrv package again connected
+to the server and entered the world. This proves the failed deferred-music build was regressed by
+the private MIDI modifications inside audsrv itself, not by loading `scape_main`.
+
+The voice-only audsrv package is therefore frozen. New MIDI functionality moves into a separate
+local IOP target named `rs2midi`.
+
+Milestone 3A intentionally contains no audio functionality. `rs2midi.irx` has one low-priority
+IOP thread and one RPC service with a PING command. It does not import libsd, initialize SPU2,
+write SPU2 registers, allocate sample memory, or modify audsrv.
+
+The client waits until `scene_state == 2` has remained live for 250 normal game ticks
+(approximately five seconds), then:
+
+1. loads the embedded `rs2midi.irx`;
+2. binds its RPC service;
+3. sends one PING;
+4. expects `0x52533250` as the PONG;
+5. leaves the module idle afterward.
+
+The hardware acceptance criterion is both RPC success and continued healthy RuneScape networking
+after the module is resident. Only after this passes should the companion gain one SPU2 operation
+at a time.
