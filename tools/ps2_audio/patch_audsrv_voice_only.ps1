@@ -4,6 +4,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# CMD/native argument parsing can occasionally leave surrounding quote
+# characters on a path (especially when the caller supplied a directory that
+# ended in a backslash). Normalize defensively before touching the filesystem.
+$SourceDir = $SourceDir.Trim()
+$SourceDir = $SourceDir.Trim('"')
+$SourceDir = $SourceDir.TrimEnd('\', '/')
 $source = Join-Path $SourceDir "iop\sound\audsrv\src\audsrv.c"
 
 if (-not (Test-Path -LiteralPath $source)) {

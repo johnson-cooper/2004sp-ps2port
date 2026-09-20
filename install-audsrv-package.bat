@@ -79,8 +79,13 @@ if not defined PS2YAML (
 )
 
 for %%P in ("!PS2YAML!") do set "SRCDIR=%%~dpP"
+rem %%~dpP always has a trailing backslash. Strip it before passing the
+rem directory as a quoted native argument to PowerShell; otherwise the final
+rem backslash can escape the closing quote and become a literal quote in the
+rem PowerShell argument on Windows.
+if "!SRCDIR:~-1!"=="\" set "SRCDIR=!SRCDIR:~0,-1!"
 
-if not exist "!SRCDIR!package.yaml" (
+if not exist "!SRCDIR!\package.yaml" (
     echo ERROR: Found ps2.yaml but no package.yaml beside it:
     echo   !SRCDIR!
     goto :fail
