@@ -74,13 +74,12 @@
 #define PIX3D_POOL_COUNT 1
 #define DISABLE_FLAMES
 // Radius 14 with a square visibility mask is the hardware-good baseline. This isolated draw-distance
-// experiment extends the camera-centred traversal bound to 18, but world3d.c now admits only a generous
-// camera-facing wedge. Three tiles behind the camera and six tiles of horizontal safety margin remain
-// visible to reduce edge/near-camera popping; the expensive renderer should therefore still see fewer candidate
-// tiles than the old radius-14 square even though the forward horizon is longer.
-// Terrain residency remains the traversal-good 80x80 (12..91), while static loc/model residency stays
-// at the lighter 72x72 window. These residency limits are intentionally unchanged by this experiment.
-#define PS2_RENDER_RADIUS 18
+// Native-audio performance baseline: use a camera-centred traversal bound of 16. world3d.c still
+// admits only the camera-facing wedge, with three tiles behind the camera and six tiles of horizontal
+// safety margin to reduce edge/near-camera popping. Radius 16 recovers useful EE frame-time headroom
+// for SPU2 MIDI RPC traffic while retaining substantially more forward visibility than the old radius-14 baseline.
+// Terrain/static residency limits remain unchanged; this is render traversal only.
+#define PS2_RENDER_RADIUS 16
 // Slightly relax the camera-facing visibility wedge. The previous 2-tile rear / 4-tile side
 // guard could reject a wall's owning tile while part of the wall was still visibly crossing the
 // screen near oblique camera angles. These small margins keep that edge geometry alive without
