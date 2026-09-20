@@ -46,13 +46,17 @@ void ps2_music_shutdown(void) {
  * These bytes are intentionally unreachable. Their only purpose is to move
  * the following ELF sections by the same amount as the failing build.
  */
-__asm__(
-    ".pushsection .text\n"
-    ".space 0xE8, 0\n"
-    ".popsection\n"
-    ".pushsection .rodata\n"
-    ".space 0x50, 0\n"
-    ".popsection\n"
-);
+/*
+ * Use real C objects rather than file-scope .space directives. The first
+ * padding attempt was absent from the stripped final ELF. These objects live
+ * in the same ps2_music.o that is already required for the real music stubs,
+ * and 'used' prevents the compiler from discarding them as unreferenced.
+ * aligned(1) keeps the payload sizes exact.
+ */
+static const unsigned char ps2_layout_text_pad[0xE8]
+    __attribute__((used, section(".text"), aligned(1))) = {0};
+
+static const unsigned char ps2_layout_rodata_pad[0x50]
+    __attribute__((used, section(".rodata"), aligned(1))) = {0};
 
 #endif

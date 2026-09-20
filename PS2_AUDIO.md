@@ -242,3 +242,19 @@ Interpretation:
 - if this inert candidate fails, ELF/memory placement alone is sufficient to trigger the bug;
 - if it connects, section size/layout alone is insufficient and the failing functional changes
   themselves (or their codegen/link composition) must be investigated.
+
+
+### Milestone 3F retention fix
+
+The first inert-padding build still produced the exact hardware-good section sizes, proving the
+file-scope assembler `.space` directives were discarded before the final stripped ELF.
+
+The padding is now represented by real `used` C objects placed explicitly into `.text` and
+`.rodata` with one-byte alignment. Because `ps2_music.o` is already required by the linked
+music stubs, these bytes should remain in the final image.
+
+Do not hardware-test this candidate unless `size -A build/bin/client.elf` reports:
+- `.text` = 823320
+- `.rodata` = 52240
+- `.data` = 175780
+- `.bss` = 309124
