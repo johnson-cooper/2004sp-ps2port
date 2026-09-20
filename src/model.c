@@ -55,6 +55,37 @@ static inline int model_pick_mouse_y(void) {
 #endif
 }
 
+#ifdef __PS2__
+// Exact replacement for (value << 9) / depth on the hot world-model projection path.
+//
+// The table stores ceil(2^32 / depth). The high 32 bits of numerator*reciprocal are therefore
+// either the exact unsigned quotient or one too high; one multiply/compare correction recovers the
+// same truncating result as C integer division. Keeping the result bit-for-bit equivalent avoids
+// introducing vertex shimmer while removing two EE DIV operations per transformed vertex.
+//
+// The magnitude guard keeps numerator = abs(value)<<9 inside signed-31-bit range, which also makes
+// quotient*depth safe in 32-bit unsigned arithmetic. Real scene coordinates are far below this;
+// pathological values simply fall back to the original division.
+static inline int ps2_project_model_coord(int value, int depth) {
+    if (_Pix3D.projectionReciprocal && depth > 1 && depth < PIX3D_PS2_PROJECTION_RECIP_COUNT) {
+        unsigned int magnitude = value < 0 ? 0U - (unsigned int)value : (unsigned int)value;
+        if (magnitude <= 0x003fffffU) {
+            unsigned int numerator = magnitude << 9;
+            unsigned int reciprocal = _Pix3D.projectionReciprocal[depth];
+            unsigned int quotient =
+                (unsigned int)(((unsigned long long)numerator * (unsigned long long)reciprocal) >> 32);
+
+            if (quotient * (unsigned int)depth > numerator) {
+                quotient--;
+            }
+            return value < 0 ? -(int)quotient : (int)quotient;
+        }
+    }
+
+    return (value << 9) / depth;
+}
+#endif
+
 static void model_bucket_face(int depth_average, int face) {
     if (depth_average < 0 || depth_average >= MODEL_MAX_DEPTH) {
 #ifdef __PS2__
@@ -226,8 +257,13 @@ void model_draw(Model *m, int yaw, int sinCameraPitch, int cosCameraPitch, int s
         z = (y * sinCameraPitch + z * cosCameraPitch) >> 16;
         _Model.vertex_screen_z[v] = z - b;
         if (z >= 50) {
+#ifdef __PS2__
+            _Model.vertex_screen_x[v] = cx + ps2_project_model_coord(x, z);
+            _Model.vertex_screen_y[v] = cy + ps2_project_model_coord(temp, z);
+#else
             _Model.vertex_screen_x[v] = cx + (x << 9) / z;
             _Model.vertex_screen_y[v] = cy + (temp << 9) / z;
+#endif
         } else {
             _Model.vertex_screen_x[v] = -5000;
             project = true;
