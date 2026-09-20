@@ -117,10 +117,16 @@ static inline void pixfont_ps2_fill_run(int *dst, int len, int rgb) {
 }
 
 static void pixfont_draw_glyph_ps2(PixFont *pixfont, int glyph, int x, int y, int rgb) {
-    if (!pixfont || glyph < 0 || glyph >= 94 || !pixfont->charSpanRows ||
+    if (!pixfont) {
+        return;
+    }
+
+    if (glyph < 0 || glyph >= 94 || !pixfont->charSpanRows ||
         !pixfont->charSpans || !pixfont->charSpanRows[glyph]) {
-        drawChar(pixfont->charMask[glyph], x, y,
-                 pixfont->charMaskWidth[glyph], pixfont->charMaskHeight[glyph], rgb);
+        if (glyph >= 0 && glyph < 94) {
+            drawChar(pixfont->charMask[glyph], x, y,
+                     pixfont->charMaskWidth[glyph], pixfont->charMaskHeight[glyph], rgb);
+        }
         return;
     }
 
