@@ -12392,12 +12392,9 @@ void client_draw_on_minimap(Client *c, int dy, Pix24 *image, int dx) {
 
 #ifdef __PS2__
 static void ps2_draw_chat_string(PixFont *font, int x, int y, const char *text, int color) {
-    // The complete 765x503 software UI is scaled down for the PS2 output, so the stock p12
-    // strokes become difficult to read on a real 480i/480p display. Reuse the already-loaded
-    // bold font and add a one-pixel shadow instead of allocating another font/texture.
-    if (color != BLACK) {
-        drawString(font, x + 1, y + 1, text, BLACK);
-    }
+    // Hardware performance experiment: keep the same bold12 glyphs/spacing/colors, but draw
+    // each chat string only once. The previous one-pixel black shadow doubled the software
+    // glyph-raster work for every non-black chat line before the final PS2 framebuffer upload.
     drawString(font, x, y, text, color);
 }
 #endif
