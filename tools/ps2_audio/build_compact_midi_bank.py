@@ -85,18 +85,31 @@ def _region_for_program(resolver: SoundFontResolver, program: int):
     return note, region
 
 
-def _stored_fundamental(region) -> float:
-    """Approximate the PCM's fundamental when played at region.sample_rate."""
-    tuning_cents = (
-        region.coarse_tune * 100.0
-        + region.fine_tune
-        + region.correction
-    )
-    nominal = 440.0 * (2.0 ** ((region.root_key - 69) / 12.0))
-    return nominal * (2.0 ** (-tuning_cents / 1200.0))
+def _stored_fundamental(resolver: SoundFontResolver, region) -> float:
+    """Estimate the pitch physically stored in the raw SF2 PCM.
+
+    SoundFont region root-key/coarse/fine generators describe how a sample is
+    mapped during playback. They do not change the pitch already recorded in
+    the sample pool. Using them here can make a one-cycle extractor choose a
+    two-cycle segment (or vice versa), producing octave errors in the compact
+    wavetable.
+
+    The sample header's originalPitch is the correct anchor for the raw PCM.
+    pitchCorrection is the cents adjustment required at playback, so invert it
+    to recover the stored waveform's native pitch.
+    """
+    header = resolver.sample_headers[region.sample_id]
+    original_pitch = int(header[6])
+    pitch_correction = int(header[7])
+
+    if original_pitch < 0 or original_pitch > 127:
+        original_pitch = 60
+
+    nominal = 440.0 * (2.0 ** ((original_pitch - 69) / 12.0))
+    return nominal * (2.0 ** (-pitch_correction / 1200.0))
 
 
-def _best_period(pcm, region) -> tuple[int, int, int]:
+def _best_period(resolver: SoundFontResolver, pcm, region) -> tuple[int, int, int, float]:
     """Return (period_samples, stable_start, stable_end)."""
     if len(pcm) < 64:
         raise ValueError("SoundFont region is too short for wavetable extraction")
@@ -111,13 +124,20 @@ def _best_period(pcm, region) -> tuple[int, int, int]:
     if hi - lo < 64:
         lo, hi = 0, len(pcm)
 
-    fundamental = _stored_fundamental(region)
+    fundamental = _stored_fundamental(resolver, region)
     if fundamental <= 1.0:
         raise ValueError("invalid SoundFont sample tuning")
 
     estimate = region.sample_rate / fundamental
-    pmin = max(8, int(math.floor(estimate * 0.82)))
-    pmax = max(pmin, int(math.ceil(estimate * 1.18)))
+
+        #
+        # Stay close to the SF2 sample-header pitch. The old +/-18% search could
+     * follow a strong harmonic when the region mapping metadata was not the
+     * same as the raw sample pitch. A narrow window still lets autocorrelation
+     * find a clean seam without permitting octave-family mistakes.
+    
+    pmin = max(8, int(math.floor(estimate * 0.94)))
+    pmax = max(pmin, int(math.ceil(estimate * 1.06)))
 
     # Use a stable area near the beginning of the SoundFont loop/sustain.
     anchor = lo
@@ -140,7 +160,11 @@ def _best_period(pcm, region) -> tuple[int, int, int]:
             signal += a * a
 
         normalized = error / max(signal, 1.0)
-        candidate = (normalized, abs(period - estimate), period)
+        # Prefer a clean seam, but penalize drifting away from the SF2 header
+        # period so a strong overtone cannot win merely by correlating better.
+        relative_error = abs(period - estimate) / max(estimate, 1.0)
+        score = normalized + relative_error * 0.20
+        candidate = (score, relative_error, period)
         if best is None or candidate < best:
             best = candidate
 
@@ -149,7 +173,14 @@ def _best_period(pcm, region) -> tuple[int, int, int]:
     else:
         period = best[2]
 
-    return period, anchor, hi
+    ratio = period / max(estimate, 1.0)
+    if not 0.90 <= ratio <= 1.10:
+        raise ValueError(
+            f"unsafe SoundFont period selection: expected {estimate:.2f}, "
+            f"selected {period} (ratio {ratio:.3f})"
+        )
+
+    return period, anchor, hi, estimate
 
 
 def _average_cycle(pcm, period: int, anchor: int, end: int) -> list[float]:
@@ -229,16 +260,22 @@ def build(soundfont: Path, output: Path) -> None:
         reference_note, region = _region_for_program(resolver, program)
         pcm = resolver.pcm_for(region)
 
-        period, anchor, stable_end = _best_period(pcm, region)
+        period, anchor, stable_end, expected_period = _best_period(
+            resolver, pcm, region
+        )
         cycle = _average_cycle(pcm, period, anchor, stable_end)
         wavetable = _make_wavetable(cycle)
         raw = _raw_adpcm(wavetable)
 
         slots.append((program, preset_name, reference_note, region, period, raw))
+        sample_header = resolver.sample_headers[region.sample_id]
+        original_pitch = int(sample_header[6])
         print(
             f"slot {slot}: program={program:3d} {preset_name!r} "
-            f"sample={region.sample_id} root={region.root_key} "
-            f"rate={region.sample_rate} period={period} loop={region.looping}"
+            f"sample={region.sample_id} sf2_pitch={original_pitch} "
+            f"mapped_root={region.root_key} rate={region.sample_rate} "
+            f"period={period} expected={expected_period:.2f} "
+            f"ratio={period / expected_period:.4f} loop={region.looping}"
         )
 
     target_freq = 440.0 * (2.0 ** ((BASE_NOTE - 69) / 12.0))
