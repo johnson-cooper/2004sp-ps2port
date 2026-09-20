@@ -765,14 +765,20 @@ bool platform_init(void) {
     padSetMainMode(0, 0, PAD_MMODE_DUALSHOCK, PAD_MMODE_LOCK);
     ps2_boot_progress(90);
 
-    // Audio comes LAST. Real-hardware testing already proved that unrelated IOP activity
-    // interleaved with DEV9/SMAP bring-up can stall the machine, so do not move this above
-    // networking, USB or pad initialization without a new isolated hardware test.
-    //
-    // LIBSD is the SPU2 dependency used by audsrv's IOP module. audsrv itself is embedded by
-    // ps2.yaml from the standalone PS2Build package installed by install-audsrv-package.bat.
-    // Failure is deliberately non-fatal: a missing/bad audio package must not turn a working
-    // RuneScape build into a boot failure.
+    StartTimerSystemTime();
+
+    return true;
+}
+
+// Real-hardware audio bring-up is intentionally deferred until AFTER a successful
+// RuneScape login handshake. Loading/initializing audsrv during platform_init() was proven to
+// leave the title screen alive but break the later server connection. Keeping this idempotent
+// lets reconnect-success call it safely without ever reloading the IOP module.
+void ps2_audio_start_after_login(void) {
+    if (ps2_audio_ready) {
+        return;
+    }
+
     extern unsigned char audsrv_embed_irx[];
     extern unsigned int size_audsrv_embed_irx;
 
@@ -780,48 +786,42 @@ bool platform_init(void) {
     int audsrv_modres = -1;
     int audsrv_module_ret = SifExecModuleBuffer(
         audsrv_embed_irx, size_audsrv_embed_irx, 0, NULL, &audsrv_modres);
-    rs2_log("audio: LIBSD ret=%d audsrv ret=%d modres=%d\n",
+    rs2_log("audio: post-login LIBSD ret=%d audsrv ret=%d modres=%d\n",
             libsd_ret, audsrv_module_ret, audsrv_modres);
 
-    if (audsrv_module_ret >= 0 && audsrv_modres >= 0) {
-        int audsrv_init_ret = audsrv_init();
-        int adpcm_init_ret = -1;
-        if (audsrv_init_ret == AUDSRV_ERR_NOERROR) {
-            adpcm_init_ret = audsrv_adpcm_init();
-        }
-        rs2_log("audio: audsrv_init=%d adpcm_init=%d\n",
-                audsrv_init_ret, adpcm_init_ret);
-
-        if (audsrv_init_ret == AUDSRV_ERR_NOERROR &&
-            adpcm_init_ret == AUDSRV_ERR_NOERROR) {
-            ps2_audio_ready = true;
-
-            // A short, low-volume 660 Hz ADPCM beep is the entire milestone-1 acceptance
-            // test. It was encoded offline in the exact 16-byte APCM format audsrv expects,
-            // so hearing it proves EE RPC -> IOP audsrv -> SPU2 without enabling any costly
-            // RuneScape software synthesis.
-            int load_ret = audsrv_load_adpcm(
-                &ps2_audio_test_sample,
-                (void *)ps2_audio_test_adpcm,
-                (int)ps2_audio_test_adpcm_size);
-            int channel = -1;
-            if (load_ret == AUDSRV_ERR_NOERROR) {
-                channel = audsrv_ch_play_adpcm(-1, &ps2_audio_test_sample);
-                if (channel >= 0) {
-                    audsrv_adpcm_set_volume_and_pan(channel, 35, 0);
-                }
-            }
-            rs2_log("audio: smoke sample load=%d channel=%d size=%u\n",
-                    load_ret, channel, ps2_audio_test_adpcm_size);
-        }
-    } else {
-        rs2_log("audio: audsrv module unavailable; continuing without audio\n");
+    if (audsrv_module_ret < 0 || audsrv_modres < 0) {
+        rs2_log("audio: post-login audsrv module unavailable; continuing without audio\n");
+        return;
     }
 
-    ps2_boot_progress(92);
-    StartTimerSystemTime();
+    int audsrv_init_ret = audsrv_init();
+    int adpcm_init_ret = -1;
+    if (audsrv_init_ret == AUDSRV_ERR_NOERROR) {
+        adpcm_init_ret = audsrv_adpcm_init();
+    }
+    rs2_log("audio: post-login audsrv_init=%d adpcm_init=%d\n",
+            audsrv_init_ret, adpcm_init_ret);
 
-    return true;
+    if (audsrv_init_ret != AUDSRV_ERR_NOERROR ||
+        adpcm_init_ret != AUDSRV_ERR_NOERROR) {
+        return;
+    }
+
+    ps2_audio_ready = true;
+
+    int load_ret = audsrv_load_adpcm(
+        &ps2_audio_test_sample,
+        (void *)ps2_audio_test_adpcm,
+        (int)ps2_audio_test_adpcm_size);
+    int channel = -1;
+    if (load_ret == AUDSRV_ERR_NOERROR) {
+        channel = audsrv_ch_play_adpcm(-1, &ps2_audio_test_sample);
+        if (channel >= 0) {
+            audsrv_adpcm_set_volume_and_pan(channel, 35, 0);
+        }
+    }
+    rs2_log("audio: post-login smoke sample load=%d channel=%d size=%u\n",
+            load_ret, channel, ps2_audio_test_adpcm_size);
 }
 
 void platform_new(GameShell *shell) {

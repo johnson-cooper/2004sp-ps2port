@@ -28,3 +28,15 @@ of using the expensive EE-side 22.05 kHz tone synthesizer.
 Stock audsrv is sufficient for the smoke test and one-shot SFX. MIDI playback will require a
 small audsrv/IOP extension for per-voice pitch, key-off, ADSR and later sequencer ownership.
 Keep that extension isolated from the generic SDK package until this base path is proven on hardware.
+
+
+## Real-hardware result: defer audio until login
+
+The first audsrv smoke build successfully produced the ADPCM beep on real PS2 hardware, proving
+LIBSD + audsrv + SPU2 playback worked. However, initializing audsrv inside `platform_init()`
+left the title screen responsive but caused the later RuneScape server connection to fail.
+
+Audio initialization is therefore now deferred until the login server has already returned a
+successful login reply and `c->ingame` is set. This keeps the entire title-screen/network login
+path identical to the accepted baseline. The post-login audio initializer is idempotent so
+reconnect success cannot reload audsrv twice.
