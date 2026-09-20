@@ -1212,6 +1212,13 @@ void client_update(Client *c) {
 
 void handleChatMouseInput(Client *c, int mouseX, int mouseY) {
     (void)mouseX;
+#ifdef __PS2__
+    const int chatLineHeight = 15;
+    const int chatBaseY = 74;
+#else
+    const int chatLineHeight = 14;
+    const int chatBaseY = 70;
+#endif
     int line = 0;
     for (int i = 0; i < 100; i++) {
         if (c->message_text[i][0] == '\0') {
@@ -1219,7 +1226,7 @@ void handleChatMouseInput(Client *c, int mouseX, int mouseY) {
         }
 
         int type = c->message_type[i];
-        int y = c->chat_scroll_offset + 70 + 4 - line * 14;
+        int y = c->chat_scroll_offset + chatBaseY + 4 - line * chatLineHeight;
         if (y < -20) {
             break;
         }
@@ -1229,7 +1236,7 @@ void handleChatMouseInput(Client *c, int mouseX, int mouseY) {
         }
 
         if ((type == 1 || type == 2) && (type == 1 || c->public_chat_setting == 0 || (c->public_chat_setting == 1 && client_is_friend(c, c->message_sender[i])))) {
-            if (mouseY > y - 14 && mouseY <= y && strcmp(c->message_sender[i], c->local_player->name) != 0) {
+            if (mouseY > y - chatLineHeight && mouseY <= y && strcmp(c->message_sender[i], c->local_player->name) != 0) {
                 if (c->rights) {
                     sprintf(c->menu_option[c->menu_size], "Report abuse @whi@%s", c->message_sender[i]);
                     c->menu_action[c->menu_size] = 34;
@@ -1248,7 +1255,7 @@ void handleChatMouseInput(Client *c, int mouseX, int mouseY) {
         }
 
         if ((type == 3 || type == 7) && c->split_private_chat == 0 && (type == 7 || c->private_chat_setting == 0 || (c->private_chat_setting == 1 && client_is_friend(c, c->message_sender[i])))) {
-            if (mouseY > y - 14 && mouseY <= y) {
+            if (mouseY > y - chatLineHeight && mouseY <= y) {
                 if (c->rights) {
                     sprintf(c->menu_option[c->menu_size], "Report abuse @whi@%s", c->message_sender[i]);
                     c->menu_action[c->menu_size] = 34;
@@ -1267,7 +1274,7 @@ void handleChatMouseInput(Client *c, int mouseX, int mouseY) {
         }
 
         if (type == 4 && (c->trade_chat_setting == 0 || (c->trade_chat_setting == 1 && client_is_friend(c, c->message_sender[i])))) {
-            if (mouseY > y - 14 && mouseY <= y) {
+            if (mouseY > y - chatLineHeight && mouseY <= y) {
                 sprintf(c->menu_option[c->menu_size], "Accept trade @whi@%s", c->message_sender[i]);
                 c->menu_action[c->menu_size] = 903;
                 c->menu_size++;
@@ -1281,7 +1288,7 @@ void handleChatMouseInput(Client *c, int mouseX, int mouseY) {
         }
 
         if (type == 8 && (c->trade_chat_setting == 0 || (c->trade_chat_setting == 1 && client_is_friend(c, c->message_sender[i])))) {
-            if (mouseY > y - 14 && mouseY <= y) {
+            if (mouseY > y - chatLineHeight && mouseY <= y) {
                 sprintf(c->menu_option[c->menu_size], "Accept duel @whi@%s", c->message_sender[i]);
                 c->menu_action[c->menu_size] = 363;
                 c->menu_size++;
@@ -12008,6 +12015,18 @@ void client_draw_on_minimap(Client *c, int dy, Pix24 *image, int dx) {
     }
 }
 
+#ifdef __PS2__
+static void ps2_draw_chat_string(PixFont *font, int x, int y, const char *text, int color) {
+    // The complete 765x503 software UI is scaled down for the PS2 output, so the stock p12
+    // strokes become difficult to read on a real 480i/480p display. Reuse the already-loaded
+    // bold font and add a one-pixel shadow instead of allocating another font/texture.
+    if (color != BLACK) {
+        drawString(font, x + 1, y + 1, text, BLACK);
+    }
+    drawString(font, x, y, text, color);
+}
+#endif
+
 void client_draw_chatback(Client *c) {
     pixmap_bind(c->area_chatback);
     _Pix3D.line_offset = c->area_chatback_offsets;
@@ -12032,19 +12051,31 @@ void client_draw_chatback(Client *c) {
     } else if (c->chat_interface_id != -1) {
         client_draw_interface(c, component_get(c->chat_interface_id), 0, 0, 0);
     } else if (c->sticky_chat_interface_id == -1) {
+#ifdef __PS2__
+        // Keep the same 479x96 chatbox and the same loaded font set: bold12 is clearer after
+        // the PS2's final framebuffer scale and costs no additional persistent memory.
+        PixFont *font = c->font_bold12;
+        const int chatLineHeight = 15;
+        const int chatBaseY = 74;
+#define CHAT_DRAW(px, py, str, rgb) ps2_draw_chat_string(font, (px), (py), (str), (rgb))
+#else
         PixFont *font = c->font_plain12;
         if (_Custom.chat_era == 0) {
             font = c->font_quill8;
         }
+        const int chatLineHeight = 14;
+        const int chatBaseY = 70;
+#define CHAT_DRAW(px, py, str, rgb) CHAT_DRAW((px), (py), (str), (rgb))
+#endif
         int line = 0;
         pix2d_set_clipping(77, 463, 0, 0);
         for (int i = 0; i < 100; i++) {
             if (c->message_text[i][0]) {
                 int type = c->message_type[i];
-                int offset = c->chat_scroll_offset + 70 - line * 14;
+                int offset = c->chat_scroll_offset + chatBaseY - line * chatLineHeight;
                 if (type == 0) {
                     if (offset > 0 && offset < 110) {
-                        drawString(font, 4, offset, c->message_text[i], BLACK);
+                        CHAT_DRAW(4, offset, c->message_text[i], BLACK);
                     }
                     line++;
                 }
@@ -12052,8 +12083,8 @@ void client_draw_chatback(Client *c) {
                     if (offset > 0 && offset < 110) {
                         char buf[USERNAME_LENGTH + 2];
                         sprintf(buf, "%s:", c->message_sender[i]);
-                        drawString(font, 4, offset, buf, WHITE);
-                        drawString(font, stringWidth(font, c->message_sender[i]) + 12, offset, c->message_text[i], BLUE);
+                        CHAT_DRAW(4, offset, buf, WHITE);
+                        CHAT_DRAW(stringWidth(font, c->message_sender[i]) + 12, offset, c->message_text[i], BLUE);
                     }
                     line++;
                 }
@@ -12061,8 +12092,8 @@ void client_draw_chatback(Client *c) {
                     if (offset > 0 && offset < 110) {
                         char buf[USERNAME_LENGTH + 2];
                         sprintf(buf, "%s:", c->message_sender[i]);
-                        drawString(font, 4, offset, buf, BLACK);
-                        drawString(font, stringWidth(font, c->message_sender[i]) + 12, offset, c->message_text[i], BLUE);
+                        CHAT_DRAW(4, offset, buf, BLACK);
+                        CHAT_DRAW(stringWidth(font, c->message_sender[i]) + 12, offset, c->message_text[i], BLUE);
                     }
                     line++;
                 }
@@ -12070,9 +12101,9 @@ void client_draw_chatback(Client *c) {
                     if (offset > 0 && offset < 110) {
                         char buf[USERNAME_LENGTH + 7];
                         sprintf(buf, "From %s:", c->message_sender[i]);
-                        drawString(font, 4, offset, buf, BLACK);
+                        CHAT_DRAW(4, offset, buf, BLACK);
                         sprintf(buf, "From %s", c->message_sender[i]);
-                        drawString(font, stringWidth(font, buf) + 12, offset, c->message_text[i], DARKRED);
+                        CHAT_DRAW(stringWidth(font, buf) + 12, offset, c->message_text[i], DARKRED);
                     }
                     line++;
                 }
@@ -12080,13 +12111,13 @@ void client_draw_chatback(Client *c) {
                     if (offset > 0 && offset < 110) {
                         char buf[USERNAME_LENGTH + CHAT_LENGTH + 2];
                         sprintf(buf, "%s %s", c->message_sender[i], c->message_text[i]);
-                        drawString(font, 4, offset, buf, TRADE_MESSAGE);
+                        CHAT_DRAW(4, offset, buf, TRADE_MESSAGE);
                     }
                     line++;
                 }
                 if (type == 5 && c->split_private_chat == 0 && c->private_chat_setting < 2) {
                     if (offset > 0 && offset < 110) {
-                        drawString(font, 4, offset, c->message_text[i], DARKRED);
+                        CHAT_DRAW(4, offset, c->message_text[i], DARKRED);
                     }
                     line++;
                 }
@@ -12094,9 +12125,9 @@ void client_draw_chatback(Client *c) {
                     if (offset > 0 && offset < 110) {
                         char buf[USERNAME_LENGTH + 6];
                         sprintf(buf, "To %s:", c->message_sender[i]);
-                        drawString(font, 4, offset, buf, BLACK);
+                        CHAT_DRAW(4, offset, buf, BLACK);
                         sprintf(buf, "To %s", c->message_sender[i]);
-                        drawString(font, stringWidth(font, buf) + 12, offset, c->message_text[i], DARKRED);
+                        CHAT_DRAW(stringWidth(font, buf) + 12, offset, c->message_text[i], DARKRED);
                     }
                     line++;
                 }
@@ -12104,14 +12135,14 @@ void client_draw_chatback(Client *c) {
                     if (offset > 0 && offset < 110) {
                         char buf[USERNAME_LENGTH + CHAT_LENGTH + 2];
                         sprintf(buf, "%s %s", c->message_sender[i], c->message_text[i]);
-                        drawString(font, 4, offset, buf, DUEL_MESSAGE);
+                        CHAT_DRAW(4, offset, buf, DUEL_MESSAGE);
                     }
                     line++;
                 }
             }
         }
         pix2d_reset_clipping();
-        c->chat_scroll_height = line * 14 + 7;
+        c->chat_scroll_height = line * chatLineHeight + 7;
         if (c->chat_scroll_height < 78) {
             c->chat_scroll_height = 78;
         }
@@ -12121,22 +12152,38 @@ void client_draw_chatback(Client *c) {
             // 186-194?
             char buf2[CHAT_LENGTH + 2];
             sprintf(buf2, "%s*", c->chat_typed);
-            drawString(font, 3, 90, buf2, BLACK);
+            #ifdef __PS2__
+            CHAT_DRAW(3, 92,
+#else
+            CHAT_DRAW(3, 90,
+#endif buf2, BLACK);
         } else if (_Custom.chat_era == 1) {
             // <204
             char buf2[CHAT_LENGTH + 2];
             sprintf(buf2, "%s*", c->chat_typed);
-            drawString(font, 3, 90, buf2, BLUE);
+            #ifdef __PS2__
+            CHAT_DRAW(3, 92,
+#else
+            CHAT_DRAW(3, 90,
+#endif buf2, BLUE);
         } else if (_Custom.chat_era == 2) {
             // 204+
             char buf[USERNAME_LENGTH + 3];
             sprintf(buf, "%s:", jstring_format_name(c->username));
-            drawString(font, 4, 90, buf, BLACK);
+            #ifdef __PS2__
+            CHAT_DRAW(4, 92, buf, BLACK);
+#else
+            CHAT_DRAW(4, 90, buf, BLACK);
+#endif
             sprintf(buf, "%s: ", c->username);
 
             char buf2[CHAT_LENGTH + 2];
             sprintf(buf2, "%s*", c->chat_typed);
-            drawString(font, stringWidth(font, buf) + 6, 90, buf2, BLUE);
+            #ifdef __PS2__
+            CHAT_DRAW(stringWidth(font, buf) + 6, 92, buf2, BLUE);
+#else
+            CHAT_DRAW(stringWidth(font, buf) + 6, 90, buf2, BLUE);
+#endif
         }
 
         pix2d_hline(0, 77, BLACK, 479);
@@ -12149,6 +12196,7 @@ void client_draw_chatback(Client *c) {
     pixmap_draw(c->area_chatback, 17, 357);
     pixmap_bind(c->area_viewport);
     _Pix3D.line_offset = c->area_viewport_offsets;
+#undef CHAT_DRAW
 }
 
 bool client_is_friend(Client *c, const char *username) {
@@ -12626,6 +12674,16 @@ static void client_draw_interface(Client *c, Component *com, int x, int y, int s
             }
         } else if (child->type == 4) {
             PixFont *font = child->font;
+#ifdef __PS2__
+            // Dialogue/tutorial/bank text is rendered through interface components, not the normal
+            // chat-history path. When that interface is being drawn into the chatback, use the
+            // already-resident bold12 font as well. This improves real-TV readability without
+            // introducing a larger font asset or retaining any extra chat surfaces.
+            const bool ps2ChatText = c->area_chatback && _Pix2D.pixels == c->area_chatback->pixels;
+            if (ps2ChatText) {
+                font = c->font_bold12;
+            }
+#endif
             int color = child->colour;
             char text[DOUBLE_STR];
             strcpy(text, child->text);
@@ -12740,9 +12798,17 @@ static void client_draw_interface(Client *c, Component *com, int x, int y, int s
                 }
 
                 if (child->center) {
+#ifdef __PS2__
+                    drawStringTaggableCenter(font, split, childX + child->width / 2, lineY, color, child->shadowed || ps2ChatText);
+#else
                     drawStringTaggableCenter(font, split, childX + child->width / 2, lineY, color, child->shadowed);
+#endif
                 } else {
+#ifdef __PS2__
+                    drawStringTaggable(font, childX, lineY, split, color, child->shadowed || ps2ChatText);
+#else
                     drawStringTaggable(font, childX, lineY, split, color, child->shadowed);
+#endif
                 }
             }
         } else if (child->type == 5) {
