@@ -11885,13 +11885,44 @@ void pushPlayers(Client *c) {
             continue;
         }
 
-        player->lowmem = ((_Client.lowmem && c->player_count > 50) || c->player_count > 200) && i != -1 && player->pathing_entity.secondarySeqId == player->pathing_entity.seqStandId;
         int stx = player->pathing_entity.x >> 7;
         int stz = player->pathing_entity.z >> 7;
 
         if (stx < 0 || stx >= 104 || stz < 0 || stz >= 104) {
             continue;
         }
+
+#ifdef __PS2__
+        // Crowd LOD: player state continues to update normally, but only nearby remote players are
+        // submitted to the expensive software 3D path. Mid-distance players reuse the cached,
+        // unanimated appearance model through PlayerEntity::lowmem. Preserve full detail for combat/
+        // interaction-relevant players and temporary loc-model transformations.
+        int localStx = c->local_player->pathing_entity.x >> 7;
+        int localStz = c->local_player->pathing_entity.z >> 7;
+        int dx = stx - localStx;
+        int dz = stz - localStz;
+        if (dx < 0) dx = -dx;
+        if (dz < 0) dz = -dz;
+        int playerDistance = dx > dz ? dx : dz;
+
+        int playerIndex = c->player_ids[i];
+        int localTarget = c->local_player->pathing_entity.targetId;
+        bool interactionImportant =
+            localTarget == playerIndex + 32768 ||
+            player->pathing_entity.targetId == LOCAL_PLAYER_INDEX + 32768 ||
+            player->locModel ||
+            (player->pathing_entity.spotanimId != -1 && player->pathing_entity.spotanimFrame != -1);
+
+        if (!interactionImportant && playerDistance > PS2_PLAYER_RENDER_RADIUS) {
+            continue;
+        }
+
+        player->lowmem =
+            !interactionImportant &&
+            playerDistance > PS2_PLAYER_FULL_DETAIL_RADIUS;
+#else
+        player->lowmem = ((_Client.lowmem && c->player_count > 50) || c->player_count > 200) && i != -1 && player->pathing_entity.secondarySeqId == player->pathing_entity.seqStandId;
+#endif
 
         if (!player->locModel || _Client.loop_cycle < player->locStartCycle || _Client.loop_cycle >= player->locStopCycle) {
             if ((player->pathing_entity.x & 0x7f) == 64 && (player->pathing_entity.z & 0x7f) == 64) {

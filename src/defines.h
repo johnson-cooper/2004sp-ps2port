@@ -91,6 +91,11 @@
 #define PS2_ROOF_RENDER_RADIUS 8
 #define PS2_WALL_DECOR_RENDER_RADIUS 8
 #define PS2_GROUND_DECOR_RENDER_RADIUS 6
+// Remote-player LOD for crowded areas. Nearby players retain normal animated models; mid-distance
+// players reuse their cached appearance mesh through the existing lowmem path; very distant remote
+// players are not submitted to World3D. Network state and interaction state are still maintained.
+#define PS2_PLAYER_FULL_DETAIL_RADIUS 6
+#define PS2_PLAYER_RENDER_RADIUS 14
 #define PS2_LOC_MIN_TILE 16
 #define PS2_LOC_MAX_TILE 88
 #define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 12)
