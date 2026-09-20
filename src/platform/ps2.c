@@ -288,6 +288,70 @@ const char *ps2_cache_prefix(void) {
     return prefix;
 }
 
+// Milestone 3C: rs2midi stays OUTSIDE client.elf. Real hardware proved that
+// merely embedding the companion IRX was enough to regress pre-login
+// networking, even though the module was not executed. Load the standalone
+// file only after the world is live.
+//
+// Keep this intentionally tiny and PING-only: no libsd/SPU2 use here. The
+// companion file is expected beside client.elf, which is also the install
+// prefix already resolved by ps2_cache_prefix().
+#define RS2MIDI_RPC_ID 0x5253324d
+#define RS2MIDI_RPC_PING 0
+#define RS2MIDI_PONG 0x52533250u
+
+bool ps2_rs2midi_external_ping_test(void) {
+    char path[320];
+    snprintf(path, sizeof(path), "%srs2midi.irx", ps2_cache_prefix());
+
+    // Prove the EE/file layer sees the exact file before asking LOADFILE to
+    // open it on the IOP side. This gives a clear log for bad staging/path.
+    FILE *probe = fopen(path, "rb");
+    if (!probe) {
+        rs2_log("audio: rs2midi external file missing: %s\n", path);
+        return false;
+    }
+    fclose(probe);
+
+    int modres = -1;
+    int module_id = SifLoadStartModule(path, 0, NULL, &modres);
+    rs2_log("audio: rs2midi external load path=%s id=%d modres=%d\n",
+            path, module_id, modres);
+    if (module_id < 0 || modres < 0) {
+        return false;
+    }
+
+    SifRpcClientData_t rpc;
+    memset(&rpc, 0, sizeof(rpc));
+    for (int attempt = 0; attempt < 64; attempt++) {
+        int rc = sceSifBindRpc(&rpc, RS2MIDI_RPC_ID, 0);
+        if (rc < 0) {
+            rs2_log("audio: rs2midi external bind failed rc=%d attempt=%d\n",
+                    rc, attempt);
+            return false;
+        }
+        if (rpc.server) {
+            break;
+        }
+        DelayThread(1000);
+    }
+    if (!rpc.server) {
+        rs2_log("audio: rs2midi external RPC server did not bind\n");
+        return false;
+    }
+
+    uint32_t rpcbuf[16] __attribute__((aligned(64)));
+    memset(rpcbuf, 0, sizeof(rpcbuf));
+    rpcbuf[0] = 0x12345678u;
+    int call_rc = sceSifCallRpc(&rpc, RS2MIDI_RPC_PING, 0,
+                                rpcbuf, sizeof(uint32_t),
+                                rpcbuf, sizeof(uint32_t),
+                                NULL, NULL);
+    rs2_log("audio: rs2midi external ping call=%d pong=0x%08x\n",
+            call_rc, (unsigned int)rpcbuf[0]);
+    return call_rc >= 0 && rpcbuf[0] == RS2MIDI_PONG;
+}
+
 // See platform.c's rs2_log()/rs2_error() - a hang or crash reached via uLaunchELF/a real USB boot
 // has no live console at all (unlike PCSX2, or ps2link when its own link survives), so this is the
 // only way to get a postmortem trace back off real hardware afterward: plug the drive into a PC and

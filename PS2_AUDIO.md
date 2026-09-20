@@ -161,3 +161,24 @@ removed, restoring src/entry/client.c to the exact voice-only checkpoint that co
 Hardware question: does RuneScape connect again when rs2midi merely exists as a separate build
 artifact but contributes zero bytes, symbols or code to client.elf? If yes, the next companion test
 must load rs2midi from storage after the world is live rather than embedding it.
+
+
+## Milestone 3C: load standalone rs2midi.irx after world entry
+
+Real hardware confirmed Milestone 3B at
+`548b27cb8ca4e30e60a8fcb4f8c7bd92c6004924`: RuneScape connected and entered the world when
+the rs2midi target was built separately but contributed no bytes or symbols to client.elf.
+
+This proves the Milestone 3A failure happened before the companion could run and was caused by the
+embedded/client-ELF configuration itself. Keep rs2midi external.
+
+Milestone 3C adds only a small EE-side loader inside the existing PS2 platform source. After
+`scene_state == 2` has remained live for 250 game ticks (about five seconds), it resolves the
+same install prefix used by the cache, verifies `rs2midi.irx` exists beside `client.elf`, loads
+it with `SifLoadStartModule()`, binds the PING-only RPC server, and sends one PING.
+
+The standalone file must be staged beside `client.elf` on the USB install. The module still does
+no SPU2/libsd work. The hardware acceptance test is:
+1. login and world entry still succeed before the trigger;
+2. external load + PING reports PASS;
+3. RuneScape networking remains healthy afterward.
