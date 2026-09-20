@@ -29,17 +29,26 @@ SECTIONS {
     PROVIDE(etext = .);
 
     .ctors ALIGN(16): {
+        /*
+         * Current PS2Build startup/crt0 walks ctor boundaries explicitly.
+         * Keep the legacy section ordering but expose the symbols expected by
+         * the active startup library.
+         */
+        __CTOR_LIST__ = .;
         KEEP(*crtbegin*.o(.ctors))
         KEEP(*(EXCLUDE_FILE(*crtend*.o) .ctors))
         KEEP(*(SORT(.ctors.*)))
         KEEP(*(.ctors))
+        __CTOR_END__ = .;
     }
 
     .dtors ALIGN(16): {
+        __DTOR_LIST__ = .;
         KEEP(*crtbegin*.o(.dtors))
         KEEP(*(EXCLUDE_FILE(*crtend*.o) .dtors))
         KEEP(*(SORT(.dtors.*)))
         KEEP(*(.dtors))
+        __DTOR_END__ = .;
     }
 
     .reginfo : { *(.reginfo) }
