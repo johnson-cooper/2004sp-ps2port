@@ -60,6 +60,33 @@ static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int scene
     if (dz < 0) dz = -dz;
     return dx <= radius && dz <= radius;
 }
+
+static int ps2_inactive_loc_draw_count = 0;
+
+static inline bool ps2_claim_inactive_loc_budget(int bitset, int sceneX, int sceneZ) {
+    // Only inactive/non-actionable map locs consume this budget. Active/actionable map locs and
+    // dynamic entities keep their normal render path.
+    if ((bitset & 0x40000000) == 0 || bitset >= 0) {
+        return true;
+    }
+
+    int dx = (sceneX >> 7) - _World3D.eyeTileX;
+    int dz = (sceneZ >> 7) - _World3D.eyeTileZ;
+    if (dx < 0) dx = -dx;
+    if (dz < 0) dz = -dz;
+    int distance = dx > dz ? dx : dz;
+
+    if (distance <= PS2_INACTIVE_LOC_ALWAYS_RADIUS) {
+        return true;
+    }
+
+    if (ps2_inactive_loc_draw_count >= PS2_INACTIVE_LOC_DRAW_BUDGET) {
+        return false;
+    }
+
+    ps2_inactive_loc_draw_count++;
+    return true;
+}
 #endif
 
 const int FRONT_WALL_TYPES[] = {19, 55, 38, 155, 255, 110, 137, 205, 76};
@@ -1753,7 +1780,8 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
                 farthest->cycle = _World3D.cycle;
 
 #ifdef __PS2__
-                if (ps2_should_draw_loc_detail(farthest->bitset, farthest->info, farthest->x, farthest->z)) {
+                if (ps2_should_draw_loc_detail(farthest->bitset, farthest->info, farthest->x, farthest->z) &&
+                    ps2_claim_inactive_loc_budget(farthest->bitset, farthest->x, farthest->z)) {
 #endif
                     Model *model = farthest->model;
                     bool _free = false;

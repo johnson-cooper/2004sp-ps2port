@@ -95,6 +95,11 @@
 #define PS2_ROOF_RENDER_RADIUS 8
 #define PS2_WALL_DECOR_RENDER_RADIUS 8
 #define PS2_GROUND_DECOR_RENDER_RADIUS 6
+// Additional dense-scene guard for inactive map locs. Nearby scenery is never budgeted; outside
+// that near ring, at most this many inactive Location models are submitted per rendered frame.
+// Active/actionable locs, dynamic locs, walls and interaction state remain untouched.
+#define PS2_INACTIVE_LOC_ALWAYS_RADIUS 5
+#define PS2_INACTIVE_LOC_DRAW_BUDGET 48
 // Remote-player LOD for crowded areas. Nearby players retain normal animated models; mid-distance
 // players reuse their cached appearance mesh through the existing lowmem path; very distant remote
 // players are not submitted to World3D. Network state and interaction state are still maintained.
