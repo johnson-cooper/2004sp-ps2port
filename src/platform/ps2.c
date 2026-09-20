@@ -966,6 +966,11 @@ void platform_poll_events(Client *c) {
     if (left_stick_active && c->controller_grid_component >= 0) {
         ps2_release_grid_focus(c);
     }
+    if (left_stick_active && c->controller_chatbox_focus) {
+        // Returning to free pointer control exits the explicit chatbox-focus mode immediately.
+        c->controller_chatbox_focus = false;
+        c->redraw_chatback = true;
+    }
 
     // Left stick moves the virtual pointer; right stick remains independent camera control.
     int dx = 0;
@@ -1000,7 +1005,7 @@ void platform_poll_events(Client *c) {
     if (cross && !cross_was_down) {
         if (c->virtual_keyboard_visible) {
             c->controller_keyboard_confirm_pressed = true;
-        } else if (c->controller_settings_visible || c->menu_visible) {
+        } else if (c->controller_settings_visible || c->menu_visible || c->controller_chatbox_focus) {
             c->controller_confirm_pressed = true;
         } else {
             c->controller_primary_action = true;

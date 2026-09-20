@@ -168,12 +168,6 @@ const char *ps2_cache_prefix(void);
 static void ps2_draw_large_status(Client *c, const char *status);
 static void ps2_runtime_checkpoint(Client *c, const char *status);
 
-// Small controller-friendly button drawn inside the retained 479x96 chatback PixMap.
-// Local coordinates are converted to screen coordinates by adding the stock chatback origin.
-#define PS2_CHAT_BUTTON_X 402
-#define PS2_CHAT_BUTTON_Y 79
-#define PS2_CHAT_BUTTON_W 58
-#define PS2_CHAT_BUTTON_H 16
 #endif
 
 #ifdef __PS2__
@@ -4423,26 +4417,6 @@ static void handleMouseInput(Client *c) {
     bool controller_primary = c->controller_primary_action;
     c->controller_primary_action = false;
 
-#ifdef __PS2__
-    // A visible Chat button makes text entry discoverable with the stick/cursor as well as Start.
-    // Keep it out of every modal/dialogue/input state so it can never steal an interface click.
-    if (button == 1 &&
-        c->ingame &&
-        !c->virtual_keyboard_visible &&
-        c->chat_interface_id == -1 &&
-        c->sticky_chat_interface_id == -1 &&
-        !c->show_social_input &&
-        !c->chatback_input_open &&
-        !c->modal_message[0] &&
-        c->shell->mouse_click_x >= CONTROLLER_CHATBACK_SCREEN_X + PS2_CHAT_BUTTON_X &&
-        c->shell->mouse_click_x <  CONTROLLER_CHATBACK_SCREEN_X + PS2_CHAT_BUTTON_X + PS2_CHAT_BUTTON_W &&
-        c->shell->mouse_click_y >= CONTROLLER_CHATBACK_SCREEN_Y + PS2_CHAT_BUTTON_Y &&
-        c->shell->mouse_click_y <  CONTROLLER_CHATBACK_SCREEN_Y + PS2_CHAT_BUTTON_Y + PS2_CHAT_BUTTON_H) {
-        c->shell->mouse_click_button = 0;
-        virtual_keyboard_maybe_open(c, 2);
-        return;
-    }
-#endif
 
     if (c->spell_selected == 1 && c->shell->mouse_click_x >= 516 && c->shell->mouse_click_y >= 160 && c->shell->mouse_click_x <= 765 && c->shell->mouse_click_y <= 205) {
         button = 0;
@@ -4693,7 +4667,8 @@ static void handleControllerTabInput(Client *c) {
 
     int step = c->controller_tab_step;
     c->controller_tab_step = 0;
-    if (c->controller_settings_visible || c->virtual_keyboard_visible || c->menu_visible) {
+    if (c->controller_settings_visible || c->virtual_keyboard_visible || c->menu_visible ||
+        c->controller_chatbox_focus) {
         return;
     }
 
@@ -4779,6 +4754,11 @@ static void controller_dialogue_collect(Component *layer, int x, int y, int scro
 }
 
 static void handleControllerDialogueInput(Client *c) {
+    if (c->chat_interface_id != -1 && c->controller_chatbox_focus) {
+        c->controller_chatbox_focus = false;
+        c->redraw_chatback = true;
+    }
+
     if (c->chat_interface_id == -1) {
         c->controller_dialogue_interface_id = -1;
         c->controller_dialogue_index = 0;
@@ -5037,12 +5017,54 @@ static void handleControllerButtonInput(Client *c) {
     if (c->controller_start_pressed) {
         c->controller_start_pressed = false;
         if (c->virtual_keyboard_visible) {
+            // Keep Start useful once the keyboard is already open: submit the current text.
             virtual_keyboard_close(c, true);
-        } else if (c->ingame && c->chat_interface_id == -1 && !c->show_social_input && !c->chatback_input_open) {
-            // "Press Start to type" - the PS2-equivalent of pressing any key to start typing,
-            // since there's no physical keyboard to just start pressing.
-            virtual_keyboard_maybe_open(c, 2);
+        } else if (c->ingame &&
+                   c->chat_interface_id == -1 &&
+                   c->sticky_chat_interface_id == -1 &&
+                   !c->show_social_input &&
+                   !c->chatback_input_open &&
+                   !c->modal_message[0]) {
+            // Start opens/focuses the CHATBOX itself. It deliberately does not open the keyboard.
+            c->controller_chatbox_focus = !c->controller_chatbox_focus;
+            c->redraw_chatback = true;
         }
+    }
+
+    if (c->controller_chatbox_focus) {
+        // Normal chatbox focus is intentionally lightweight: Up/Down scroll chat history,
+        // Cross enters text entry, and Triangle/Start leaves focus. No mouse emulation is needed.
+        int dpadY = c->controller_dpad_y;
+        c->controller_dpad_x = 0;
+        c->controller_dpad_y = 0;
+
+        if (dpadY != 0) {
+            int maxScroll = c->chat_scroll_height - 77;
+            if (maxScroll < 0) maxScroll = 0;
+            c->chat_scroll_offset -= dpadY * 15;
+            if (c->chat_scroll_offset < 0) c->chat_scroll_offset = 0;
+            if (c->chat_scroll_offset > maxScroll) c->chat_scroll_offset = maxScroll;
+            c->redraw_chatback = true;
+        }
+
+        if (c->controller_confirm_pressed) {
+            c->controller_confirm_pressed = false;
+            c->controller_chatbox_focus = false;
+            // Cross is the deliberate second step for typing; Start itself only opens the chatbox.
+            virtual_keyboard_maybe_open(c, 2);
+            return;
+        }
+
+        if (c->controller_back_pressed) {
+            c->controller_back_pressed = false;
+            c->controller_chatbox_focus = false;
+            c->redraw_chatback = true;
+        }
+
+        // Do not queue unrelated one-shot actions to fire after chat focus closes.
+        c->controller_inventory_pressed = false;
+        c->controller_snap_camera_pressed = false;
+        return;
     }
 
     if (c->controller_back_pressed) {
@@ -12451,15 +12473,9 @@ void client_draw_chatback(Client *c) {
 
         pix2d_hline(0, 77, BLACK, 479);
 #ifdef __PS2__
-        if (!c->virtual_keyboard_visible) {
-            pix2d_fill_rect(PS2_CHAT_BUTTON_X, PS2_CHAT_BUTTON_Y, 0x252a33,
-                            PS2_CHAT_BUTTON_W, PS2_CHAT_BUTTON_H);
-            pix2d_draw_rect(PS2_CHAT_BUTTON_X, PS2_CHAT_BUTTON_Y, BLACK,
-                            PS2_CHAT_BUTTON_W, PS2_CHAT_BUTTON_H);
-            drawStringCenter(c->font_bold12,
-                             PS2_CHAT_BUTTON_X + PS2_CHAT_BUTTON_W / 2,
-                             PS2_CHAT_BUTTON_Y + 12,
-                             "CHAT", WHITE);
+        if (c->controller_chatbox_focus) {
+            // Visible acknowledgement that Start has opened controller focus on the chatbox.
+            pix2d_draw_rect(0, 0, YELLOW, CONTROLLER_CHATBACK_WIDTH, CONTROLLER_CHATBACK_HEIGHT);
         }
 #endif
     } else {
@@ -13745,6 +13761,7 @@ Client *client_new(void) {
     c->controller_grid_cancel_pressed = false;
     c->controller_hotkey_run_pressed = false;
     c->controller_run_enabled = false;
+    c->controller_chatbox_focus = false;
     c->controller_dialogue_interface_id = -1;
     c->controller_dialogue_index = 0;
     c->controller_grid_component = -1;
