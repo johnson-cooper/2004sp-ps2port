@@ -146,3 +146,18 @@ The client waits until `scene_state == 2` has remained live for 250 normal game 
 The hardware acceptance criterion is both RPC success and continued healthy RuneScape networking
 after the module is resident. Only after this passes should the companion gain one SPU2 operation
 at a time.
+
+
+## Milestone 3B: build rs2midi separately, do not embed it
+
+Real hardware failed to connect in Milestone 3A before the delayed rs2midi load point could ever
+run. Therefore the resident PING module itself was not exercised and cannot be blamed by that test.
+
+Milestone 3B isolates the client ELF/layout change. The rs2midi IOP target remains in ps2.yaml and
+still builds, but it is not embedded into client.elf. The EE wrapper and delayed test hook are
+removed, restoring src/entry/client.c to the exact voice-only checkpoint that connected at
+1e6cbfeff8aef0b6d5bcfdd39129860bfdf4ec65.
+
+Hardware question: does RuneScape connect again when rs2midi merely exists as a separate build
+artifact but contributes zero bytes, symbols or code to client.elf? If yes, the next companion test
+must load rs2midi from storage after the world is live rather than embedding it.

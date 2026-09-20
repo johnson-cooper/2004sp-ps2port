@@ -105,6 +105,3 @@ targets:
       # Audio is deliberately loaded only after network + USB + PAD bring-up in
       # platform_init(); embedding avoids adding runtime filesystem dependency.
       - audsrv:audsrv_embed
-      # Local companion IOP module. Milestone 3A is PING-only: it is loaded
-      # several seconds after the world is live and performs no SPU2 work.
-      - rs2midi

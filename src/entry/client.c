@@ -56,9 +56,6 @@
 #include "../world.h"
 #include "../world3d.h"
 #include "../gl11.h"
-#ifdef __PS2__
-#include "../platform/ps2_rs2midi.h"
-#endif
 
 // 2026-09-14: MASTER OFF SWITCH for every PS2 on-screen diagnostic checkpoint in this file (both
 // calls through ps2_scene_checkpoint() and the several raw-draw sites that bypass it entirely - see
@@ -5867,11 +5864,6 @@ static void client_scenemap_free(Client *c) {
 
 void client_update_game(Client *c) {
 #ifdef __PS2__
-    // Milestone 3A: after the initial world is fully live for ~5 seconds,
-    // load the separate rs2midi companion IRX and issue one PING RPC. The
-    // module performs no SPU2/libsd work in this checkpoint.
-    static int ps2_rs2midi_live_ticks;
-    static bool ps2_rs2midi_test_attempted;
     ps2_live_update_count++;
     ps2_live_stage = 1; // entered game update
     ps2_heap_tick_begin_kb = mallinfo().fordblks / 1024;
@@ -5940,21 +5932,6 @@ void client_update_game(Client *c) {
 
     #ifdef __PS2__
     ps2_live_stage = 3; // entering non-network game logic
-
-    if (!ps2_rs2midi_test_attempted) {
-        if (c->ingame && c->scene_state == 2) {
-            if (++ps2_rs2midi_live_ticks >= 250) {
-                ps2_rs2midi_test_attempted = true;
-                rs2_log("audio: loading rs2midi PING-only companion after %d live ticks\n",
-                        ps2_rs2midi_live_ticks);
-                bool ping_ok = ps2_rs2midi_ping_test();
-                rs2_log("audio: rs2midi PING-only hardware test %s\n",
-                        ping_ok ? "PASS" : "FAIL");
-            }
-        } else {
-            ps2_rs2midi_live_ticks = 0;
-        }
-    }
     #endif
     if (c->ingame) {
         for (int wave = 0; wave < c->wave_count; wave++) {
