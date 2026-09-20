@@ -95,6 +95,11 @@
 #define PS2_ROOF_RENDER_RADIUS 8
 #define PS2_WALL_DECOR_RENDER_RADIUS 8
 #define PS2_GROUND_DECOR_RENDER_RADIUS 6
+// Ground-item pile LOD. Keep all three visible pile models only very close to the player; farther
+// piles keep just the highest-value/top model, and very distant piles are omitted from 3D rendering.
+// The underlying ObjStackEntity lists remain intact, so zone updates/gameplay state are unchanged.
+#define PS2_OBJ_FULL_DETAIL_RADIUS 3
+#define PS2_OBJ_RENDER_RADIUS 12
 // Remote-player LOD for crowded areas. Nearby players retain normal animated models; mid-distance
 // players reuse their cached appearance mesh through the existing lowmem path; very distant remote
 // players are not submitted to World3D. Network state and interaction state are still maintained.

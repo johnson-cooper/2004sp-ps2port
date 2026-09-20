@@ -60,6 +60,19 @@ static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int scene
     if (dz < 0) dz = -dz;
     return dx <= radius && dz <= radius;
 }
+
+static inline int ps2_obj_stack_detail(const GroundObject *objs) {
+    int dx = (objs->x >> 7) - _World3D.eyeTileX;
+    int dz = (objs->z >> 7) - _World3D.eyeTileZ;
+    if (dx < 0) dx = -dx;
+    if (dz < 0) dz = -dz;
+    int distance = dx > dz ? dx : dz;
+
+    if (distance > PS2_OBJ_RENDER_RADIUS) {
+        return 0;
+    }
+    return distance <= PS2_OBJ_FULL_DETAIL_RADIUS ? 2 : 1;
+}
 #endif
 
 const int FRONT_WALL_TYPES[] = {19, 55, 38, 155, 255, 110, 137, 205, 76};
@@ -1587,12 +1600,17 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
                 }
 
                 GroundObject *objs = tile->groundObj;
-                if (objs && objs->offset == 0) {
-                    if (objs->bottomObj) {
+#ifdef __PS2__
+                int objDetail = objs ? ps2_obj_stack_detail(objs) : 0;
+#else
+                int objDetail = objs ? 2 : 0;
+#endif
+                if (objs && objs->offset == 0 && objDetail > 0) {
+                    if (objDetail > 1 && objs->bottomObj) {
                         model_draw(objs->bottomObj, 0, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw, objs->x - _World3D.eyeX, objs->y - _World3D.eyeY, objs->z - _World3D.eyeZ, objs->bitset);
                     }
 
-                    if (objs->middleObj) {
+                    if (objDetail > 1 && objs->middleObj) {
                         model_draw(objs->middleObj, 0, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw, objs->x - _World3D.eyeX, objs->y - _World3D.eyeY, objs->z - _World3D.eyeZ, objs->bitset);
                     }
 
@@ -1830,12 +1848,17 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
         _World3D.tilesRemaining--;
 
         GroundObject *objs = tile->groundObj;
-        if (objs && objs->offset != 0) {
-            if (objs->bottomObj) {
+#ifdef __PS2__
+        int objDetail = objs ? ps2_obj_stack_detail(objs) : 0;
+#else
+        int objDetail = objs ? 2 : 0;
+#endif
+        if (objs && objs->offset != 0 && objDetail > 0) {
+            if (objDetail > 1 && objs->bottomObj) {
                 model_draw(objs->bottomObj, 0, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw, objs->x - _World3D.eyeX, objs->y - _World3D.eyeY - objs->offset, objs->z - _World3D.eyeZ, objs->bitset);
             }
 
-            if (objs->middleObj) {
+            if (objDetail > 1 && objs->middleObj) {
                 model_draw(objs->middleObj, 0, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw, objs->x - _World3D.eyeX, objs->y - _World3D.eyeY - objs->offset, objs->z - _World3D.eyeZ, objs->bitset);
             }
 
