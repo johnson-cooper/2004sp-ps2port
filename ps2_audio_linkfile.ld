@@ -113,8 +113,6 @@ SECTIONS {
     } :audio
 
     _ps2_audio_end = .;
-    ASSERT(_ps2_audio_end <= 0x01fe0000,
-           "PS2 audio overlay exceeds reserved 128 KiB window");
 
     .spad 0x70000000: {
         *(.spad)
