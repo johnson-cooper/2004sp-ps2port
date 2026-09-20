@@ -126,21 +126,6 @@ if not "!INSTALL_RESULT!"=="0" (
     goto :fail
 )
 
-rem PS2Build's audsrv package metadata currently installs a compatibility
-rem audsrv.h that does not necessarily come from the EE RPC include directory
-rem we patch above. Force the installed public header to be the exact patched
-rem EE header that matches libaudsrv.a and audsrv.irx.
-if not exist "!SRCDIR!\ee\rpc\audsrv\include\audsrv.h" (
-    echo ERROR: Patched EE audsrv header is missing:
-    echo   !SRCDIR!\ee\rpc\audsrv\include\audsrv.h
-    goto :fail
-)
-copy /Y "!SRCDIR!\ee\rpc\audsrv\include\audsrv.h" "%DEST%\include\audsrv.h" >nul
-if errorlevel 1 (
-    echo ERROR: Failed to install patched EE audsrv.h.
-    goto :fail
-)
-
 echo.
 echo Verifying installed package...
 
@@ -161,22 +146,6 @@ if not exist "%DEST%\bin\audsrv.irx" (
     goto :fail
 )
 
-findstr /c:"audsrv_rs2_ch_play_adpcm" "%DEST%\include\audsrv.h" >nul
-if errorlevel 1 (
-    echo ERROR: Installed audsrv.h is stale; missing audsrv_rs2_ch_play_adpcm.
-    goto :fail
-)
-findstr /c:"audsrv_rs2_key_off" "%DEST%\include\audsrv.h" >nul
-if errorlevel 1 (
-    echo ERROR: Installed audsrv.h is stale; missing audsrv_rs2_key_off.
-    goto :fail
-)
-findstr /c:"audsrv_rs2_set_pitch" "%DEST%\include\audsrv.h" >nul
-if errorlevel 1 (
-    echo ERROR: Installed audsrv.h is stale; missing audsrv_rs2_set_pitch.
-    goto :fail
-)
-
 echo.
 echo Installed successfully:
 echo   %DEST%
@@ -186,7 +155,7 @@ echo   package.yaml
 echo   include\audsrv.h
 echo   lib\libaudsrv.a
 echo   bin\audsrv.irx
-> "%DEST%\RS2_VOICE_ONLY.txt" echo 2004sp audsrv voice-only MIDI patch - no PCM stream DMA; explicit pitch/key-off RPCs
+> "%DEST%\RS2_VOICE_ONLY.txt" echo 2004sp audsrv voice-only patch - no PCM streaming thread or looping block DMA
 echo   RS2_VOICE_ONLY.txt
 echo.
 echo You can now run:

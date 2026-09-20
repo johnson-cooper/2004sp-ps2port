@@ -221,11 +221,10 @@ void client_load(Client *c) {
 
     if (!_Client.lowmem) {
 #ifdef __PS2__
-        // Hardware music milestone: do not upload the title music sample bank here.
-        // A single ADPCM beep was network-safe, but loading the full scape_main bank
-        // before login reproduced the title-screen connection failure. The PS2 test
-        // starts scape_main only after the first scene is fully live.
-        rs2_log("audio: deferring scape_main until live-world hardware test\n");
+        // Real-hardware A/B: keep all MIDI disabled while using the exact
+        // network-safe voice-only audsrv module. The prior private MIDI-RPC
+        // audsrv build failed to connect even when scape_main was deferred.
+        rs2_log("audio: MIDI disabled; testing proven voice-only audsrv networking\n");
 #else
         platform_set_midi("scape_main", 12345678, 40000);
 #endif
@@ -5865,13 +5864,6 @@ static void client_scenemap_free(Client *c) {
 
 void client_update_game(Client *c) {
 #ifdef __PS2__
-    // One-shot milestone-2 music test. scene_state==2 means the initial
-    // PLAYER_INFO/region transition has completed and gameplay is live. Wait
-    // another ~5 seconds (250 x 20 ms game ticks) before doing any bulk SPU2
-    // sample uploads, keeping the login and initial scene-build paths identical
-    // to the real-hardware-proven voice-only audsrv checkpoint.
-    static int ps2_music_test_live_ticks;
-    static bool ps2_music_test_started;
     ps2_live_update_count++;
     ps2_live_stage = 1; // entered game update
     ps2_heap_tick_begin_kb = mallinfo().fordblks / 1024;
@@ -5940,19 +5932,6 @@ void client_update_game(Client *c) {
 
     #ifdef __PS2__
     ps2_live_stage = 3; // entering non-network game logic
-
-    if (!ps2_music_test_started) {
-        if (c->ingame && c->scene_state == 2) {
-            if (++ps2_music_test_live_ticks >= 250) {
-                ps2_music_test_started = true;
-                rs2_log("audio: live-world test starting scape_main after %d ticks\n",
-                        ps2_music_test_live_ticks);
-                platform_set_midi("scape_main", 12345678, 40000);
-            }
-        } else {
-            ps2_music_test_live_ticks = 0;
-        }
-    }
     #endif
     if (c->ingame) {
         for (int wave = 0; wave < c->wave_count; wave++) {

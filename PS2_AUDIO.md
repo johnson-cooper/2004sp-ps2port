@@ -102,3 +102,19 @@ Once `PLAYER_INFO` has made `scene_state == 2`, the client waits 250 normal game
   is the remaining IOP/network conflict;
 - world remains healthy and music plays: title-screen timing was the problem and sequencing can be
   developed safely from an in-world trigger before deciding how to handle title audio.
+
+
+## Milestone 2C: restore exact voice-only audsrv for network A/B
+
+The deferred-music build still failed to connect before any song pack was loaded. That rules out
+the title-screen MIDI request and bulk `scape_main` sample upload as the immediate regression.
+
+The remaining change relative to the hardware-good beep checkpoint was the audsrv module itself:
+the MIDI experiment had added three private RPC commands and IOP voice-control handlers. This
+checkpoint restores the exact earlier voice-only audsrv patch (only `audsrv_init()` is changed to
+disable stock PCM streaming) and makes the PS2 MIDI runtime inert.
+
+Expected hardware result: title screen has no music, no delayed music is attempted, and server
+connection should match the proven voice-only checkpoint. If this connects again, do not extend
+audsrv further; implement MIDI controls in a separate companion IOP module loaded only after the
+world is live.
