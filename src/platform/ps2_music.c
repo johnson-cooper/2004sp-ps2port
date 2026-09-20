@@ -94,7 +94,7 @@ void ps2_audio_update_late(void) {
     }
 
     if (rpc.server == NULL) {
-        rs2_log("%s", ps2_audio_bind_timeout_fmt);
+        rs2_log(ps2_audio_bind_timeout_fmt);
         return;
     }
 
