@@ -130,12 +130,10 @@ def _best_period(resolver: SoundFontResolver, pcm, region) -> tuple[int, int, in
 
     estimate = region.sample_rate / fundamental
 
-        #
-        # Stay close to the SF2 sample-header pitch. The old +/-18% search could
-     * follow a strong harmonic when the region mapping metadata was not the
-     * same as the raw sample pitch. A narrow window still lets autocorrelation
-     * find a clean seam without permitting octave-family mistakes.
-    
+    # Stay close to the SF2 sample-header pitch. The old +/-18% search could
+    # follow a strong harmonic when region mapping metadata differed from the
+    # raw sample pitch. A narrow window still lets autocorrelation find a clean
+    # seam without permitting octave-family mistakes.
     pmin = max(8, int(math.floor(estimate * 0.94)))
     pmax = max(pmin, int(math.ceil(estimate * 1.06)))
 
