@@ -75,8 +75,8 @@
 #define DISABLE_FLAMES
 // Radius 14 with a square visibility mask is the hardware-good baseline. This isolated draw-distance
 // experiment extends the camera-centred traversal bound to 18, but world3d.c now admits only a generous
-// camera-facing wedge. Two tiles behind the camera and four tiles of horizontal safety margin remain
-// visible to avoid edge/near-camera popping; the expensive renderer should therefore see fewer candidate
+// camera-facing wedge. Three tiles behind the camera and six tiles of horizontal safety margin remain
+// visible to reduce edge/near-camera popping; the expensive renderer should therefore still see fewer candidate
 // tiles than the old radius-14 square even though the forward horizon is longer.
 // Terrain residency remains the traversal-good 80x80 (12..91), while static loc/model residency stays
 // at the lighter 72x72 window. These residency limits are intentionally unchanged by this experiment.
