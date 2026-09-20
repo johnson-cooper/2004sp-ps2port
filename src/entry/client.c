@@ -12057,6 +12057,7 @@ void client_draw_chatback(Client *c) {
         PixFont *font = c->font_bold12;
         const int chatLineHeight = 15;
         const int chatBaseY = 74;
+        const int chatInputY = 92;
 #define CHAT_DRAW(px, py, str, rgb) ps2_draw_chat_string(font, (px), (py), (str), (rgb))
 #else
         PixFont *font = c->font_plain12;
@@ -12065,7 +12066,8 @@ void client_draw_chatback(Client *c) {
         }
         const int chatLineHeight = 14;
         const int chatBaseY = 70;
-#define CHAT_DRAW(px, py, str, rgb) CHAT_DRAW((px), (py), (str), (rgb))
+        const int chatInputY = 90;
+#define CHAT_DRAW(px, py, str, rgb) drawString(font, (px), (py), (str), (rgb))
 #endif
         int line = 0;
         pix2d_set_clipping(77, 463, 0, 0);
@@ -12152,38 +12154,22 @@ void client_draw_chatback(Client *c) {
             // 186-194?
             char buf2[CHAT_LENGTH + 2];
             sprintf(buf2, "%s*", c->chat_typed);
-            #ifdef __PS2__
-            CHAT_DRAW(3, 92,
-#else
-            CHAT_DRAW(3, 90,
-#endif buf2, BLACK);
+            CHAT_DRAW(3, chatInputY, buf2, BLACK);
         } else if (_Custom.chat_era == 1) {
             // <204
             char buf2[CHAT_LENGTH + 2];
             sprintf(buf2, "%s*", c->chat_typed);
-            #ifdef __PS2__
-            CHAT_DRAW(3, 92,
-#else
-            CHAT_DRAW(3, 90,
-#endif buf2, BLUE);
+            CHAT_DRAW(3, chatInputY, buf2, BLUE);
         } else if (_Custom.chat_era == 2) {
             // 204+
             char buf[USERNAME_LENGTH + 3];
             sprintf(buf, "%s:", jstring_format_name(c->username));
-            #ifdef __PS2__
-            CHAT_DRAW(4, 92, buf, BLACK);
-#else
-            CHAT_DRAW(4, 90, buf, BLACK);
-#endif
+            CHAT_DRAW(4, chatInputY, buf, BLACK);
             sprintf(buf, "%s: ", c->username);
 
             char buf2[CHAT_LENGTH + 2];
             sprintf(buf2, "%s*", c->chat_typed);
-            #ifdef __PS2__
-            CHAT_DRAW(stringWidth(font, buf) + 6, 92, buf2, BLUE);
-#else
-            CHAT_DRAW(stringWidth(font, buf) + 6, 90, buf2, BLUE);
-#endif
+            CHAT_DRAW(stringWidth(font, buf) + 6, chatInputY, buf2, BLUE);
         }
 
         pix2d_hline(0, 77, BLACK, 479);
