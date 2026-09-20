@@ -36,6 +36,10 @@ targets:
       - netman
       - patches
       - pad
+      # Standalone PS2Build world package installed by install-audsrv-package.bat.
+      # Keep audio off the EE software-mixing path: the first hardware milestone uses
+      # audsrv only for preconverted SPU2 ADPCM playback.
+      - audsrv
       - m
     embed_irx:
       # All 8 modules are embedded, including dev9. dev9 WAS briefly removed from this list on the
@@ -79,3 +83,6 @@ targets:
       - bdm:bdm_embed
       - bdmfs_fatfs:bdmfs_fatfs_embed
       - usbmass_bd:usbmass_bd_embed
+      # Audio is deliberately loaded only after network + USB + PAD bring-up in
+      # platform_init(); embedding avoids adding runtime filesystem dependency.
+      - audsrv:audsrv_embed

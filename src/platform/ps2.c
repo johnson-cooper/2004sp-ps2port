@@ -21,6 +21,7 @@
 #include <ps2ipee.h>
 
 #include <gsKit.h>
+#include <audsrv.h>
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -35,6 +36,7 @@
 #include "../pixfont.h"
 #include "../pixmap.h"
 #include "../thirdparty/bzip.h"
+#include "ps2_audio_test.h"
 
 extern ClientData _Client;
 extern InputTracking _InputTracking;
@@ -93,6 +95,12 @@ static GSTEXTURE screenTexture;
 // SIO2MAN/PADMAN ship in the console's own boot ROM - no IRX to bundle for basic digital/analog input.
 static char padDmaBuf[256] __attribute__((aligned(64)));
 static struct padButtonStatus padData;
+
+// Audio milestone 1 is intentionally tiny: prove the standalone audsrv package,
+// embedded IOP module and SPU2 ADPCM path on real hardware before any MIDI/SFX
+// scheduler is allowed to touch the accepted gameplay baseline.
+static bool ps2_audio_ready;
+static audsrv_adpcm_t ps2_audio_test_sample;
 
 static void SleepCb(s32 alarmId, u16 time, void *common)
 {
@@ -757,6 +765,60 @@ bool platform_init(void) {
     padSetMainMode(0, 0, PAD_MMODE_DUALSHOCK, PAD_MMODE_LOCK);
     ps2_boot_progress(90);
 
+    // Audio comes LAST. Real-hardware testing already proved that unrelated IOP activity
+    // interleaved with DEV9/SMAP bring-up can stall the machine, so do not move this above
+    // networking, USB or pad initialization without a new isolated hardware test.
+    //
+    // LIBSD is the SPU2 dependency used by audsrv's IOP module. audsrv itself is embedded by
+    // ps2.yaml from the standalone PS2Build package installed by install-audsrv-package.bat.
+    // Failure is deliberately non-fatal: a missing/bad audio package must not turn a working
+    // RuneScape build into a boot failure.
+    extern unsigned char audsrv_embed_irx[];
+    extern unsigned int size_audsrv_embed_irx;
+
+    int libsd_ret = SifLoadModule("rom0:LIBSD", 0, NULL);
+    int audsrv_modres = -1;
+    int audsrv_module_ret = SifExecModuleBuffer(
+        audsrv_embed_irx, size_audsrv_embed_irx, 0, NULL, &audsrv_modres);
+    rs2_log("audio: LIBSD ret=%d audsrv ret=%d modres=%d\n",
+            libsd_ret, audsrv_module_ret, audsrv_modres);
+
+    if (audsrv_module_ret >= 0 && audsrv_modres >= 0) {
+        int audsrv_init_ret = audsrv_init();
+        int adpcm_init_ret = -1;
+        if (audsrv_init_ret == AUDSRV_ERR_NOERROR) {
+            adpcm_init_ret = audsrv_adpcm_init();
+        }
+        rs2_log("audio: audsrv_init=%d adpcm_init=%d\n",
+                audsrv_init_ret, adpcm_init_ret);
+
+        if (audsrv_init_ret == AUDSRV_ERR_NOERROR &&
+            adpcm_init_ret == AUDSRV_ERR_NOERROR) {
+            ps2_audio_ready = true;
+
+            // A short, low-volume 660 Hz ADPCM beep is the entire milestone-1 acceptance
+            // test. It was encoded offline in the exact 16-byte APCM format audsrv expects,
+            // so hearing it proves EE RPC -> IOP audsrv -> SPU2 without enabling any costly
+            // RuneScape software synthesis.
+            int load_ret = audsrv_load_adpcm(
+                &ps2_audio_test_sample,
+                (void *)ps2_audio_test_adpcm,
+                (int)ps2_audio_test_adpcm_size);
+            int channel = -1;
+            if (load_ret == AUDSRV_ERR_NOERROR) {
+                channel = audsrv_ch_play_adpcm(-1, &ps2_audio_test_sample);
+                if (channel >= 0) {
+                    audsrv_adpcm_set_volume_and_pan(channel, 35, 0);
+                }
+            }
+            rs2_log("audio: smoke sample load=%d channel=%d size=%u\n",
+                    load_ret, channel, ps2_audio_test_adpcm_size);
+        }
+    } else {
+        rs2_log("audio: audsrv module unavailable; continuing without audio\n");
+    }
+
+    ps2_boot_progress(92);
     StartTimerSystemTime();
 
     return true;
@@ -806,6 +868,10 @@ void platform_new(GameShell *shell) {
 }
 
 void platform_free(void) {
+    if (ps2_audio_ready) {
+        audsrv_quit();
+        ps2_audio_ready = false;
+    }
     gsKit_deinit_global(gsGlobal);
     free(screenTexture.Mem);
 }
