@@ -217,6 +217,13 @@ int ps2_modern_padRead(int port, int slot, struct padButtonStatus *buttons) {
             ps2_ui_select_tab(c, ps2_ui_tabs[dock_button - 1]);
         }
         ps2_ui_cross_consumed_until_release = true;
+    } else if (!c->virtual_keyboard_visible && c->chat_interface_id == -1 &&
+               ps2_ui_chat_open && raw_cross && !ps2_ui_cross_raw_was_down) {
+        // With the modern Chat panel open, Cross means "start typing" regardless of
+        // cursor position. Enter the client's normal public-chat keyboard path instead
+        // of synthesizing a fragile mouse click inside the legacy chatback.
+        client_open_public_chat_keyboard(c);
+        ps2_ui_cross_consumed_until_release = true;
     }
     if (!raw_cross) {
         ps2_ui_cross_consumed_until_release = false;
