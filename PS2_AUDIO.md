@@ -40,3 +40,22 @@ Audio initialization is therefore now deferred until the login server has alread
 successful login reply and `c->ingame` is set. This keeps the entire title-screen/network login
 path identical to the accepted baseline. The post-login audio initializer is idempotent so
 reconnect success cannot reload audsrv twice.
+
+
+## Title-screen music requirement: custom ADPCM-only audsrv
+
+Deferring all audio until after login is not the final architecture because RuneScape also plays
+music on the title screen. The post-login-only experiment remains useful evidence, but the runtime
+must be capable of safe audio before login.
+
+Inspection of stock audsrv found that `audsrv_init()` always starts a permanent PCM streaming
+thread and looping SPU2 block-DMA engine, even though this port intends to use preconverted ADPCM
+samples and SPU2 voices only. The custom package installer now patches just that function before
+building audsrv: libsd/SPU2 initialization, RPC, ADPCM sample upload and voice playback remain;
+the PCM stream worker, stream semaphores, transfer callback, block DMA and format converter do not
+start.
+
+This is deliberately a one-variable real-hardware A/B test. Audio initialization is restored to
+its pre-title position after network/USB/pad setup. If the startup beep still plays and RuneScape
+can subsequently connect to the server, the continuous stock audsrv streaming engine was the
+conflicting component and this voice-only backend can support title-screen music.

@@ -10014,13 +10014,6 @@ void client_login(Client *c, const char *username, const char *password, bool re
         inputtracking_set_disabled(&_InputTracking);
 
         c->ingame = true;
-#ifdef __PS2__
-        // Do not initialize audsrv before this point. Real hardware proved that doing so
-        // during platform_init() breaks the subsequent login connection despite audio itself
-        // working. At this point the server handshake is already complete.
-        extern void ps2_audio_start_after_login(void);
-        ps2_audio_start_after_login();
-#endif
         c->out->pos = 0;
         c->in->pos = 0;
         c->packet_type = -1;
@@ -10162,10 +10155,6 @@ void client_login(Client *c, const char *username, const char *password, bool re
         c->login_message1 = "Please wait 1 minute and try again.";
     } else if (reply == 15) {
         c->ingame = true;
-#ifdef __PS2__
-        extern void ps2_audio_start_after_login(void);
-        ps2_audio_start_after_login();
-#endif
         c->out->pos = 0;
         c->in->pos = 0;
         c->packet_type = -1;

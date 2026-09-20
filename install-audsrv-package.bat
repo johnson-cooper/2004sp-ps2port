@@ -90,7 +90,14 @@ echo.
 echo Found audsrv source:
 echo   !SRCDIR!
 echo.
-echo Building and installing audsrv with PS2Build...
+echo Applying the 2004sp ADPCM-only audsrv patch...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\ps2_audio\patch_audsrv_voice_only.ps1" -SourceDir "!SRCDIR!"
+if errorlevel 1 (
+    echo ERROR: Failed to patch audsrv for ADPCM-only operation.
+    goto :fail
+)
+echo.
+echo Building and installing custom audsrv with PS2Build...
 echo   packages: "%PACKAGES_ROOT%"
 echo.
 
@@ -139,6 +146,8 @@ echo   package.yaml
 echo   include\audsrv.h
 echo   lib\libaudsrv.a
 echo   bin\audsrv.irx
+> "%DEST%\RS2_VOICE_ONLY.txt" echo 2004sp audsrv voice-only patch - no PCM streaming thread or looping block DMA
+echo   RS2_VOICE_ONLY.txt
 echo.
 echo You can now run:
 echo   ps2build build
