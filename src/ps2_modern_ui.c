@@ -84,7 +84,9 @@ static int ps2_ui_cursor_y = PS2_UI_VIEW_H / 2;
 static bool ps2_ui_cross_raw_was_down;
 static bool ps2_ui_square_raw_was_down;
 static bool ps2_ui_triangle_raw_was_down;
+static bool ps2_ui_start_raw_was_down;
 static bool ps2_ui_cross_consumed_until_release;
+static bool ps2_ui_start_consumed_until_release;
 
 static bool ps2_ui_active(void) {
     return ps2_crash_client && ps2_crash_client->ingame && ps2_crash_client->shell;
@@ -205,6 +207,7 @@ int ps2_modern_padRead(int port, int slot, struct padButtonStatus *buttons) {
     bool raw_cross = !(buttons->btns & PAD_CROSS);
     bool raw_square = !(buttons->btns & PAD_SQUARE);
     bool raw_triangle = !(buttons->btns & PAD_TRIANGLE);
+    bool raw_start = !(buttons->btns & PAD_START);
 
     int dock_button = c->virtual_keyboard_visible ? -1 : ps2_ui_button_at(ps2_ui_cursor_x, ps2_ui_cursor_y);
     if (raw_cross && !ps2_ui_cross_raw_was_down && dock_button >= 0) {
@@ -217,6 +220,19 @@ int ps2_modern_padRead(int port, int slot, struct padButtonStatus *buttons) {
     }
     if (!raw_cross) {
         ps2_ui_cross_consumed_until_release = false;
+    }
+
+    // Start is the controller equivalent of clicking the permanent Chat dock button.
+    // Reuse the exact same modern-UI toggle instead of creating a second chat-focus state.
+    // Dialogue and the virtual keyboard retain input ownership; Start is only consumed here
+    // when this layer actually handles the press.
+    if (!c->virtual_keyboard_visible && c->chat_interface_id == -1 &&
+        raw_start && !ps2_ui_start_raw_was_down) {
+        ps2_ui_toggle_chat();
+        ps2_ui_start_consumed_until_release = true;
+    }
+    if (!raw_start) {
+        ps2_ui_start_consumed_until_release = false;
     }
 
     // Square remains the fast inventory toggle, but never steals a keypress while
@@ -241,6 +257,7 @@ int ps2_modern_padRead(int port, int slot, struct padButtonStatus *buttons) {
     ps2_ui_cross_raw_was_down = raw_cross;
     ps2_ui_square_raw_was_down = raw_square;
     ps2_ui_triangle_raw_was_down = raw_triangle;
+    ps2_ui_start_raw_was_down = raw_start;
 
     ps2_ui_map_cursor_to_legacy(c);
 
@@ -248,6 +265,11 @@ int ps2_modern_padRead(int port, int slot, struct padButtonStatus *buttons) {
     buttons->ljoy_v = 128;
     if (ps2_ui_cross_consumed_until_release) {
         buttons->btns |= PAD_CROSS;
+    }
+    if (ps2_ui_start_consumed_until_release) {
+        // Mask the entire physical press, not just its first frame. Otherwise the platform
+        // layer would see a delayed Start edge on the next held frame and open the keyboard.
+        buttons->btns |= PAD_START;
     }
     // The keyboard already owns Cross through controller_keyboard_confirm_pressed,
     // but right-clicking through it into the world should never happen.
