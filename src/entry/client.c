@@ -4667,8 +4667,7 @@ static void handleControllerTabInput(Client *c) {
 
     int step = c->controller_tab_step;
     c->controller_tab_step = 0;
-    if (c->controller_settings_visible || c->virtual_keyboard_visible || c->menu_visible ||
-        c->controller_chatbox_focus) {
+    if (c->controller_settings_visible || c->virtual_keyboard_visible || c->menu_visible) {
         return;
     }
 
@@ -4692,32 +4691,82 @@ static void handleControllerTabInput(Client *c) {
 
 typedef struct {
     Component *component;
+    int action;
     int x;
     int y;
     int width;
     int height;
 } ControllerDialogueTarget;
 
+// Build-254's standard chat interfaces have stable component ids. The generic buttonType path below
+// handles most interfaces; these mappings are a fallback for the exact dialogue/choice components
+// the progressive server registers with p_pausebutton/if_addresumebutton.
+static int controller_dialogue_known_action(int rootId, int childId) {
+    // multi2..multi5 choice rows: IF_BUTTON resumes the server-side PAUSEBUTTON script.
+    if (rootId == 2459 && childId >= 2461 && childId <= 2462) return 951;
+    if (rootId == 2469 && childId >= 2471 && childId <= 2473) return 951;
+    if (rootId == 2480 && childId >= 2482 && childId <= 2485) return 951;
+    if (rootId == 2492 && childId >= 2494 && childId <= 2498) return 951;
+
+    // Standard player/NPC/message/object chat pages: their last component is "Click to continue".
+    switch (rootId) {
+        case 968:  return childId == 972  ? 44 : 0; // chat1
+        case 973:  return childId == 978  ? 44 : 0; // chat2
+        case 979:  return childId == 985  ? 44 : 0; // chat3
+        case 986:  return childId == 993  ? 44 : 0; // chat4
+        case 306:  return childId == 309  ? 44 : 0; // objbox1
+        case 310:  return childId == 314  ? 44 : 0; // objbox2
+        case 315:  return childId == 320  ? 44 : 0; // objbox3
+        case 321:  return childId == 327  ? 44 : 0; // objbox4
+        case 356:  return childId == 358  ? 44 : 0; // message1
+        case 359:  return childId == 362  ? 44 : 0; // message2
+        case 363:  return childId == 367  ? 44 : 0; // message3
+        case 368:  return childId == 373  ? 44 : 0; // message4
+        case 374:  return childId == 380  ? 44 : 0; // message5
+        case 4882: return childId == 4886 ? 44 : 0; // npcchat1
+        case 4887: return childId == 4892 ? 44 : 0; // npcchat2
+        case 4893: return childId == 4899 ? 44 : 0; // npcchat3
+        case 4900: return childId == 4907 ? 44 : 0; // npcchat4
+        default: return 0;
+    }
+}
+
+static int controller_dialogue_component_action(int rootId, Component *component) {
+    if (!component || component->hide) return 0;
+
+    // Known server resume components take precedence over archive metadata.
+    int known = controller_dialogue_known_action(rootId, component->id);
+    if (known != 0) return known;
+
+    switch (component->buttonType) {
+        case BUTTON_OK:       return 951;
+        case BUTTON_CLOSE:    return 947;
+        case BUTTON_TOGGLE:   return 465;
+        case BUTTON_SELECT:   return 960;
+        case BUTTON_CONTINUE: return 44;
+        default:              return 0;
+    }
+}
+
 static void controller_dialogue_add_target(ControllerDialogueTarget *targets, int *count,
-                                           Component *component, int x, int y) {
-    if (*count >= CONTROLLER_DIALOGUE_MAX_TARGETS || !component ||
-        component->buttonType == 0 || component->width <= 0 || component->height <= 0) {
+                                           int rootId, Component *component, int x, int y) {
+    if (*count >= CONTROLLER_DIALOGUE_MAX_TARGETS || !component || component->hide) {
         return;
     }
 
-    // Ignore buttons that are fully outside the visible chatback. Clipped/scrolling dialogue
-    // children can otherwise become selectable even though the player cannot see them.
-    int right = x + component->width;
-    int bottom = y + component->height;
-    if (right <= CONTROLLER_CHATBACK_SCREEN_X || x >= CONTROLLER_CHATBACK_SCREEN_X + CONTROLLER_CHATBACK_WIDTH ||
-        bottom <= CONTROLLER_CHATBACK_SCREEN_Y || y >= CONTROLLER_CHATBACK_SCREEN_Y + CONTROLLER_CHATBACK_HEIGHT) {
-        return;
-    }
+    int action = controller_dialogue_component_action(rootId, component);
+    if (action == 0) return;
 
-    ControllerDialogueTarget target = {component, x, y, component->width, component->height};
+    ControllerDialogueTarget target = {
+        component,
+        action,
+        x,
+        y,
+        component->width > 0 ? component->width : 1,
+        component->height > 0 ? component->height : 1
+    };
 
-    // Keep visual order deterministic: top-to-bottom, then left-to-right. Dialogue option indices
-    // therefore match what the player sees instead of archive component-id order.
+    // Keep the D-pad order identical to the visual top-to-bottom order.
     int insert = *count;
     while (insert > 0) {
         ControllerDialogueTarget *previous = &targets[insert - 1];
@@ -4732,7 +4781,8 @@ static void controller_dialogue_add_target(ControllerDialogueTarget *targets, in
     (*count)++;
 }
 
-static void controller_dialogue_collect(Component *layer, int x, int y, int scrollPosition,
+static void controller_dialogue_collect(int rootId, Component *layer, int x, int y,
+                                        int scrollPosition,
                                         ControllerDialogueTarget *targets, int *count) {
     if (!layer || layer->type != TYPE_LAYER || !layer->childId || layer->hide) {
         return;
@@ -4740,60 +4790,114 @@ static void controller_dialogue_collect(Component *layer, int x, int y, int scro
 
     for (int i = 0; i < layer->childCount && *count < CONTROLLER_DIALOGUE_MAX_TARGETS; i++) {
         Component *child = component_get(layer->childId[i]);
-        if (!child) continue;
+        if (!child || child->hide) continue;
 
         int childX = x + layer->childX[i] + child->x;
         int childY = y + layer->childY[i] + child->y - scrollPosition;
 
         if (child->type == TYPE_LAYER) {
-            controller_dialogue_collect(child, childX, childY, child->scrollPosition, targets, count);
+            controller_dialogue_collect(rootId, child, childX, childY,
+                                        child->scrollPosition, targets, count);
         } else {
-            controller_dialogue_add_target(targets, count, child, childX, childY);
+            controller_dialogue_add_target(targets, count, rootId, child, childX, childY);
         }
     }
 }
 
-static void handleControllerDialogueInput(Client *c) {
-    if (c->chat_interface_id != -1 && c->controller_chatbox_focus) {
-        c->controller_chatbox_focus = false;
-        c->redraw_chatback = true;
-    }
+static int controller_dialogue_targets(Client *c, ControllerDialogueTarget *targets) {
+    if (c->chat_interface_id < 0) return 0;
+    Component *root = component_get(c->chat_interface_id);
+    if (!root) return 0;
 
+    int count = 0;
+    controller_dialogue_collect(c->chat_interface_id, root,
+                                CONTROLLER_CHATBACK_SCREEN_X,
+                                CONTROLLER_CHATBACK_SCREEN_Y,
+                                0, targets, &count);
+    return count;
+}
+
+static bool controller_dialogue_activate(Client *c, ControllerDialogueTarget *target) {
+    if (!target || !target->component || target->action == 0) return false;
+    if (c->menu_size < 0 || c->menu_size >= 500) return false;
+
+    // Feed the exact same action codes normal mouse hit-testing creates into useMenuOption().
+    // That preserves IF_BUTTON vs RESUME_PAUSEBUTTON behavior instead of inventing a new protocol.
+    int oldSize = c->menu_size;
+    int slot = oldSize;
+    c->menu_action[slot] = target->action;
+    c->menuParamA[slot] = 0;
+    c->menuParamB[slot] = 0;
+    c->menuParamC[slot] = target->component->id;
+    c->menu_option[slot][0] = '\0';
+    c->menu_size = slot + 1;
+    useMenuOption(c, slot);
+    c->menu_size = oldSize;
+    return true;
+}
+
+static void controller_dialogue_draw_focus(Client *c) {
+#ifdef __PS2__
+    if (c->chat_interface_id == -1) return;
+
+    ControllerDialogueTarget targets[CONTROLLER_DIALOGUE_MAX_TARGETS];
+    int count = controller_dialogue_targets(c, targets);
+    if (count <= 0) return;
+
+    int index = c->controller_dialogue_index;
+    if (index < 0) index = 0;
+    if (index >= count) index = count - 1;
+
+    ControllerDialogueTarget *target = &targets[index];
+    int x = target->x - CONTROLLER_CHATBACK_SCREEN_X;
+    int y = target->y - CONTROLLER_CHATBACK_SCREEN_Y;
+    int w = target->width;
+    int h = target->height;
+
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > CONTROLLER_CHATBACK_WIDTH) w = CONTROLLER_CHATBACK_WIDTH - x;
+    if (y + h > CONTROLLER_CHATBACK_HEIGHT) h = CONTROLLER_CHATBACK_HEIGHT - y;
+
+    if (w > 1 && h > 1) {
+        pix2d_draw_rect(x, y, YELLOW, w, h);
+    }
+#else
+    (void)c;
+#endif
+}
+
+static void handleControllerDialogueInput(Client *c) {
     if (c->chat_interface_id == -1) {
         c->controller_dialogue_interface_id = -1;
         c->controller_dialogue_index = 0;
         return;
     }
 
-    // Modal controller UI owns the D-pad first. NPC/chat interfaces resume focus as soon as it closes.
+    // Keyboard/settings/context menus own controller input while visible.
     if (c->virtual_keyboard_visible || c->controller_settings_visible || c->menu_visible) {
         return;
     }
 
     ControllerDialogueTarget targets[CONTROLLER_DIALOGUE_MAX_TARGETS];
-    int count = 0;
-    controller_dialogue_collect(component_get(c->chat_interface_id),
-                                CONTROLLER_CHATBACK_SCREEN_X, CONTROLLER_CHATBACK_SCREEN_Y, 0,
-                                targets, &count);
+    int count = controller_dialogue_targets(c, targets);
 
+    // A chat modal owns the D-pad even if a custom interface has no recognised target.
     int dpadX = c->controller_dpad_x;
     int dpadY = c->controller_dpad_y;
-
-    // While a chat interface is open it owns dialogue navigation, even if that particular page has
-    // no selectable child. Do not let the same D-pad edge leak into an inventory grid behind it.
     c->controller_dpad_x = 0;
     c->controller_dpad_y = 0;
-
-    if (count <= 0) {
-        c->controller_dialogue_interface_id = c->chat_interface_id;
-        c->controller_dialogue_index = 0;
-        return;
-    }
 
     bool newInterface = c->controller_dialogue_interface_id != c->chat_interface_id;
     if (newInterface) {
         c->controller_dialogue_interface_id = c->chat_interface_id;
         c->controller_dialogue_index = 0;
+        c->redraw_chatback = true;
+    }
+
+    if (count <= 0) {
+        c->controller_confirm_pressed = false;
+        return;
     }
 
     int step = dpadY != 0 ? dpadY : dpadX;
@@ -4804,37 +4908,38 @@ static void handleControllerDialogueInput(Client *c) {
         } else if (c->controller_dialogue_index >= count) {
             c->controller_dialogue_index = 0;
         }
-    } else if (!newInterface) {
-        return;
+        c->redraw_chatback = true;
     }
 
-    if (c->controller_dialogue_index >= count) {
-        c->controller_dialogue_index = count - 1;
-    }
+    if (c->controller_dialogue_index < 0) c->controller_dialogue_index = 0;
+    if (c->controller_dialogue_index >= count) c->controller_dialogue_index = count - 1;
 
     ControllerDialogueTarget *target = &targets[c->controller_dialogue_index];
-    int cx = target->x + target->width / 2;
-    int cy = target->y + target->height / 2;
-    cx = MAX(0, MIN(SCREEN_WIDTH - 1, cx));
-    cy = MAX(0, MIN(SCREEN_HEIGHT - 1, cy));
 
-    // Reuse the normal cursor/click path. Cross remains a real left click, so BUTTON_CONTINUE,
-    // dialogue choices, and any future chat-interface button still use RuneScape's existing
-    // handleInterfaceInput()/useMenuOption() protocol behavior.
-    c->shell->mouse_x = cx;
-    c->shell->mouse_y = cy;
-    c->controller_free_cursor_x = cx;
-    c->controller_free_cursor_y = cy;
-    c->controller_free_cursor_valid = true;
+    // Keep the free cursor synchronized with focus as useful feedback/fallback, but activation below
+    // does not depend on mouse hit-testing.
+    if (target->width > 1 && target->height > 1) {
+        int cx = target->x + target->width / 2;
+        int cy = target->y + target->height / 2;
+        cx = MAX(0, MIN(SCREEN_WIDTH - 1, cx));
+        cy = MAX(0, MIN(SCREEN_HEIGHT - 1, cy));
+        c->shell->mouse_x = cx;
+        c->shell->mouse_y = cy;
+        c->controller_free_cursor_x = cx;
+        c->controller_free_cursor_y = cy;
+        c->controller_free_cursor_valid = true;
+    }
+
     c->controller_grid_component = -1;
     c->controller_grid_slot = -1;
     c->controller_grid_screen_valid = false;
     c->controller_grid_analog_override = true;
-    c->redraw_chatback = true;
 
-    // Publish the focused button into the normal menu/default-action state immediately so Cross can
-    // be pressed on the very next controller edge without waiting for an extra rendered frame.
-    client_handle_input(c);
+    if (c->controller_confirm_pressed) {
+        c->controller_confirm_pressed = false;
+        controller_dialogue_activate(c, target);
+        c->redraw_chatback = true;
+    }
 }
 
 // The rest of the controller button map (see src/platform/ps2.c for which hardware bit sets each
@@ -5017,48 +5122,22 @@ static void handleControllerButtonInput(Client *c) {
     if (c->controller_start_pressed) {
         c->controller_start_pressed = false;
         if (c->virtual_keyboard_visible) {
-            // Keep Start useful once the keyboard is already open: submit the current text.
             virtual_keyboard_close(c, true);
         } else if (c->ingame &&
                    c->chat_interface_id == -1 &&
-                   c->sticky_chat_interface_id == -1 &&
                    !c->show_social_input &&
-                   !c->chatback_input_open &&
-                   !c->modal_message[0]) {
-            // Start opens/focuses the CHATBOX itself. It deliberately does not open the keyboard.
-            c->controller_chatbox_focus = !c->controller_chatbox_focus;
+                   !c->chatback_input_open) {
+            // Controller chat hotkey: Start enters normal public-chat typing directly.
+            // This is the same virtual keyboard path the PS2 already uses for every other text field.
+            c->chat_scroll_offset = 0;
             c->redraw_chatback = true;
+            virtual_keyboard_maybe_open(c, 2);
         }
     }
 
-    if (c->controller_chatbox_focus) {
-        // Normal chatbox focus is intentionally lightweight: Up/Down scroll chat history,
-        // Cross enters text entry, and Triangle/Start leaves focus. No mouse emulation is needed.
-        int dpadY = c->controller_dpad_y;
-        c->controller_dpad_x = 0;
-        c->controller_dpad_y = 0;
-
-        if (dpadY != 0) {
-            int maxScroll = c->chat_scroll_height - 77;
-            if (maxScroll < 0) maxScroll = 0;
-            c->chat_scroll_offset -= dpadY * 15;
-            if (c->chat_scroll_offset < 0) c->chat_scroll_offset = 0;
-            if (c->chat_scroll_offset > maxScroll) c->chat_scroll_offset = maxScroll;
-            c->redraw_chatback = true;
-        }
-
-        if (c->controller_confirm_pressed) {
-            c->controller_confirm_pressed = false;
-            c->controller_chatbox_focus = false;
-            // Cross is the deliberate second step for typing; Start itself only opens the chatbox.
-            virtual_keyboard_maybe_open(c, 2);
-            return;
-        }
-
-        if (c->controller_back_pressed) {
+    if (c->controller_back_pressed) {
             c->controller_back_pressed = false;
-            c->controller_chatbox_focus = false;
-            c->redraw_chatback = true;
+                    c->redraw_chatback = true;
         }
 
         // Do not queue unrelated one-shot actions to fire after chat focus closes.
@@ -6045,8 +6124,8 @@ void client_update_game(Client *c) {
         handleMinimapInput(c);
         handleTabInput(c);
         handleControllerTabInput(c);
-        handleControllerButtonInput(c);
         handleControllerDialogueInput(c);
+        handleControllerButtonInput(c);
         handleControllerGridInput(c);
         handleChatSettingsInput(c);
 
@@ -12349,6 +12428,7 @@ void client_draw_chatback(Client *c) {
         drawStringCenter(c->font_bold12, 239, 60, "Click to continue", DARKBLUE);
     } else if (c->chat_interface_id != -1) {
         client_draw_interface(c, component_get(c->chat_interface_id), 0, 0, 0);
+        controller_dialogue_draw_focus(c);
     } else if (c->sticky_chat_interface_id == -1) {
 #ifdef __PS2__
         // Keep the same 479x96 chatbox and the same loaded font set: bold12 is clearer after
@@ -12472,12 +12552,6 @@ void client_draw_chatback(Client *c) {
         }
 
         pix2d_hline(0, 77, BLACK, 479);
-#ifdef __PS2__
-        if (c->controller_chatbox_focus) {
-            // Visible acknowledgement that Start has opened controller focus on the chatbox.
-            pix2d_draw_rect(0, 0, YELLOW, CONTROLLER_CHATBACK_WIDTH, CONTROLLER_CHATBACK_HEIGHT);
-        }
-#endif
     } else {
         client_draw_interface(c, component_get(c->sticky_chat_interface_id), 0, 0, 0);
     }

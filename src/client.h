@@ -247,8 +247,7 @@ struct Client {
     int controller_tab_step;          // -1/0/+1, one-shot: consumed and reset to 0 by handleControllerTabInput()
     bool controller_inventory_pressed; // one-shot: Square, jump to inventory tab
     bool controller_snap_camera_pressed; // one-shot: Select, face camera with the player
-    bool controller_start_pressed;    // one-shot: Start, focus/toggle the normal chatbox
-    bool controller_chatbox_focus;    // controller-native normal chatbox focus mode
+    bool controller_start_pressed;    // one-shot: Start, open normal chat entry / submit active keyboard
     bool controller_back_pressed;     // one-shot: Triangle, close topmost modal/menu (or backspace if keyboard open)
     bool controller_grid_cancel_pressed; // R3 one-shot while a grid is focused: release focus without closing UI
     // Controller hotkeys are separate one-shot commands so future gameplay shortcuts can be added
