@@ -5,10 +5,12 @@ cd /d "%~dp0"
 set "AUDSRV_VERSION=v2026.09.08.1"
 set "AUDSRV_SOURCE_URL=https://git.techwritescode.dev/ps2/audsrv/archive/%AUDSRV_VERSION%.zip"
 
-if "%~1"=="" (
-    set "SDK_ROOT=%LOCALAPPDATA%\ps2build"
-) else (
+if not "%~1"=="" (
     set "SDK_ROOT=%~1"
+) else if defined PS2DEV (
+    set "SDK_ROOT=%PS2DEV%"
+) else (
+    set "SDK_ROOT=%LOCALAPPDATA%\ps2build"
 )
 
 set "PACKAGES_ROOT=%SDK_ROOT%\packages"
@@ -22,6 +24,7 @@ echo ============================================================
 echo  2004sp PS2 - install standalone audsrv package
 echo ============================================================
 echo SDK root: "%SDK_ROOT%"
+if defined PS2DEV echo PS2DEV : "%PS2DEV%"
 echo Package : audsrv %AUDSRV_VERSION%
 echo.
 
@@ -41,10 +44,11 @@ if errorlevel 1 (
 if not exist "%PACKAGES_ROOT%" (
     echo ERROR: "%PACKAGES_ROOT%" does not exist.
     echo.
-    echo Current PS2Build installs default to:
+    echo PS2Build packages are resolved from %%PS2DEV%%\packages.
+    echo If PS2DEV is unset, this installer falls back to:
     echo   %%LOCALAPPDATA%%\ps2build
     echo.
-    echo If your SDK is elsewhere, pass its root as the first argument:
+    echo You can also pass the SDK root explicitly:
     echo   install-audsrv-package.bat D:\path\to\ps2build
     exit /b 1
 )
@@ -139,6 +143,22 @@ if not exist "%DEST%\lib\libaudsrv.a" (
 )
 if not exist "%DEST%\bin\audsrv.irx" (
     echo ERROR: Missing "%DEST%\bin\audsrv.irx".
+    goto :fail
+)
+
+findstr /c:"audsrv_rs2_ch_play_adpcm" "%DEST%\include\audsrv.h" >nul
+if errorlevel 1 (
+    echo ERROR: Installed audsrv.h is stale; missing audsrv_rs2_ch_play_adpcm.
+    goto :fail
+)
+findstr /c:"audsrv_rs2_key_off" "%DEST%\include\audsrv.h" >nul
+if errorlevel 1 (
+    echo ERROR: Installed audsrv.h is stale; missing audsrv_rs2_key_off.
+    goto :fail
+)
+findstr /c:"audsrv_rs2_set_pitch" "%DEST%\include\audsrv.h" >nul
+if errorlevel 1 (
+    echo ERROR: Installed audsrv.h is stale; missing audsrv_rs2_set_pitch.
     goto :fail
 )
 
