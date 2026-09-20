@@ -81,6 +81,7 @@ static uint64_t music_next_event_us;
 static uint64_t music_duration_us;
 static uint64_t music_started_ms;
 static uint64_t music_voice_serial;
+static bool music_clock_started;
 static float music_volume = 1.0f;
 static bool music_playing;
 static bool music_sustain[16];
@@ -120,6 +121,7 @@ static void ps2_music_release_pack(void) {
     music_event_index = 0;
     music_next_event_us = 0;
     music_duration_us = 0;
+    music_clock_started = false;
 }
 
 static int ps2_music_pick_voice(void) {
@@ -349,12 +351,13 @@ bool ps2_music_play(const char *name) {
     music_event_index = 0;
     music_duration_us = header.duration_us;
     music_next_event_us = music_events[0].delta_us;
-    music_started_ms = rs2_now();
+    music_clock_started = false;
     music_playing = true;
 
+    uint64_t load_done_ms = rs2_now();
     rs2_log("audio: title music loaded name=%s samples=%u events=%u loadms=%llu durationms=%llu\n",
             name, music_sample_count, music_event_count,
-            (unsigned long long)(music_started_ms - load_t0),
+            (unsigned long long)(load_done_ms - load_t0),
             (unsigned long long)(music_duration_us / 1000));
     return true;
 }
@@ -364,11 +367,16 @@ void ps2_music_stop(void) {
     music_playing = false;
     music_event_index = 0;
     music_next_event_us = 0;
+    music_clock_started = false;
 }
 
 void ps2_music_update(void) {
     if (!music_playing || !music_events || music_event_index >= music_event_count) return;
 
+    if (!music_clock_started) {
+        music_started_ms = rs2_now();
+        music_clock_started = true;
+    }
     uint64_t elapsed_us = (rs2_now() - music_started_ms) * 1000ULL;
     int processed = 0;
     while (music_event_index < music_event_count &&
