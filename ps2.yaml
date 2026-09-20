@@ -23,12 +23,11 @@ targets:
   - name: client
     type: ee
     opt: -O1
-    # Milestone 3F layout-only A/B: force the two inert padding symbols to be
-    # GC roots. They are never referenced/called at runtime; this only prevents
-    # --gc-sections from discarding their .text/.rodata payloads.
+    # Milestone 3G: force-retain one inert NOBITS tail symbol. It is never
+    # referenced at runtime; the only purpose is to extend the loaded image end
+    # by 0x180 without moving normal .text/.data/.rodata/.bss placement.
     ldflags:
-      - -Wl,--undefined=ps2_layout_text_pad
-      - -Wl,--undefined=ps2_layout_rodata_pad
+      - -Wl,--undefined=ps2_layout_heap_tail
     sources:
       - src/*.c
       - src/entry/*.c

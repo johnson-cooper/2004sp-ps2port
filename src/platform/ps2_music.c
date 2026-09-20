@@ -35,28 +35,25 @@ void ps2_music_shutdown(void) {
 }
 
 /*
- * Milestone 3F: pure ELF-layout A/B.
+ * Milestone 3G: isolate heap-boundary movement from global relocation.
  *
- * Real hardware connects with this exact runtime audio implementation, while
- * tiny later EE changes fail before any rs2midi code can run. The good/failing
- * ELF comparison showed the failing image had exactly +0xE8 bytes of .text and
- * +0x50 bytes of .rodata. Inject those bytes here without adding any callable
- * code, branches, globals, constructors, RPC activity, or audio behavior.
+ * The inert 3F candidate reproduced the pre-login network failure with no
+ * functional change, proving placement alone is sufficient. This variant
+ * restores normal .text/.data/.rodata/.bss placement and adds one separate
+ * writable NOBITS orphan section immediately after the normal image.
  *
- * These bytes are intentionally unreachable. Their only purpose is to move
- * the following ELF sections by the same amount as the failing build.
+ * The symbol is forced live by ps2.yaml, but is never referenced at runtime.
+ * Expected result: all normal section addresses match the hardware-good ELF,
+ * while the LOAD MemSiz / effective image end grows by 0x180.
  */
-/*
- * Use real C objects rather than file-scope .space directives. The first
- * padding attempt was absent from the stripped final ELF. These objects live
- * in the same ps2_music.o that is already required for the real music stubs,
- * and 'used' prevents the compiler from discarding them as unreferenced.
- * aligned(1) keeps the payload sizes exact.
- */
-const unsigned char ps2_layout_text_pad[0xE8]
-    __attribute__((used, section(".text"), aligned(1))) = {0};
-
-const unsigned char ps2_layout_rodata_pad[0x50]
-    __attribute__((used, section(".rodata"), aligned(1))) = {0};
+__asm__(
+    ".section .ps2_heap_tail,\"aw\",@nobits\n"
+    ".global ps2_layout_heap_tail\n"
+    ".type ps2_layout_heap_tail,@object\n"
+    "ps2_layout_heap_tail:\n"
+    ".space 0x180\n"
+    ".size ps2_layout_heap_tail, .-ps2_layout_heap_tail\n"
+    ".previous\n"
+);
 
 #endif

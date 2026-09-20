@@ -272,3 +272,21 @@ The padding symbols are now external/linker-visible and the client target passes
 Those flags make the symbols GC roots without creating any runtime reference or call. PS2Build
 supports target-level `ldflags`, so this is isolated to the linker and should retain the exact
 0xE8 .text and 0x50 .rodata payloads.
+
+
+## Milestone 3G: isolate heap boundary from normal global placement
+
+Real hardware failed to connect with the pure inert 3F layout candidate. That proves no MIDI,
+RPC, IOP execution, or audio behavior is required: EE layout alone can trigger the regression.
+
+This next A/B restores the normal hardware-good .text/.data/.rodata/.bss layout and adds a separate
+0x180-byte writable NOBITS orphan section named .ps2_heap_tail after the normal image. The linker is
+forced to retain its symbol, but no runtime code references it.
+
+The intended split is:
+- normal sections and existing globals remain at hardware-good addresses;
+- only LOAD MemSiz / effective image end moves from 0x24C284 to 0x24C404.
+
+Before hardware testing, inspect size/readelf/objdump. Do not test if .data, .rodata, or .bss moved.
+If normal sections stay put but this variant fails, the heap/image-end shift alone is sufficient.
+If it connects, the bug depends on relocation of existing globals/sections rather than only heap start.
