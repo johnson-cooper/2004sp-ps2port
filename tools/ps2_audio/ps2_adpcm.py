@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import struct
-from typing import Iterable, Sequence
+from typing import Sequence
 
 APCM_HEADER = struct.Struct("<4sBBBBII")
 PS2_NATIVE_RATE = 48000
@@ -55,7 +55,7 @@ def encode_mono_pcm16(samples: Sequence[int], sample_rate: int) -> bytes:
 
         predictor = 0
         best_max = 1.0e30
-        predictor_samples = None
+        candidates = []
 
         for candidate, (coef0, coef1) in enumerate(_FILTERS):
             s1 = raw_s1
@@ -71,15 +71,19 @@ def encode_mono_pcm16(samples: Sequence[int], sample_rate: int) -> bytes:
                 s2 = s1
                 s1 = s0
 
+            candidates.append(converted)
             if max_abs < best_max:
                 best_max = max_abs
                 predictor = candidate
-                predictor_samples = converted
 
+            # PS2SDK's find_predict() explicitly falls back to predictor 0 for
+            # near-silent blocks, regardless of which candidate first crossed
+            # the <= 7 threshold.
             if best_max <= 7.0:
                 predictor = 0
-                predictor_samples = converted if candidate == 0 else predictor_samples
                 break
+
+        predictor_samples = candidates[predictor]
 
         # find_predict()'s history is simply the last two clipped source samples.
         raw_s2 = float(max(-30720, min(30719, block[-2])))

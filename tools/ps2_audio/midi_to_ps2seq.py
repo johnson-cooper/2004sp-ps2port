@@ -72,6 +72,9 @@ def _parse_track(track: bytes, track_index: int):
             pos += 1
             if status < 0xF0:
                 running = status
+            elif status >= 0xF8 and status != 0xFF:
+                # MIDI realtime messages do not cancel channel running status.
+                pass
             else:
                 running = None
         else:
@@ -102,6 +105,22 @@ def _parse_track(track: bytes, track_index: int):
             pos += length
             if pos > len(track):
                 raise ValueError("truncated MIDI SysEx payload")
+            order += 1
+            continue
+
+        if status >= 0xF0:
+            # System-common/realtime messages are not needed by the RuneScape
+            # sequencer. Consume their fixed data bytes without mis-parsing them
+            # as channel messages.
+            system_lengths = {
+                0xF1: 1, 0xF2: 2, 0xF3: 1, 0xF4: 0,
+                0xF5: 0, 0xF6: 0, 0xF8: 0, 0xF9: 0,
+                0xFA: 0, 0xFB: 0, 0xFC: 0, 0xFD: 0, 0xFE: 0,
+            }
+            length = system_lengths.get(status, 0)
+            if pos + length > len(track):
+                raise ValueError("truncated MIDI system message")
+            pos += length
             order += 1
             continue
 
@@ -150,6 +169,10 @@ def _parse_midi(path: Path):
     midi_format = _u16be(data, 8)
     track_count = _u16be(data, 10)
     division = _u16be(data, 12)
+    if midi_format not in (0, 1):
+        raise ValueError(
+            f"MIDI format {midi_format} contains independent sequences; only formats 0/1 are supported"
+        )
     if division & 0x8000:
         raise ValueError("SMPTE MIDI timing is not supported; expected PPQ")
     if division == 0:
