@@ -10,6 +10,7 @@
 #define RS2MIDI_RPC_SET_PITCH  3
 #define RS2MIDI_RPC_KEY_OFF    4
 #define RS2MIDI_RPC_GET_STATE  5
+#define RS2MIDI_RPC_LOAD_SLOT  6
 
 #define RS2MIDI_PONG 0x52533250u
 
@@ -21,6 +22,8 @@
  * This is deliberately a tiny proof, not the final music allocator.
  */
 #define RS2MIDI_SPU_ADDR          0x001e0000u
+#define RS2MIDI_SAMPLE_STRIDE      0x00000400u
+#define RS2MIDI_SAMPLE_SLOTS       8u
 #define RS2MIDI_MAX_SAMPLE_BYTES  800u
 #define RS2MIDI_RPC_HEADER_BYTES  64u
 #define RS2MIDI_RPC_BUFFER_BYTES  1024u
@@ -39,7 +42,17 @@ static SifRpcDataQueue_t rs2midi_queue;
 static SifRpcServerData_t rs2midi_server;
 static u8 rs2midi_rpc_buffer[RS2MIDI_RPC_BUFFER_BYTES] __attribute__((aligned(64)));
 
-static int rs2midi_sample_loaded;
+static u32 rs2midi_sample_loaded_mask;
+
+static u32 rs2midi_sample_addr(u32 slot)
+{
+    return RS2MIDI_SPU_ADDR + slot * RS2MIDI_SAMPLE_STRIDE;
+}
+
+static int rs2midi_valid_sample_slot(u32 slot)
+{
+    return slot < RS2MIDI_SAMPLE_SLOTS;
+}
 
 static int rs2midi_valid_voice(u32 voice)
 {
@@ -76,18 +89,23 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
         words[0] = RS2MIDI_PONG;
         return data;
 
-    case RS2MIDI_RPC_LOAD: {
-        u32 sample_size = words[0];
+    case RS2MIDI_RPC_LOAD:
+    case RS2MIDI_RPC_LOAD_SLOT: {
+        u32 slot = function == RS2MIDI_RPC_LOAD_SLOT ? words[0] : 0;
+        u32 sample_size =
+            function == RS2MIDI_RPC_LOAD_SLOT ? words[1] : words[0];
+        int transfer_word = function == RS2MIDI_RPC_LOAD_SLOT ? 2 : 1;
 
         /*
          * Preserve the raw ROM LIBSD return value for the EE diagnostic.
          * The BIOS implementation is not required to use PS2SDK FreeSD's
-         * "return byte count" convention, so do not treat a non-negative
-         * value smaller than sample_size as failure.
+         * "return byte count" convention, so any non-negative value is an
+         * accepted transfer.
          */
-        words[1] = (u32)-999;
+        words[transfer_word] = (u32)-999;
 
-        if (sample_size == 0 ||
+        if (!rs2midi_valid_sample_slot(slot) ||
+            sample_size == 0 ||
             sample_size > RS2MIDI_MAX_SAMPLE_BYTES ||
             (sample_size & 0x0f) != 0 ||
             size < (int)(RS2MIDI_RPC_HEADER_BYTES + sample_size)) {
@@ -95,40 +113,41 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
             break;
         }
 
-        /* Silence our test voice before replacing its sample data. */
-        sceSdSetSwitch(RS2MIDI_CORE | SD_SWITCH_KOFF,
-                       1u << RS2MIDI_DEFAULT_VOICE);
+        /*
+         * Sample uploads happen only during backend bring-up. Silence core 0
+         * while replacing SPU2 sample RAM; audsrv remains isolated on core 1.
+         */
+        sceSdSetSwitch(RS2MIDI_CORE | SD_SWITCH_KOFF, 0x00ffffffu);
 
         int transferred = sceSdVoiceTrans(
             RS2MIDI_DMA_CHANNEL,
             SD_TRANS_WRITE | SD_TRANS_MODE_DMA,
             payload,
-            (u32 *)RS2MIDI_SPU_ADDR,
+            (u32 *)rs2midi_sample_addr(slot),
             sample_size);
-        words[1] = (u32)transferred;
+        words[transfer_word] = (u32)transferred;
 
         if (transferred < 0) {
             status = RS2MIDI_ERR_DMA;
             break;
         }
 
-        /*
-         * Match audsrv's proven ADPCM upload sequence: once LIBSD accepted
-         * the request, wait for voice transfer completion before playing.
-         */
         sceSdVoiceTransStatus(RS2MIDI_DMA_CHANNEL, 1);
-        rs2midi_sample_loaded = 1;
+        rs2midi_sample_loaded_mask |= 1u << slot;
         break;
     }
 
     case RS2MIDI_RPC_NOTE_ON: {
         u32 voice = words[0];
-        if (!rs2midi_sample_loaded) {
-            status = RS2MIDI_ERR_STATE;
+        u32 sample_slot =
+            size >= 20 ? words[4] : 0;
+        if (!rs2midi_valid_voice(voice) ||
+            !rs2midi_valid_sample_slot(sample_slot)) {
+            status = RS2MIDI_ERR_ARGS;
             break;
         }
-        if (!rs2midi_valid_voice(voice)) {
-            status = RS2MIDI_ERR_ARGS;
+        if ((rs2midi_sample_loaded_mask & (1u << sample_slot)) == 0) {
+            status = RS2MIDI_ERR_STATE;
             break;
         }
 
@@ -163,7 +182,7 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
         sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLR, volr);
         sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_PITCH, pitch);
         sceSdSetAddr(RS2MIDI_CORE | (voice << 1) | SD_VADDR_SSA,
-                     RS2MIDI_SPU_ADDR);
+                     rs2midi_sample_addr(sample_slot));
         sceSdSetSwitch(RS2MIDI_CORE | SD_SWITCH_KON, 1u << voice);
         break;
     }
@@ -200,7 +219,7 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
          * Return enough live SPU2 state to distinguish RPC/DMA/register
          * success from an output-routing problem on real hardware.
          */
-        words[1] = (u32)rs2midi_sample_loaded;
+        words[1] = rs2midi_sample_loaded_mask != 0;
         words[2] = (u32)sceSdGetParam(
             RS2MIDI_CORE | (voice << 1) | SD_VPARAM_PITCH);
         words[3] = (u32)sceSdGetParam(

@@ -18,6 +18,7 @@
 #include "../ondemand.h"
 #include "../platform.h"
 #include "ps2_music.h"
+#include "ps2_midi_bank.h"
 
 #define RS2MIDI_RPC_ID 0x5253324d
 
@@ -27,6 +28,7 @@
 #define RS2MIDI_RPC_SET_PITCH  3
 #define RS2MIDI_RPC_KEY_OFF    4
 #define RS2MIDI_RPC_GET_STATE  5
+#define RS2MIDI_RPC_LOAD_SLOT  6
 
 #define RS2MIDI_PONG 0x52533250u
 
@@ -80,6 +82,7 @@ typedef struct Ps2MusicState {
     uint64_t last_ms;
     uint8_t ready;
     uint8_t sample_loaded;
+    uint8_t bank_loaded;
     uint8_t playing;
     uint8_t loop_current;
     uint8_t jingle_active;
@@ -97,6 +100,7 @@ typedef struct Ps2MusicState {
     SifRpcClientData_t rpc;
     Ps2MidiTrack tracks[PS2_MIDI_MAX_TRACKS];
     Ps2MidiVoice voices[PS2_MIDI_VOICE_COUNT];
+    uint8_t channel_program[16];
 } Ps2MusicState;
 
 /*
@@ -153,6 +157,8 @@ static const char ps2_audio_sample_bad_fmt[] PS2_AUDIO_RODATA =
     "audio: rs2midi test sample invalid size=%u raw=%u\n";
 static const char ps2_audio_sample_ready_fmt[] PS2_AUDIO_RODATA =
     "audio: rs2midi sample ready xfer=%d load=%d basepitch=%u raw=%u\n";
+static const char ps2_midi_bank_ready_fmt[] PS2_AUDIO_RODATA =
+    "audio: rs2midi program bank slots=%u bytes=%u ready=%u\n";
 static const char ps2_midi_load_fail_fmt[] PS2_AUDIO_RODATA =
     "audio: rev254 MIDI id=%d could not be loaded from ondemand archive\n";
 static const char ps2_midi_bad_fmt[] PS2_AUDIO_RODATA =
@@ -364,16 +370,27 @@ PS2_AUDIO_STATIC void ps2_midi_note_on(
 
     Rs2MidiRpcPacket packet __attribute__((aligned(64)));
     memset(&packet, 0, RS2MIDI_RPC_HEADER_BYTES);
+    uint32_t sample_slot = 0;
+    if (ps2_music_state.bank_loaded) {
+        /*
+         * General MIDI has 16 groups of eight programs. Collapse adjacent
+         * groups into eight broad SPU2 timbres for this first native bank.
+         */
+        sample_slot =
+            ((uint32_t)ps2_music_state.channel_program[channel] >> 4) & 7u;
+    }
+
     packet.words[0] = (uint32_t)chosen;
     packet.words[1] = (uint32_t)ps2_midi_pitch_for_key(key);
     packet.words[2] = volume;
     packet.words[3] = volume;
+    packet.words[4] = sample_slot;
 
     if (ps2_audio_rpc_status(
             &ps2_music_state.rpc,
             RS2MIDI_RPC_NOTE_ON,
             &packet,
-            16) == 0) {
+            20) == 0) {
         Ps2MidiVoice *slot = &ps2_music_state.voices[chosen];
         slot->active = 1;
         slot->channel = channel;
@@ -507,6 +524,8 @@ PS2_AUDIO_STATIC bool ps2_midi_process_event(Ps2MidiTrack *track)
         } else {
             ps2_midi_note_on(channel, data1, data2);
         }
+    } else if (kind == 0xc0) {
+        ps2_music_state.channel_program[channel] = data1 & 0x7f;
     } else if (kind == 0xb0 && (data1 == 120 || data1 == 123)) {
         ps2_midi_all_notes_off_channel(channel);
     }
@@ -541,6 +560,8 @@ PS2_AUDIO_STATIC bool ps2_midi_reset_tracks(void)
     }
 
     memset(ps2_music_state.tracks, 0, sizeof(ps2_music_state.tracks));
+    memset(ps2_music_state.channel_program, 0,
+           sizeof(ps2_music_state.channel_program));
     const uint8_t *cursor = data + 8 + header_size;
     const uint8_t *file_end = data + size;
 
@@ -869,6 +890,51 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
     }
 
     ps2_music_state.sample_loaded = 1;
+
+    bool bank_ok = true;
+    for (uint32_t slot = 0; slot < PS2_MIDI_BANK_SAMPLE_COUNT; slot++) {
+        memset(&packet, 0, sizeof(packet));
+        packet.words[0] = slot;
+        packet.words[1] = PS2_MIDI_BANK_SAMPLE_BYTES;
+        memcpy(packet.sample,
+               ps2_midi_bank_adpcm[slot],
+               PS2_MIDI_BANK_SAMPLE_BYTES);
+
+        int32_t bank_status = ps2_audio_rpc_status(
+            &ps2_music_state.rpc,
+            RS2MIDI_RPC_LOAD_SLOT,
+            &packet,
+            RS2MIDI_RPC_HEADER_BYTES + PS2_MIDI_BANK_SAMPLE_BYTES);
+        if (bank_status < 0) {
+            bank_ok = false;
+            break;
+        }
+    }
+
+    if (bank_ok) {
+        ps2_music_state.bank_loaded = 1;
+        ps2_music_state.base_pitch = ps2_midi_bank_base_pitch;
+    } else {
+        /*
+         * Restore the already-proven one-sample path if multi-slot loading is
+         * rejected on hardware. That keeps music audible for diagnosis.
+         */
+        memset(&packet, 0, sizeof(packet));
+        packet.words[0] = raw_size;
+        memcpy(packet.sample, ps2_audio_test_adpcm + 16, raw_size);
+        (void)ps2_audio_rpc_status(
+            &ps2_music_state.rpc,
+            RS2MIDI_RPC_LOAD,
+            &packet,
+            RS2MIDI_RPC_HEADER_BYTES + raw_size);
+        ps2_music_state.bank_loaded = 0;
+    }
+
+    rs2_log(ps2_midi_bank_ready_fmt,
+            (unsigned int)PS2_MIDI_BANK_SAMPLE_COUNT,
+            (unsigned int)PS2_MIDI_BANK_SAMPLE_BYTES,
+            (unsigned int)ps2_music_state.bank_loaded);
+
     ps2_music_state.ready = 1;
     return true;
 }
