@@ -151,7 +151,7 @@ echo   package.yaml
 echo   include\audsrv.h
 echo   lib\libaudsrv.a
 echo   bin\audsrv.irx
-> "%DEST%\RS2_VOICE_ONLY.txt" echo 2004sp audsrv voice-only patch - no PCM streaming thread or looping block DMA
+> "%DEST%\RS2_VOICE_ONLY.txt" echo 2004sp audsrv voice-only MIDI patch - no PCM stream DMA; explicit pitch/key-off RPCs
 echo   RS2_VOICE_ONLY.txt
 echo.
 echo You can now run:
