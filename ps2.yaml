@@ -14,10 +14,13 @@ targets:
       # source directory, so expose our module-local import header explicitly.
       - src/iop/rs2midi
     headers:
-      # Header-only dependencies for the IOP RPC server/thread declarations.
+      # Header-only dependencies for the IOP RPC server/thread declarations
+      # and direct SPU2 voice control. LIBSD itself is already loaded from ROM
+      # by platform_init() before rs2midi is loaded after world entry.
       - loadcore
       - sifcmd
       - thbase
+      - libsd
     imports_lst: src/iop/rs2midi/imports.lst
 
   - name: client

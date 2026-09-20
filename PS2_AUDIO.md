@@ -378,3 +378,28 @@ The post-world external `rs2midi.irx` load/RPC PING path did not regress network
 the validated architecture for continuing PS2 MIDI work: keep audsrv frozen in voice-only mode,
 keep rs2midi external, and keep all new EE companion-loader code/state in the isolated high-memory
 overlay so the normal hardware-sensitive client BSS is not relocated.
+
+
+## Milestone 4A: first real rs2midi SPU2 voice primitive
+
+The validated isolated EE overlay/external-IRX architecture remains unchanged. audsrv is still frozen
+in its proven voice-only form and continues to own core 1.
+
+rs2midi now imports the already-loaded ROM LIBSD service and owns only SPU2 core 0 for this test.
+It reserves one tiny sample slot at 0x001e0000 near the top of the 2 MiB SPU2 RAM; the frozen audsrv
+ADPCM allocator still grows upward from 0x5010. This is intentionally a smoke-test reservation, not
+the final music sample allocator.
+
+New RPC commands:
+- 0: PING
+- 1: upload one raw PS2 ADPCM sample
+- 2: note-on with voice/pitch/left/right volume
+- 3: change pitch of a live voice
+- 4: key-off a voice
+
+After world entry, the isolated EE shim reuses the existing 660 Hz APCM smoke sample. It strips the
+16-byte APCM header, sends the 784 raw ADPCM bytes to rs2midi, starts core-0 voice 0 at half the APCM
+base pitch, changes to the native pitch after 25 ms, and keys off after another 25 ms.
+
+Expected hardware result: a short audible pitch-changing chirp, followed by normal continued
+network/world operation. The boot/server path is still untouched before the delayed world-live test.
