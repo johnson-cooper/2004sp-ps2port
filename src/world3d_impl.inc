@@ -8,6 +8,7 @@
 #include "entity.h"
 #include "ground.h"
 #include "location.h"
+#include "loctype.h"
 #include "model.h"
 #include "occlude.h"
 #include "pix2d.h"
@@ -32,6 +33,35 @@ const int WALL_DECORATION_INSET_X[] = {53, -53, -53, 53};
 const int WALL_DECORATION_INSET_Z[] = {-53, -53, 53, 53};
 const int WALL_DECORATION_OUTSET_X[] = {-45, 45, 45, -45};
 const int WALL_DECORATION_OUTSET_Z[] = {45, 45, -45, -45};
+
+#ifdef __PS2__
+// Map loc bitsets set 0x40000000; inactive/non-actionable locs also carry the sign bit.
+// Keep active/actionable locs at the full scene radius, and only shorten the draw distance of
+// inactive scenery. This is intentionally render-only: scene residency, collision, pathing and
+// interaction state are left untouched.
+static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
+    if ((bitset & 0x40000000) == 0 || bitset >= 0) {
+        return true;
+    }
+
+    int radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
+    int shape = info & 0x1f;
+    if (shape == GROUNDDECOR) {
+        radius = PS2_GROUND_DECOR_RENDER_RADIUS;
+    } else if (shape >= WALLDECOR_STRAIGHT_NOOFFSET && shape <= WALLDECOR_DIAGONAL_BOTH) {
+        radius = PS2_WALL_DECOR_RENDER_RADIUS;
+    } else if (shape >= ROOF_STRAIGHT && shape <= ROOFEDGE_SQUARECORNER) {
+        radius = PS2_ROOF_RENDER_RADIUS;
+    }
+
+    int dx = (sceneX >> 7) - _World3D.eyeTileX;
+    int dz = (sceneZ >> 7) - _World3D.eyeTileZ;
+    if (dx < 0) dx = -dx;
+    if (dz < 0) dz = -dz;
+    return dx <= radius && dz <= radius;
+}
+#endif
+
 const int FRONT_WALL_TYPES[] = {19, 55, 38, 155, 255, 110, 137, 205, 76};
 const int DIRECTION_ALLOW_WALL_CORNER_TYPE[] = {160, 192, 80, 96, 0, 144, 80, 48, 160};
 const int BACK_WALL_TYPES[] = {76, 8, 137, 4, 0, 1, 38, 2, 19};
@@ -1408,6 +1438,11 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
                     Location *loc = bridge->locs[i];
 
                     if (loc) {
+#ifdef __PS2__
+                        if (!ps2_should_draw_loc_detail(loc->bitset, loc->info, loc->x, loc->z)) {
+                            continue;
+                        }
+#endif
                         Model *model = loc->model;
                         bool _free = false;
                         if (!model) {
@@ -1500,7 +1535,11 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
                 }
             }
 
-            if (decor && !world3d_visible(world3d, occludeLevel, tileX, tileZ, decor->model->max_y)) {
+            if (decor
+#ifdef __PS2__
+                && ps2_should_draw_loc_detail(decor->bitset, decor->info, decor->x, decor->z)
+#endif
+                && !world3d_visible(world3d, occludeLevel, tileX, tileZ, decor->model->max_y)) {
                 if ((decor->type & frontWallTypes) != 0) {
                     model_draw(decor->model, decor->angle, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw, decor->x - _World3D.eyeX, decor->y - _World3D.eyeY, decor->z - _World3D.eyeZ, decor->bitset);
                 } else if ((decor->type & 0x300) != 0) {
@@ -1539,7 +1578,11 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
 
             if (tileDrawn) {
                 GroundDecor *groundDecor = tile->groundDecor;
-                if (groundDecor) {
+                if (groundDecor
+#ifdef __PS2__
+                    && ps2_should_draw_loc_detail(groundDecor->bitset, groundDecor->info, groundDecor->x, groundDecor->z)
+#endif
+                ) {
                     model_draw(groundDecor->model, 0, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw, groundDecor->x - _World3D.eyeX, groundDecor->y - _World3D.eyeY, groundDecor->z - _World3D.eyeZ, groundDecor->bitset);
                 }
 
@@ -1709,23 +1752,29 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
                 Location *farthest = _World3D.locBuffer[farthestIndex];
                 farthest->cycle = _World3D.cycle;
 
-                Model *model = farthest->model;
-                bool _free = false;
-                if (!model) {
-                    model = entity_draw(farthest->entity, loopCycle);
-                    _free = true;
-                }
+#ifdef __PS2__
+                if (ps2_should_draw_loc_detail(farthest->bitset, farthest->info, farthest->x, farthest->z)) {
+#endif
+                    Model *model = farthest->model;
+                    bool _free = false;
+                    if (!model) {
+                        model = entity_draw(farthest->entity, loopCycle);
+                        _free = true;
+                    }
 
-                if (!model) {
-                    continue;
-                }
+                    if (!model) {
+                        continue;
+                    }
 
-                if (!world3d_loc_visible(world3d, occludeLevel, farthest->minSceneTileX, farthest->maxSceneTileX, farthest->minSceneTileZ, farthest->maxSceneTileZ, model->max_y)) {
-                    model_draw(model, farthest->yaw, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw, farthest->x - _World3D.eyeX, farthest->y - _World3D.eyeY, farthest->z - _World3D.eyeZ, farthest->bitset);
+                    if (!world3d_loc_visible(world3d, occludeLevel, farthest->minSceneTileX, farthest->maxSceneTileX, farthest->minSceneTileZ, farthest->maxSceneTileZ, model->max_y)) {
+                        model_draw(model, farthest->yaw, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw, farthest->x - _World3D.eyeX, farthest->y - _World3D.eyeY, farthest->z - _World3D.eyeZ, farthest->bitset);
+                    }
+                    if (_free) {
+                        entity_draw_free(farthest->entity, model, loopCycle);
+                    }
+#ifdef __PS2__
                 }
-                if (_free) {
-                    entity_draw_free(farthest->entity, model, loopCycle);
-                }
+#endif
 
                 for (int x = farthest->minSceneTileX; x <= farthest->maxSceneTileX; x++) {
                     for (int z = farthest->minSceneTileZ; z <= farthest->maxSceneTileZ; z++) {
@@ -1798,7 +1847,11 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
         if (tile->backWallTypes != 0) {
             Decor *decor = tile->decor;
 
-            if (decor && !world3d_visible(world3d, occludeLevel, tileX, tileZ, decor->model->max_y)) {
+            if (decor
+#ifdef __PS2__
+                && ps2_should_draw_loc_detail(decor->bitset, decor->info, decor->x, decor->z)
+#endif
+                && !world3d_visible(world3d, occludeLevel, tileX, tileZ, decor->model->max_y)) {
                 if ((decor->type & tile->backWallTypes) != 0) {
                     model_draw(decor->model, decor->angle, _World3D.sinEyePitch, _World3D.cosEyePitch, _World3D.sinEyeYaw, _World3D.cosEyeYaw, decor->x - _World3D.eyeX, decor->y - _World3D.eyeY, decor->z - _World3D.eyeZ, decor->bitset);
                 } else if ((decor->type & 0x300) != 0) {
