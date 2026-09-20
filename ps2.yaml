@@ -8,6 +8,15 @@ targets:
     opt: -Os
     sources:
       - src/iop/rs2midi/rs2midi.c
+    include_dirs:
+      # PS2Build's generated imports C includes "irx_imports.h"; unlike the
+      # old ps2sdk Makefiles it does not automatically add the imports.lst
+      # source directory, so expose our module-local import header explicitly.
+      - src/iop/rs2midi
+    headers:
+      # Header-only dependencies for the IOP RPC server/thread declarations.
+      - sifcmd
+      - thbase
     imports_lst: src/iop/rs2midi/imports.lst
 
   - name: client
