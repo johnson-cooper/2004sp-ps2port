@@ -35,7 +35,6 @@
 #define RS2MIDI_MAX_IRX_BYTES     (128u * 1024u)
 
 #define PS2_MIDI_ARCHIVE           2
-#define PS2_MIDI_AUTOPLAY_ID       0
 #define PS2_MIDI_MAX_TRACKS        32
 #define PS2_MIDI_VOICE_COUNT       24
 #define PS2_MIDI_EVENT_BUDGET      512
@@ -82,10 +81,17 @@ typedef struct Ps2MusicState {
     uint8_t ready;
     uint8_t sample_loaded;
     uint8_t playing;
-    uint8_t autoplay_attempted;
+    uint8_t loop_current;
+    uint8_t jingle_active;
+    uint8_t pending_valid;
+    uint8_t pending_loop;
     uint8_t track_count;
     uint8_t format;
     uint16_t division;
+    int32_t active_midi_id;
+    int32_t desired_song_id;
+    int32_t pending_midi_id;
+    uint64_t jingle_deadline_ms;
     uint8_t *midi_data;
     int midi_size;
     SifRpcClientData_t rpc;
@@ -102,7 +108,10 @@ typedef struct Ps2MusicState {
 static Ps2MusicState ps2_music_state PS2_AUDIO_STATE = {
     .magic = 0x4d555349u, /* "MUSI" */
     .init_polls = 1,
-    .tempo_us = PS2_MIDI_DEFAULT_TEMPO_US
+    .tempo_us = PS2_MIDI_DEFAULT_TEMPO_US,
+    .active_midi_id = -1,
+    .desired_song_id = -1,
+    .pending_midi_id = -1
 };
 
 static const uint16_t ps2_midi_semitone_q12[12] PS2_AUDIO_RODATA = {
@@ -149,11 +158,13 @@ static const char ps2_midi_load_fail_fmt[] PS2_AUDIO_RODATA =
 static const char ps2_midi_bad_fmt[] PS2_AUDIO_RODATA =
     "audio: rev254 MIDI id=%d invalid/unsupported size=%d\n";
 static const char ps2_midi_start_fmt[] PS2_AUDIO_RODATA =
-    "audio: rev254 MIDI id=%d size=%d format=%u tracks=%u division=%u playing on SPU2\n";
+    "audio: rev254 MIDI id=%d size=%d format=%u tracks=%u division=%u loop=%u playing on SPU2\n";
 static const char ps2_midi_event_fail_fmt[] PS2_AUDIO_RODATA =
     "audio: rev254 MIDI parse stopped on track=%u tick=%u\n";
 static const char ps2_midi_loop_fmt[] PS2_AUDIO_RODATA =
     "audio: rev254 MIDI id=%d loop\n";
+static const char ps2_midi_jingle_resume_fmt[] PS2_AUDIO_RODATA =
+    "audio: rev254 MIDI jingle complete; resume id=%d\n";
 
 PS2_AUDIO_STATIC uint16_t ps2_midi_be16(const uint8_t *p)
 {
@@ -596,15 +607,20 @@ PS2_AUDIO_STATIC void ps2_midi_stop_song(void)
     ps2_music_state.playing = 0;
     ps2_music_state.track_count = 0;
     ps2_music_state.tick_fp = 0;
+    ps2_music_state.active_midi_id = -1;
+    ps2_music_state.loop_current = 0;
 }
 
-PS2_AUDIO_STATIC bool ps2_midi_start_id(int id)
+PS2_AUDIO_STATIC bool ps2_midi_start_id(int id, bool loop)
 {
-    if (!ps2_music_state.ready || id < 0) {
+    if (!ps2_music_state.ready) {
         return false;
     }
 
     ps2_midi_stop_song();
+    if (id < 0) {
+        return true;
+    }
 
     int midi_size = 0;
     int8_t *midi_data =
@@ -626,12 +642,15 @@ PS2_AUDIO_STATIC bool ps2_midi_start_id(int id)
     }
 
     ps2_music_state.playing = 1;
+    ps2_music_state.loop_current = loop ? 1 : 0;
+    ps2_music_state.active_midi_id = id;
     rs2_log(ps2_midi_start_fmt,
             id,
             midi_size,
             (unsigned int)ps2_music_state.format,
             (unsigned int)ps2_music_state.track_count,
-            (unsigned int)ps2_music_state.division);
+            (unsigned int)ps2_music_state.division,
+            (unsigned int)ps2_music_state.loop_current);
     return true;
 }
 
@@ -688,8 +707,8 @@ PS2_AUDIO_STATIC void ps2_midi_update_song(void)
 
     if (!ps2_midi_any_track_active()) {
         ps2_midi_all_notes_off();
-        if (ps2_midi_reset_tracks()) {
-            rs2_log(ps2_midi_loop_fmt, PS2_MIDI_AUTOPLAY_ID);
+        if (ps2_music_state.loop_current && ps2_midi_reset_tracks()) {
+            rs2_log(ps2_midi_loop_fmt, ps2_music_state.active_midi_id);
         } else {
             ps2_midi_stop_song();
         }
@@ -867,7 +886,9 @@ void ps2_audio_update_late(void)
         if (ps2_music_state.playing) {
             ps2_midi_stop_song();
         }
-        ps2_music_state.autoplay_attempted = 0;
+        ps2_music_state.jingle_active = 0;
+        ps2_music_state.pending_valid = 0;
+        ps2_music_state.desired_song_id = -1;
         if (!ps2_music_state.ready) {
             ps2_music_state.init_polls = 1;
         }
@@ -894,24 +915,70 @@ void ps2_audio_update_late(void)
     }
 
     /*
-     * Milestone 5A: prove actual rev254 MIDI sequencing without touching the
-     * normal client/protocol layout yet. Archive 2, id 0 is the reference
-     * client's startup song. We intentionally start it only after world entry
-     * so title/login networking remains identical to the audible-beep baseline.
+     * MIDI_JINGLE carries its duration in milliseconds. While it is active,
+     * MIDI_SONG packets only update desired_song_id. At the deadline, resume
+     * the newest area song exactly like the rev254 reference client.
      */
-    if (!ps2_music_state.autoplay_attempted) {
-        ps2_music_state.autoplay_attempted = 1;
-        (void)ps2_midi_start_id(PS2_MIDI_AUTOPLAY_ID);
+    if (ps2_music_state.jingle_active &&
+        rs2_now() >= ps2_music_state.jingle_deadline_ms) {
+        ps2_music_state.jingle_active = 0;
+        ps2_music_state.pending_midi_id = ps2_music_state.desired_song_id;
+        ps2_music_state.pending_loop = 1;
+        ps2_music_state.pending_valid = 1;
+        rs2_log(ps2_midi_jingle_resume_fmt, ps2_music_state.desired_song_id);
+    }
+
+    if (ps2_music_state.pending_valid) {
+        int id = ps2_music_state.pending_midi_id;
+        bool loop = ps2_music_state.pending_loop != 0;
+        ps2_music_state.pending_valid = 0;
+        (void)ps2_midi_start_id(id, loop);
     }
 
     ps2_midi_update_song();
 }
 
 /*
- * Keep the normal-client entry points tiny and unchanged for this A/B. The
- * real sequencer currently starts from the isolated post-world update hook.
- * Server-driven rev254 song/jingle ids are the next step after this hardware
- * proof succeeds.
+ * Server-driven rev254 request ingress. This function itself is placed in the
+ * high audio overlay so the packet handler only pays for a tiny call site in
+ * normal .text and adds no normal data/BSS.
+ */
+void ps2_music_request(int id, int jingle_delay_ms) PS2_AUDIO_CODE;
+void ps2_music_request(int id, int jingle_delay_ms)
+{
+    if (id == 65535) {
+        id = -1;
+    }
+
+    if (jingle_delay_ms < 0) {
+        bool changed = id != ps2_music_state.desired_song_id;
+        ps2_music_state.desired_song_id = id;
+
+        /*
+         * Match rev254: an area-song packet received during a jingle updates
+         * the song that will resume, but does not interrupt the jingle.
+         */
+        if (!ps2_music_state.jingle_active &&
+            (changed || ps2_music_state.active_midi_id != id)) {
+            ps2_music_state.pending_midi_id = id;
+            ps2_music_state.pending_loop = 1;
+            ps2_music_state.pending_valid = 1;
+        }
+        return;
+    }
+
+    ps2_music_state.jingle_active = 1;
+    ps2_music_state.jingle_deadline_ms =
+        rs2_now() + (uint64_t)(uint32_t)jingle_delay_ms;
+    ps2_music_state.pending_midi_id = id;
+    ps2_music_state.pending_loop = 0;
+    ps2_music_state.pending_valid = 1;
+}
+
+/*
+ * The legacy name/CRC entry points stay present for the rest of the platform
+ * abstraction, but rev254 PS2 song selection now enters through
+ * ps2_music_request() from packet 163/242.
  */
 bool ps2_music_play(const char *name)
 {

@@ -39,6 +39,9 @@
 #include "../pix8.h"
 #include "../pixmap.h"
 #include "../platform.h"
+#ifdef __PS2__
+#include "../platform/ps2_music.h"
+#endif
 #include "../playerentity.h"
 #include "../projectileentity.h"
 #include "../protocol.h"
@@ -7078,8 +7081,23 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
-    if (c->packet_type == 54) { // TODO: rev254 MIDI_SONG(163,2) is fixed 2 bytes, not this embedded name+crc+len payload; needs redesign, see audit
-        // MIDI_SONG
+#ifdef __PS2__
+    if (c->packet_type == 163 || c->packet_type == 242) {
+        int type = c->packet_type;
+        int id = g2(c->in);
+        int jingle_delay_ms = type == 242 ? g2(c->in) : -1;
+        if (id == 65535) {
+            id = -1;
+        }
+        if (c->midiActive && !_Client.lowmem) {
+            ps2_music_request(id, jingle_delay_ms);
+        }
+        c->packet_type = -1;
+        return true;
+    }
+#else
+    if (c->packet_type == 54) {
+        // Legacy MIDI_SONG name+crc+length protocol used by older targets.
         char *name = gjstr(c->in);
         int crc = g4(c->in);
         int length = g4(c->in);
@@ -7094,6 +7112,7 @@ bool client_read(Client *c) {
         c->packet_type = -1;
         return true;
     }
+#endif
     if (c->packet_type == 21) { // LOGOUT
         // LOGOUT
         client_logout(c);
