@@ -100,6 +100,9 @@
 // players are not submitted to World3D. Network state and interaction state are still maintained.
 #define PS2_PLAYER_FULL_DETAIL_RADIUS 6
 #define PS2_PLAYER_RENDER_RADIUS 14
+// Hard cap for ordinary remote-player 3D submissions. Important combat/interaction/effect players
+// bypass the cap; ordinary players are admitted nearest-first by Chebyshev distance ring.
+#define PS2_PLAYER_RENDER_BUDGET 32
 #define PS2_LOC_MIN_TILE 16
 #define PS2_LOC_MAX_TILE 88
 #define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 12)
