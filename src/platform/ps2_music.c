@@ -110,6 +110,19 @@ static const uint16_t ps2_midi_semitone_q12[12] PS2_AUDIO_RODATA = {
     5793, 6137, 6502, 6889, 7298, 7732
 };
 
+/*
+ * These MIDI chunk signatures must live in the isolated audio overlay too.
+ * Leaving them as string literals inside overlay functions lets GCC place
+ * them in ordinary .rodata, which is enough to perturb the hardware-sensitive
+ * normal client ELF layout.
+ */
+static const uint8_t ps2_midi_mthd[4] PS2_AUDIO_RODATA = {
+    'M', 'T', 'h', 'd'
+};
+static const uint8_t ps2_midi_mtrk[4] PS2_AUDIO_RODATA = {
+    'M', 'T', 'r', 'k'
+};
+
 static const char ps2_audio_path_fmt[] PS2_AUDIO_RODATA = "%srs2midi.irx";
 static const char ps2_audio_open_fail_fmt[] PS2_AUDIO_RODATA =
     "audio: rs2midi EE open failed path=%s\n";
@@ -470,25 +483,21 @@ PS2_AUDIO_STATIC bool ps2_midi_process_event(Ps2MidiTrack *track)
     uint8_t data1 = *track->pos++;
     uint8_t data2 = data_bytes == 2 ? *track->pos++ : 0;
 
-    switch (kind) {
-    case 0x80:
+    /*
+     * Keep this as comparisons rather than a switch. On MIPS, a switch may
+     * legally grow a compiler-generated jump table in ordinary .rodata even
+     * though this function itself is assigned to .ps2_audio_text.
+     */
+    if (kind == 0x80) {
         ps2_midi_note_off(channel, data1);
-        break;
-    case 0x90:
+    } else if (kind == 0x90) {
         if (data2 == 0) {
             ps2_midi_note_off(channel, data1);
         } else {
             ps2_midi_note_on(channel, data1, data2);
         }
-        break;
-    case 0xb0:
-        if (data1 == 120 || data1 == 123) {
-            ps2_midi_all_notes_off_channel(channel);
-        }
-        break;
-    default:
-        /* Program, pressure and bend are intentionally phase-2 features. */
-        break;
+    } else if (kind == 0xb0 && (data1 == 120 || data1 == 123)) {
+        ps2_midi_all_notes_off_channel(channel);
     }
 
     return ps2_midi_schedule_next(track);
@@ -499,7 +508,7 @@ PS2_AUDIO_STATIC bool ps2_midi_reset_tracks(void)
     const uint8_t *data = ps2_music_state.midi_data;
     int size = ps2_music_state.midi_size;
 
-    if (!data || size < 14 || memcmp(data, "MThd", 4) != 0) {
+    if (!data || size < 14 || memcmp(data, ps2_midi_mthd, sizeof(ps2_midi_mthd)) != 0) {
         return false;
     }
 
@@ -526,7 +535,7 @@ PS2_AUDIO_STATIC bool ps2_midi_reset_tracks(void)
 
     for (uint16_t i = 0; i < track_count; i++) {
         if ((size_t)(file_end - cursor) < 8 ||
-            memcmp(cursor, "MTrk", 4) != 0) {
+            memcmp(cursor, ps2_midi_mtrk, sizeof(ps2_midi_mtrk)) != 0) {
             return false;
         }
 
