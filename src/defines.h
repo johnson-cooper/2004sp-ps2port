@@ -78,8 +78,9 @@
 // camera-facing wedge. Three tiles behind the camera and six tiles of horizontal safety margin remain
 // visible to reduce edge/near-camera popping; the expensive renderer should therefore still see fewer candidate
 // tiles than the old radius-14 square even though the forward horizon is longer.
-// Terrain residency remains the traversal-good 80x80 (12..91), while static loc/model residency stays
-// at the lighter 72x72 window. These residency limits are intentionally unchanged by this experiment.
+// Smaller-residency hardware test: keep the render radius unchanged, but reduce the materialized
+// scene to 72x72 terrain and 64x64 static locs. This should lower resident scene/memory/cache pressure;
+// the risk is reaching the fixed window edge before the normal server-driven REBUILD_NORMAL recenters it.
 #define PS2_RENDER_RADIUS 18
 // Slightly relax the camera-facing visibility wedge. The previous 2-tile rear / 4-tile side
 // guard could reject a wall's owning tile while part of the wall was still visibly crossing the
@@ -100,12 +101,12 @@
 // players are not submitted to World3D. Network state and interaction state are still maintained.
 #define PS2_PLAYER_FULL_DETAIL_RADIUS 6
 #define PS2_PLAYER_RENDER_RADIUS 14
-#define PS2_LOC_MIN_TILE 16
-#define PS2_LOC_MAX_TILE 88
-#define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 12)
-#define PS2_TERRAIN_MAX_X_TILE 92
-#define PS2_TERRAIN_MAX_Z_TILE 92
-#define PS2_TERRAIN_MAX_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MAX_TILE : 92)
+#define PS2_LOC_MIN_TILE 20
+#define PS2_LOC_MAX_TILE 84
+#define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 16)
+#define PS2_TERRAIN_MAX_X_TILE 88
+#define PS2_TERRAIN_MAX_Z_TILE 88
+#define PS2_TERRAIN_MAX_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MAX_TILE : 88)
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
@@ -114,9 +115,9 @@
 // for a 25 Hz visual target. This increases renderer/presenter demand 2.5x versus the divisor-5
 // baseline, so keep it isolated until real hardware proves enough frame-time headroom.
 #define PS2_RENDER_DIVISOR 2
-// Static-world restoration stays enabled. For this test loc/model placement is 72x72 while terrain
-// returns to the traversal-proven 80x80 bridge window, so black terrain and dense-loc pressure are no
-// longer tied to the same knob.
+// Static-world restoration stays enabled. This isolated test deliberately tightens loc/model
+// placement to 64x64 and terrain to 72x72 while leaving the 18-tile render radius and 25 Hz
+// presentation unchanged, so any gain/regression comes from residency rather than draw settings.
 #define PS2_DEFER_STATIC_LOCATIONS 0
 // The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
