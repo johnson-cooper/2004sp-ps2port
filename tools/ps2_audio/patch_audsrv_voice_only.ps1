@@ -167,6 +167,20 @@ $replacement = @'
 $text = Replace-RegexOnce $text $pattern $replacement "IOP RPC ADPCM dispatch marker"
 Write-Text $rpcServerPath $text
 
+# The EE RPC implementation keeps command IDs in a private header.
+$eeRpcHeaderPath = "ee\rpc\audsrv\src\audsrv_rpc.h"
+$text = Read-Text $eeRpcHeaderPath
+$newEeRpcMarker = @'
+#define AUDSRV_IS_ADPCM_PLAYING     0x001d
+
+/* 2004sp private voice-only extensions. */
+#define AUDSRV_RS2_PLAY_ADPCM        0x0020
+#define AUDSRV_RS2_KEY_OFF           0x0021
+#define AUDSRV_RS2_SET_PITCH         0x0022
+'@
+$text = Replace-LiteralOnce $text "#define AUDSRV_IS_ADPCM_PLAYING     0x001d" $newEeRpcMarker "EE RPC command marker"
+Write-Text $eeRpcHeaderPath $text
+
 # EE declarations and wrappers.
 $eeHeaderPath = "ee\rpc\audsrv\include\audsrv.h"
 $text = Read-Text $eeHeaderPath
