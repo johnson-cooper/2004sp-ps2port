@@ -39,6 +39,21 @@ const int WALL_DECORATION_OUTSET_Z[] = {45, 45, -45, -45};
 // Keep active/actionable locs at the full scene radius, and only shorten the draw distance of
 // inactive scenery. This is intentionally render-only: scene residency, collision, pathing and
 // interaction state are left untouched.
+static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
+    // The original dense-loc optimization measured detail distance from the camera eye tile.
+    // Because the camera orbits around the player, rotating the camera could move the eye across a
+    // distance threshold and make fences/diagonal walls/scenery pop in and out. Anchor these LOD
+    // decisions to the local player's scene tile instead; fall back to the eye tile during startup.
+    *tileX = _World3D.eyeTileX;
+    *tileZ = _World3D.eyeTileZ;
+
+    Client *c = ps2_crash_client;
+    if (c && c->local_player) {
+        *tileX = c->local_player->pathing_entity.x >> 7;
+        *tileZ = c->local_player->pathing_entity.z >> 7;
+    }
+}
+
 static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
     if ((bitset & 0x40000000) == 0 || bitset >= 0) {
         return true;
@@ -54,8 +69,11 @@ static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int scene
         radius = PS2_ROOF_RENDER_RADIUS;
     }
 
-    int dx = (sceneX >> 7) - _World3D.eyeTileX;
-    int dz = (sceneZ >> 7) - _World3D.eyeTileZ;
+    int anchorX;
+    int anchorZ;
+    ps2_loc_detail_anchor(&anchorX, &anchorZ);
+    int dx = (sceneX >> 7) - anchorX;
+    int dz = (sceneZ >> 7) - anchorZ;
     if (dx < 0) dx = -dx;
     if (dz < 0) dz = -dz;
     return dx <= radius && dz <= radius;
@@ -83,8 +101,11 @@ static inline bool ps2_claim_inactive_loc_budget(int bitset, int sceneX, int sce
         return true;
     }
 
-    int dx = (sceneX >> 7) - _World3D.eyeTileX;
-    int dz = (sceneZ >> 7) - _World3D.eyeTileZ;
+    int anchorX;
+    int anchorZ;
+    ps2_loc_detail_anchor(&anchorX, &anchorZ);
+    int dx = (sceneX >> 7) - anchorX;
+    int dz = (sceneZ >> 7) - anchorZ;
     if (dx < 0) dx = -dx;
     if (dz < 0) dz = -dz;
     int distance = dx > dz ? dx : dz;
