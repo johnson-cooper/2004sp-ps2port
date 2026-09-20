@@ -5136,17 +5136,6 @@ static void handleControllerButtonInput(Client *c) {
     }
 
     if (c->controller_back_pressed) {
-            c->controller_back_pressed = false;
-                    c->redraw_chatback = true;
-        }
-
-        // Do not queue unrelated one-shot actions to fire after chat focus closes.
-        c->controller_inventory_pressed = false;
-        c->controller_snap_camera_pressed = false;
-        return;
-    }
-
-    if (c->controller_back_pressed) {
         // Left unconsumed (and untouched) here while the keyboard is open - virtual_keyboard_
         // handle_input() consumes it itself, as Backspace, in that case. This guard makes the two
         // consumers order-independent regardless of which is called first each tick.
