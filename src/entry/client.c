@@ -12783,17 +12783,29 @@ static void client_draw_interface(Client *c, Component *com, int x, int y, int s
                     strcpy(text, "");
                 }
 
+#ifdef __PS2__
+                // Prefer bold12 for chatbox readability, but never make a cache-authored dialogue
+                // line wider than its component. Long lines fall back to their original font so
+                // the PS2 accessibility tweak cannot clip text that previously fit.
+                PixFont *drawFont = font;
+                if (ps2ChatText && child->font && child->width > 0 &&
+                    stringWidth(drawFont, split) > child->width) {
+                    drawFont = child->font;
+                }
+#else
+                PixFont *drawFont = font;
+#endif
                 if (child->center) {
 #ifdef __PS2__
-                    drawStringTaggableCenter(font, split, childX + child->width / 2, lineY, color, child->shadowed || ps2ChatText);
+                    drawStringTaggableCenter(drawFont, split, childX + child->width / 2, lineY, color, child->shadowed || ps2ChatText);
 #else
-                    drawStringTaggableCenter(font, split, childX + child->width / 2, lineY, color, child->shadowed);
+                    drawStringTaggableCenter(drawFont, split, childX + child->width / 2, lineY, color, child->shadowed);
 #endif
                 } else {
 #ifdef __PS2__
-                    drawStringTaggable(font, childX, lineY, split, color, child->shadowed || ps2ChatText);
+                    drawStringTaggable(drawFont, childX, lineY, split, color, child->shadowed || ps2ChatText);
 #else
-                    drawStringTaggable(font, childX, lineY, split, color, child->shadowed);
+                    drawStringTaggable(drawFont, childX, lineY, split, color, child->shadowed);
 #endif
                 }
             }
