@@ -329,3 +329,34 @@ Interpretation:
 - if +0x80 also fails, the shared low-address phase (...80 rather than ...00) is a strong clue;
 - if +0x80 connects, displacement magnitude or a narrower address window matters and we continue
   with intermediate offsets.
+
+
+## Milestone 3J: isolated high-memory EE shim
+
+Milestone 3I connected successfully with .bss at 0x00200b80, while the earlier .bss-only
+0x00200c80 test failed. Rather than continue brute-force offset probing, the port now treats the
+normal client BSS layout as hardware-sensitive and avoids perturbing it for audio integration.
+
+The client uses a local PS2SDK-derived linkfile. Normal .text/.data/.rodata/.sdata/.bss ordering is
+unchanged. New rs2midi EE loader code, strings and its one initialized state word are emitted into a
+second PT_LOAD beginning at 0x01fc0000. The normal _end remains the end of client BSS. _heap_size is
+explicitly capped at 0x01fc0000 - _end so malloc can never overwrite the isolated overlay; the stock
+128 KiB top-of-RAM stack reservation remains unchanged.
+
+ps2_music_update() stays in the normal client text as a two-instruction MIPS tail jump into the
+overlay. This is intended to preserve the hardware-good normal .text size while allowing the real
+post-login experiment to run.
+
+After scene_state == 2 remains live for 250 updates, the isolated shim:
+1. loads external rs2midi.irx from the existing install/cache prefix;
+2. binds RPC 0x5253324d;
+3. sends the PING command;
+4. expects 0x52533250.
+
+No SPU2/libsd work has been added to rs2midi yet. Stage rs2midi.irx beside client.elf.
+
+Before hardware testing, verify size/readelf:
+- normal .text/.data/.rodata/.sdata/.bss addresses should match the hardware-good client;
+- .bss should start at 0x00200b00;
+- a second PT_LOAD should exist around 0x01fc0000 for .ps2_audio_*;
+- the normal LOAD must not move its BSS to 0x00200c80.

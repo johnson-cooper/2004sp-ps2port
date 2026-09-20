@@ -23,11 +23,9 @@ targets:
   - name: client
     type: ee
     opt: -O1
-    # Milestone 3I: alignment-phase A/B. Move ONLY .bss by +0x80 from the
-    # hardware-good address. This gives it the same ...80 low-address phase as
-    # the failing +0x180 layout while minimizing absolute movement.
-    ldflags:
-      - -Wl,--section-start=.bss=0x00200b80
+    # Milestone 3J: keep the normal client/BSS layout hardware-good and place
+    # new rs2midi EE loader code/data in an isolated high-memory PT_LOAD.
+    linkfile: ps2_audio_linkfile.ld
     sources:
       - src/*.c
       - src/entry/*.c
