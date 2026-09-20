@@ -24,6 +24,37 @@ static unsigned long ps2_dropped_depth_faces = 0;
 static unsigned long ps2_dropped_priority_faces = 0;
 static unsigned long ps2_dropped_invalid_faces = 0;
 
+// Dense scenes contain many small, separate models. The old renderer cleared up to 600 integer
+// depth-bucket counters for every model before classifying even a handful of faces. Use a generation
+// tag instead: a bucket is logically zero unless it was touched by the current model. Track the
+// populated depth range as well so the later back-to-front passes do not scan the model's entire
+// declared max_depth when only a narrow slice contains faces.
+static unsigned int ps2_depth_bucket_generation[MODEL_MAX_DEPTH];
+static unsigned int ps2_depth_generation = 1;
+static int ps2_depth_min = MODEL_MAX_DEPTH;
+static int ps2_depth_max = -1;
+
+static inline void ps2_begin_depth_buckets(void) {
+    ps2_depth_generation++;
+    if (ps2_depth_generation == 0) {
+        // Practically unreachable, but keep generation wrap correct without relying on stale tags.
+        for (int i = 0; i < MODEL_MAX_DEPTH; i++) {
+            ps2_depth_bucket_generation[i] = 0;
+        }
+        ps2_depth_generation = 1;
+    }
+    ps2_depth_min = MODEL_MAX_DEPTH;
+    ps2_depth_max = -1;
+}
+
+static inline int ps2_depth_bucket_count(int depth) {
+    if (depth < 0 || depth >= MODEL_MAX_DEPTH ||
+        ps2_depth_bucket_generation[depth] != ps2_depth_generation) {
+        return 0;
+    }
+    return _Model.tmp_depth_face_count[depth];
+}
+
 unsigned long model_ps2_dropped_depth_faces(void) { return ps2_dropped_depth_faces; }
 unsigned long model_ps2_dropped_priority_faces(void) { return ps2_dropped_priority_faces; }
 unsigned long model_ps2_dropped_invalid_faces(void) { return ps2_dropped_invalid_faces; }
@@ -93,7 +124,20 @@ static void model_bucket_face(int depth_average, int face) {
 #endif
         return;
     }
+#ifdef __PS2__
+    int count;
+    if (ps2_depth_bucket_generation[depth_average] != ps2_depth_generation) {
+        ps2_depth_bucket_generation[depth_average] = ps2_depth_generation;
+        _Model.tmp_depth_face_count[depth_average] = 0;
+        count = 0;
+        if (depth_average < ps2_depth_min) ps2_depth_min = depth_average;
+        if (depth_average > ps2_depth_max) ps2_depth_max = depth_average;
+    } else {
+        count = _Model.tmp_depth_face_count[depth_average];
+    }
+#else
     int count = _Model.tmp_depth_face_count[depth_average];
+#endif
     if (count >= MODEL_DEPTH_FACE_COUNT) {
 #ifdef __PS2__
         ps2_dropped_depth_faces++;
@@ -295,9 +339,13 @@ void model_draw2(Model *m, bool projected, bool hasInput, int bitset) {
     int clear_depths = m->max_depth;
     if (clear_depths < 0) clear_depths = 0;
     if (clear_depths > MODEL_MAX_DEPTH) clear_depths = MODEL_MAX_DEPTH;
+#ifdef __PS2__
+    ps2_begin_depth_buckets();
+#else
     for (int i = 0; i < clear_depths; i++) {
         _Model.tmp_depth_face_count[i] = 0;
     }
+#endif
 
     int face_limit = m->face_count;
     if (face_limit > MODEL_FACE_SCRATCH_COUNT) face_limit = MODEL_FACE_SCRATCH_COUNT;
@@ -342,9 +390,23 @@ void model_draw2(Model *m, bool projected, bool hasInput, int bitset) {
     }
 #endif
 
+#ifdef __PS2__
+    int scan_min_depth = ps2_depth_min;
+    int scan_max_depth = ps2_depth_max;
+    if (scan_min_depth < 0) scan_min_depth = 0;
+    if (scan_max_depth >= clear_depths) scan_max_depth = clear_depths - 1;
+#else
+    int scan_min_depth = 0;
+    int scan_max_depth = clear_depths - 1;
+#endif
+
     if (!m->face_priorities) {
-        for (int depth = clear_depths - 1; depth >= 0; depth--) {
+        for (int depth = scan_max_depth; depth >= scan_min_depth; depth--) {
+#ifdef __PS2__
+            int count = ps2_depth_bucket_count(depth);
+#else
             int count = _Model.tmp_depth_face_count[depth];
+#endif
             int *faces = _Model.tmp_depth_faces[depth];
             for (int f = 0; f < count; f++) model_draw_face(m, faces[f]);
         }
@@ -355,8 +417,12 @@ void model_draw2(Model *m, bool projected, bool hasInput, int bitset) {
         _Model.tmp_priority_face_count[priority] = 0;
         _Model.tmp_priority_depth_sum[priority] = 0;
     }
-    for (int depth = clear_depths - 1; depth >= 0; depth--) {
+    for (int depth = scan_max_depth; depth >= scan_min_depth; depth--) {
+#ifdef __PS2__
+        int face_count = ps2_depth_bucket_count(depth);
+#else
         int face_count = _Model.tmp_depth_face_count[depth];
+#endif
         int *depth_faces = _Model.tmp_depth_faces[depth];
         for (int n = 0; n < face_count; n++) {
             int face = depth_faces[n];
