@@ -156,3 +156,10 @@ For every commit sent for hardware testing, record or communicate the exact comm
 Nothing is merged to `main` automatically.
 
 Only merge/promote the PS2 development branch when Cooper explicitly approves it after hardware testing. Before that merge, review the cumulative diff, remove temporary debugging/test machinery that is no longer useful, and ensure local-only configuration/build artifacts are not included.
+
+
+- Audio Milestone 4B: the first direct rs2midi SPU2 voice test was network-stable but silent. Do not
+  treat that as a failed architecture test: external rs2midi + isolated EE overlay remains good.
+  The next hardware candidate removes an immediate KOFF->KON race, explicitly preserves core-0 to
+  core-1 output routing, plays a three-beep full-volume pattern, and logs live SPU2 register state
+  through a GET_STATE RPC. Normal client BSS placement must remain at 0x00200b00 before testing.

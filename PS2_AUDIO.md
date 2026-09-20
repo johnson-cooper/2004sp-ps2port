@@ -403,3 +403,21 @@ base pitch, changes to the native pitch after 25 ms, and keys off after another 
 
 Expected hardware result: a short audible pitch-changing chirp, followed by normal continued
 network/world operation. The boot/server path is still untouched before the delayed world-live test.
+
+
+## Milestone 4B: audible pattern + SPU2 state diagnostics
+
+The first direct rs2midi voice test remained network-stable on real hardware but produced no audible
+chirp. The client/server architecture therefore remains validated; only direct SPU2 voice output is
+under investigation.
+
+Two changes isolate the voice path:
+- NOTE_ON no longer performs an immediate KOFF followed by KON. LIBSD itself documents that key
+  transitions are asynchronous; explicit KEY_OFF plus a real delay is now used before retriggering.
+- A GET_STATE RPC returns live core-0 pitch, voice L/R volume, sample start address, ENDX, core-0
+  master volume, and core-1 external-input volume.
+
+The smoke test is now deliberately obvious: three separated full-volume beeps, with the first
+starting at quarter pitch and changing to half pitch while active. State snapshots are logged after
+the first note-on, after the pitch change, and after key-off. This remains entirely post-world and
+inside the isolated EE overlay/external rs2midi architecture.

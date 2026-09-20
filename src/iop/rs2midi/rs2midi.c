@@ -9,6 +9,7 @@
 #define RS2MIDI_RPC_NOTE_ON    2
 #define RS2MIDI_RPC_SET_PITCH  3
 #define RS2MIDI_RPC_KEY_OFF    4
+#define RS2MIDI_RPC_GET_STATE  5
 
 #define RS2MIDI_PONG 0x52533250u
 
@@ -130,7 +131,21 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
         sceSdSetParam(RS2MIDI_CORE | SD_PARAM_MVOLL, 0x3fff);
         sceSdSetParam(RS2MIDI_CORE | SD_PARAM_MVOLR, 0x3fff);
 
-        sceSdSetSwitch(RS2MIDI_CORE | SD_SWITCH_KOFF, 1u << voice);
+        /*
+         * Core 0 reaches the final SPU2 output through core 1's external
+         * input path. LIBSD cold-init normally leaves these at 0x7fff, but
+         * set them explicitly so the companion does not depend on a prior
+         * module preserving that routing state.
+         */
+        sceSdSetParam(1 | SD_PARAM_AVOLL, 0x7fff);
+        sceSdSetParam(1 | SD_PARAM_AVOLR, 0x7fff);
+
+        /*
+         * Do NOT KOFF immediately before KON here. LIBSD's own reset path
+         * documents that key transitions are asynchronous; an immediate
+         * KOFF->KON can race on real hardware. LOAD/explicit KEY_OFF already
+         * silence the voice before a later note-on.
+         */
         sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLL, voll);
         sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLR, volr);
         sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_PITCH, pitch);
@@ -158,6 +173,34 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
             break;
         }
         sceSdSetSwitch(RS2MIDI_CORE | SD_SWITCH_KOFF, 1u << voice);
+        break;
+    }
+
+    case RS2MIDI_RPC_GET_STATE: {
+        u32 voice = words[0];
+        if (!rs2midi_valid_voice(voice)) {
+            status = RS2MIDI_ERR_ARGS;
+            break;
+        }
+
+        /*
+         * Return enough live SPU2 state to distinguish RPC/DMA/register
+         * success from an output-routing problem on real hardware.
+         */
+        words[1] = (u32)rs2midi_sample_loaded;
+        words[2] = (u32)sceSdGetParam(
+            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_PITCH);
+        words[3] = (u32)sceSdGetParam(
+            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLL);
+        words[4] = (u32)sceSdGetParam(
+            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLR);
+        words[5] = sceSdGetAddr(
+            RS2MIDI_CORE | (voice << 1) | SD_VADDR_SSA);
+        words[6] = sceSdGetSwitch(RS2MIDI_CORE | SD_SWITCH_ENDX);
+        words[7] = (u32)sceSdGetParam(RS2MIDI_CORE | SD_PARAM_MVOLL);
+        words[8] = (u32)sceSdGetParam(RS2MIDI_CORE | SD_PARAM_MVOLR);
+        words[9] = (u32)sceSdGetParam(1 | SD_PARAM_AVOLL);
+        words[10] = (u32)sceSdGetParam(1 | SD_PARAM_AVOLR);
         break;
     }
 

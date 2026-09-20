@@ -24,6 +24,7 @@
 #define RS2MIDI_RPC_NOTE_ON    2
 #define RS2MIDI_RPC_SET_PITCH  3
 #define RS2MIDI_RPC_KEY_OFF    4
+#define RS2MIDI_RPC_GET_STATE  5
 
 #define RS2MIDI_PONG 0x52533250u
 
@@ -69,6 +70,11 @@ static const char ps2_audio_sample_bad_fmt[] PS2_AUDIO_RODATA =
     "audio: rs2midi test sample invalid size=%u raw=%u\n";
 static const char ps2_audio_voice_test_fmt[] PS2_AUDIO_RODATA =
     "audio: rs2midi voice test load=%d note=%d pitch=%d off=%d basepitch=%u raw=%u\n";
+static const char ps2_audio_state_fmt[] PS2_AUDIO_RODATA =
+    "audio: rs2midi state %s rc=%d loaded=%u pitch=%u voll=%u volr=%u ssa=0x%08x endx=0x%06x mv=%u/%u ext=%u/%u\n";
+static const char ps2_audio_state_after_on[] PS2_AUDIO_RODATA = "after-on";
+static const char ps2_audio_state_after_pitch[] PS2_AUDIO_RODATA = "after-pitch";
+static const char ps2_audio_state_after_off[] PS2_AUDIO_RODATA = "after-off";
 
 static int32_t ps2_audio_rpc_status(
     SifRpcClientData_t *rpc,
@@ -97,6 +103,36 @@ static int32_t ps2_audio_rpc_status(
         return rc;
     }
     return (int32_t)packet->words[0];
+}
+
+static void ps2_audio_log_state(
+    SifRpcClientData_t *rpc,
+    Rs2MidiRpcPacket *packet,
+    const char *label) PS2_AUDIO_CODE;
+
+static void ps2_audio_log_state(
+    SifRpcClientData_t *rpc,
+    Rs2MidiRpcPacket *packet,
+    const char *label)
+{
+    memset(packet, 0, RS2MIDI_RPC_HEADER_BYTES);
+    packet->words[0] = RS2MIDI_TEST_VOICE;
+    int32_t rc = ps2_audio_rpc_status(
+        rpc, RS2MIDI_RPC_GET_STATE, packet, sizeof(uint32_t));
+
+    rs2_log(ps2_audio_state_fmt,
+            label,
+            (int)rc,
+            (unsigned int)packet->words[1],
+            (unsigned int)packet->words[2],
+            (unsigned int)packet->words[3],
+            (unsigned int)packet->words[4],
+            (unsigned int)packet->words[5],
+            (unsigned int)packet->words[6],
+            (unsigned int)packet->words[7],
+            (unsigned int)packet->words[8],
+            (unsigned int)packet->words[9],
+            (unsigned int)packet->words[10]);
 }
 
 void ps2_audio_update_late(void) PS2_AUDIO_CODE;
@@ -209,28 +245,75 @@ void ps2_audio_update_late(void)
     int32_t off_status = -999;
 
     if (load_status == 0) {
+        /*
+         * Make the hardware smoke test unmistakable:
+         *   chirp 1: quarter pitch -> half pitch while still playing
+         *   chirp 2: half pitch
+         *   chirp 3: native pitch
+         * Use full voice volume and leave large gaps between re-triggers.
+         */
         memset(&packet, 0, RS2MIDI_RPC_HEADER_BYTES);
         packet.words[0] = RS2MIDI_TEST_VOICE;
-        packet.words[1] = base_pitch > 1 ? base_pitch / 2u : 1u;
-        packet.words[2] = 0x1000;
-        packet.words[3] = 0x1000;
+        packet.words[1] = base_pitch > 3 ? base_pitch / 4u : 1u;
+        packet.words[2] = 0x3fff;
+        packet.words[3] = 0x3fff;
         note_status = ps2_audio_rpc_status(
             &rpc, RS2MIDI_RPC_NOTE_ON, &packet, 16);
 
         if (note_status == 0) {
-            DelayThread(25000);
+            DelayThread(20000);
+            ps2_audio_log_state(&rpc, &packet, ps2_audio_state_after_on);
+
+            DelayThread(80000);
+            memset(&packet, 0, RS2MIDI_RPC_HEADER_BYTES);
+            packet.words[0] = RS2MIDI_TEST_VOICE;
+            packet.words[1] = base_pitch > 1 ? base_pitch / 2u : 1u;
+            pitch_status = ps2_audio_rpc_status(
+                &rpc, RS2MIDI_RPC_SET_PITCH, &packet, 8);
+
+            DelayThread(50000);
+            ps2_audio_log_state(&rpc, &packet, ps2_audio_state_after_pitch);
+
+            DelayThread(50000);
+            memset(&packet, 0, RS2MIDI_RPC_HEADER_BYTES);
+            packet.words[0] = RS2MIDI_TEST_VOICE;
+            off_status = ps2_audio_rpc_status(
+                &rpc, RS2MIDI_RPC_KEY_OFF, &packet, 4);
+
+            DelayThread(20000);
+            ps2_audio_log_state(&rpc, &packet, ps2_audio_state_after_off);
+
+            /* Give KOFF ample real-hardware time before reusing the voice. */
+            DelayThread(280000);
+
+            memset(&packet, 0, RS2MIDI_RPC_HEADER_BYTES);
+            packet.words[0] = RS2MIDI_TEST_VOICE;
+            packet.words[1] = base_pitch > 1 ? base_pitch / 2u : 1u;
+            packet.words[2] = 0x3fff;
+            packet.words[3] = 0x3fff;
+            (void)ps2_audio_rpc_status(
+                &rpc, RS2MIDI_RPC_NOTE_ON, &packet, 16);
+            DelayThread(150000);
+
+            memset(&packet, 0, RS2MIDI_RPC_HEADER_BYTES);
+            packet.words[0] = RS2MIDI_TEST_VOICE;
+            (void)ps2_audio_rpc_status(
+                &rpc, RS2MIDI_RPC_KEY_OFF, &packet, 4);
+
+            DelayThread(300000);
 
             memset(&packet, 0, RS2MIDI_RPC_HEADER_BYTES);
             packet.words[0] = RS2MIDI_TEST_VOICE;
             packet.words[1] = base_pitch;
-            pitch_status = ps2_audio_rpc_status(
-                &rpc, RS2MIDI_RPC_SET_PITCH, &packet, 8);
-
-            DelayThread(25000);
+            packet.words[2] = 0x3fff;
+            packet.words[3] = 0x3fff;
+            (void)ps2_audio_rpc_status(
+                &rpc, RS2MIDI_RPC_NOTE_ON, &packet, 16);
+            DelayThread(100000);
 
             memset(&packet, 0, RS2MIDI_RPC_HEADER_BYTES);
             packet.words[0] = RS2MIDI_TEST_VOICE;
-            off_status = ps2_audio_rpc_status(
+            (void)ps2_audio_rpc_status(
                 &rpc, RS2MIDI_RPC_KEY_OFF, &packet, 4);
         }
     }

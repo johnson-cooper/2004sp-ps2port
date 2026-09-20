@@ -13,8 +13,11 @@ thbase_IMPORTS_end
 
 libsd_IMPORTS_start
 I_sceSdSetParam
+I_sceSdGetParam
 I_sceSdSetAddr
+I_sceSdGetAddr
 I_sceSdSetSwitch
+I_sceSdGetSwitch
 I_sceSdVoiceTrans
 I_sceSdVoiceTransStatus
 libsd_IMPORTS_end
