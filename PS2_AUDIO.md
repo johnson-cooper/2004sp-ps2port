@@ -215,3 +215,30 @@ headers, `_end`, `errno`, and selected network/runtime symbols.
 The comparison tool is not part of any PS2Build source glob and therefore cannot affect client.elf.
 Do not resume MIDI integration until the reason tiny EE binary changes break pre-login networking is
 understood or the ELF layout is made robust.
+
+
+## Milestone 3F: inert ELF-layout A/B
+
+The good/failing ELF report showed a very small but exact loaded-image shift:
+
+- good .text: 0xC8F30
+- failing .text: 0xC9018 (+0xE8)
+- good .rodata: 0xCBC0
+- failing .rodata: 0xCC10 (+0x50)
+- .data size unchanged
+- .bss size unchanged
+- final LOAD MemSiz moved by 0x180
+
+This test leaves the hardware-good voice-only runtime behavior intact and injects exactly 0xE8
+unreachable bytes into .text plus 0x50 inert bytes into .rodata from the existing ps2_music.c
+translation unit. There are no new calls, branches, globals, constructors, IOP loads, RPCs, or
+audio operations.
+
+Before hardware testing, verify the candidate ELF reaches .text 0xC9018 and .rodata 0xCC10.
+The hardware question is only whether reproducing the layout shift causes the otherwise-known-good
+client to fail pre-login networking.
+
+Interpretation:
+- if this inert candidate fails, ELF/memory placement alone is sufficient to trigger the bug;
+- if it connects, section size/layout alone is insufficient and the failing functional changes
+  themselves (or their codegen/link composition) must be investigated.

@@ -34,4 +34,25 @@ void ps2_music_set_volume(float volume) {
 void ps2_music_shutdown(void) {
 }
 
+/*
+ * Milestone 3F: pure ELF-layout A/B.
+ *
+ * Real hardware connects with this exact runtime audio implementation, while
+ * tiny later EE changes fail before any rs2midi code can run. The good/failing
+ * ELF comparison showed the failing image had exactly +0xE8 bytes of .text and
+ * +0x50 bytes of .rodata. Inject those bytes here without adding any callable
+ * code, branches, globals, constructors, RPC activity, or audio behavior.
+ *
+ * These bytes are intentionally unreachable. Their only purpose is to move
+ * the following ELF sections by the same amount as the failing build.
+ */
+__asm__(
+    ".pushsection .text\n"
+    ".space 0xE8, 0\n"
+    ".popsection\n"
+    ".pushsection .rodata\n"
+    ".space 0x50, 0\n"
+    ".popsection\n"
+);
+
 #endif
