@@ -5123,15 +5123,10 @@ static void handleControllerButtonInput(Client *c) {
         c->controller_start_pressed = false;
         if (c->virtual_keyboard_visible) {
             virtual_keyboard_close(c, true);
-        } else if (c->ingame &&
-                   c->chat_interface_id == -1 &&
-                   !c->show_social_input &&
-                   !c->chatback_input_open) {
-            // Controller chat hotkey: Start enters normal public-chat typing directly.
-            // This is the same virtual keyboard path the PS2 already uses for every other text field.
-            c->chat_scroll_offset = 0;
-            c->redraw_chatback = true;
-            virtual_keyboard_maybe_open(c, 2);
+        } else {
+            // Legacy/direct controller chat entry shares the exact same helper as the
+            // modern Chat-panel Cross path.
+            client_open_public_chat_keyboard(c);
         }
     }
 
@@ -5522,6 +5517,19 @@ static void handleControllerGridInput(Client *c) {
     // Refresh RuneScape's native menu/hover state immediately at the snapped slot. Cross and Circle
     // therefore operate on the new item even if the player presses them before the next rendered frame.
     client_handle_input(c);
+}
+
+void client_open_public_chat_keyboard(Client *c) {
+    if (!c || !c->ingame || c->virtual_keyboard_visible ||
+        c->chat_interface_id != -1 || c->show_social_input || c->chatback_input_open) {
+        return;
+    }
+
+    // Keep every controller path on the same normal public-chat entry behavior.
+    // The PS2 modern UI calls this when Cross is pressed with its Chat panel open.
+    c->chat_scroll_offset = 0;
+    c->redraw_chatback = true;
+    virtual_keyboard_maybe_open(c, 2);
 }
 
 static void virtual_keyboard_maybe_open(Client *c, int target) {
