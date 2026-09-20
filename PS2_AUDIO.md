@@ -421,3 +421,37 @@ The smoke test is now deliberately obvious: three separated full-volume beeps, w
 starting at quarter pitch and changing to half pitch while active. State snapshots are logged after
 the first note-on, after the pitch change, and after key-off. This remains entirely post-world and
 inside the isolated EE overlay/external rs2midi architecture.
+
+
+## Milestone 4C: bypass ROM file-loader stack overflow
+
+The Milestone 4B PCSX2 test finally exposed a failure before any direct SPU2 operation ran.
+At the delayed post-world trigger, `SifLoadStartModule("mass0:/rs2midi.irx", ...)` entered the
+BIOS/ROM `Module_File_loader` and PCSX2 reported a stack overflow on that loader thread
+(`Stack size = 0x800`) before the call returned. There was therefore no rs2midi RPC bind, sample
+upload, KON, or state snapshot. The previous silence must not be treated as evidence against the
+direct core-0 voice path yet.
+
+This checkpoint keeps every validated architectural constraint:
+- audsrv remains frozen in the real-hardware-good voice-only shape;
+- rs2midi remains a separate external IRX beside `client.elf`;
+- loading still happens only after the world is live;
+- new EE loader code/state remains in the isolated high-memory audio overlay;
+- normal client BSS placement is not intentionally changed.
+
+Only the external-load mechanism changes. The EE uses the already-proven RuneScape USB stdio path
+to `fopen/fread` the IRX into a temporary 64-byte-aligned heap buffer, pads the allocation for
+PS2SDK's 16-byte DMA rounding, then calls `SifExecModuleBuffer()`. This avoids asking the ROM
+module loader to walk the BDM/FAT `mass0:` filesystem path itself. The temporary EE buffer is freed
+immediately after `SifExecModuleBuffer()` returns.
+
+Hardware/PCSX2 acceptance for this checkpoint:
+1. no `Module_File_loader` stack overflow;
+2. an `audio: rs2midi EE-buffer load ... id=... modres=...` line appears;
+3. RPC PING succeeds;
+4. the existing GET_STATE snapshots run;
+5. the three-beep test is finally allowed to exercise SPU2;
+6. RuneScape networking remains healthy throughout.
+
+Keep `rs2midi.irx` staged beside `client.elf`. If this reaches PING/state diagnostics but remains
+silent, only then resume investigation of DMA/KON/core-0 routing.

@@ -163,3 +163,11 @@ Only merge/promote the PS2 development branch when Cooper explicitly approves it
   The next hardware candidate removes an immediate KOFF->KON race, explicitly preserves core-0 to
   core-1 output routing, plays a three-beep full-volume pattern, and logs live SPU2 register state
   through a GET_STATE RPC. Normal client BSS placement must remain at 0x00200b00 before testing.
+
+
+- Audio Milestone 4C candidate: PCSX2 showed that the delayed external
+  `SifLoadStartModule("mass0:/rs2midi.irx")` path overflows the BIOS
+  `Module_File_loader` thread's 0x800-byte stack before rs2midi starts. The next isolated A/B keeps
+  rs2midi external and post-world but reads the IRX through the already-proven EE stdio/BDM path,
+  then executes it with `SifExecModuleBuffer()`. Do not change audsrv or direct SPU2 voice
+  programming until this loader-only test reaches the existing PING/GET_STATE diagnostics.

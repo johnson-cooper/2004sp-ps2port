@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../client.h"
@@ -30,6 +31,7 @@
 
 #define RS2MIDI_RPC_HEADER_BYTES  64u
 #define RS2MIDI_MAX_SAMPLE_BYTES  800u
+#define RS2MIDI_MAX_IRX_BYTES     (128u * 1024u)
 #define RS2MIDI_TEST_VOICE        0u
 
 #define PS2_AUDIO_CODE __attribute__((section(".ps2_audio_text"), noinline))
@@ -58,8 +60,16 @@ typedef struct Rs2MidiRpcPacket {
 static uint32_t ps2_audio_late_state PS2_AUDIO_DATA = 1;
 
 static const char ps2_audio_path_fmt[] PS2_AUDIO_RODATA = "%srs2midi.irx";
+static const char ps2_audio_open_fail_fmt[] PS2_AUDIO_RODATA =
+    "audio: rs2midi EE open failed path=%s\n";
+static const char ps2_audio_size_fail_fmt[] PS2_AUDIO_RODATA =
+    "audio: rs2midi EE invalid size path=%s size=%ld seek=%d\n";
+static const char ps2_audio_alloc_fail_fmt[] PS2_AUDIO_RODATA =
+    "audio: rs2midi EE buffer alloc failed size=%u\n";
+static const char ps2_audio_read_fail_fmt[] PS2_AUDIO_RODATA =
+    "audio: rs2midi EE read failed got=%u expected=%u\n";
 static const char ps2_audio_load_fmt[] PS2_AUDIO_RODATA =
-    "audio: rs2midi isolated load path=%s id=%d modres=%d\n";
+    "audio: rs2midi EE-buffer load path=%s size=%u id=%d modres=%d\n";
 static const char ps2_audio_bind_fail_fmt[] PS2_AUDIO_RODATA =
     "audio: rs2midi isolated bind failed rc=%d attempt=%d\n";
 static const char ps2_audio_bind_timeout_fmt[] PS2_AUDIO_RODATA =
@@ -158,9 +168,70 @@ void ps2_audio_update_late(void)
     char path[320];
     snprintf(path, sizeof(path), ps2_audio_path_fmt, ps2_cache_prefix());
 
+    /*
+     * Do not ask the ROM Module_File_loader to traverse mass0:/ here.
+     * PCSX2 exposed that path overflowing the BIOS loader thread's 0x800-byte
+     * stack before rs2midi could start. The EE-side stdio/BDM path is already
+     * heavily exercised by RuneScape cache/map loading, so read the external
+     * IRX here and hand PS2SDK an in-memory image instead.
+     *
+     * SifExecModuleBuffer() rounds its DMA byte count up to 16 bytes. Allocate
+     * explicit padding and align the source to a cache line so that rounding
+     * cannot read beyond the temporary allocation.
+     */
+    FILE *irx_file = fopen(path, "rb");
+    if (!irx_file) {
+        rs2_log(ps2_audio_open_fail_fmt, path);
+        return;
+    }
+
+    int seek_end = fseek(irx_file, 0, SEEK_END);
+    long irx_size_long = seek_end == 0 ? ftell(irx_file) : -1;
+    int seek_start = 0;
+    if (irx_size_long > 0) {
+        seek_start = fseek(irx_file, 0, SEEK_SET);
+    }
+
+    if (seek_end != 0 ||
+        seek_start != 0 ||
+        irx_size_long <= 0 ||
+        irx_size_long > (long)RS2MIDI_MAX_IRX_BYTES) {
+        rs2_log(ps2_audio_size_fail_fmt,
+                path, irx_size_long, seek_end != 0 ? seek_end : seek_start);
+        fclose(irx_file);
+        return;
+    }
+
+    uint32_t irx_size = (uint32_t)irx_size_long;
+    uint32_t irx_padded_size = (irx_size + 15u) & ~15u;
+    unsigned char *irx_alloc =
+        (unsigned char *)malloc((size_t)irx_padded_size + 63u);
+    if (!irx_alloc) {
+        rs2_log(ps2_audio_alloc_fail_fmt, (unsigned int)irx_size);
+        fclose(irx_file);
+        return;
+    }
+
+    unsigned char *irx_buffer = (unsigned char *)(
+        ((uintptr_t)irx_alloc + 63u) & ~(uintptr_t)63u);
+    memset(irx_buffer, 0, irx_padded_size);
+
+    size_t irx_read = fread(irx_buffer, 1, irx_size, irx_file);
+    fclose(irx_file);
+    if (irx_read != irx_size) {
+        rs2_log(ps2_audio_read_fail_fmt,
+                (unsigned int)irx_read, (unsigned int)irx_size);
+        free(irx_alloc);
+        return;
+    }
+
     int modres = -1;
-    int module_id = SifLoadStartModule(path, 0, NULL, &modres);
-    rs2_log(ps2_audio_load_fmt, path, module_id, modres);
+    int module_id = SifExecModuleBuffer(
+        irx_buffer, irx_size, 0, NULL, &modres);
+    free(irx_alloc);
+
+    rs2_log(ps2_audio_load_fmt,
+            path, (unsigned int)irx_size, module_id, modres);
     if (module_id < 0 || modres < 0) {
         return;
     }
