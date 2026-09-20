@@ -1,10 +1,16 @@
 #include "ps2_audio_test.h"
 
+#ifdef __PS2__
+#define PS2_AUDIO_TEST_RODATA __attribute__((section(".ps2_audio_rodata"), used))
+#else
+#define PS2_AUDIO_TEST_RODATA
+#endif
+
 // 60 ms, 660 Hz, mono, 22050 Hz. Generated offline with the PS2SDK adpenc
 // predictor/packer algorithm. The first 16 bytes are audsrv's APCM header.
 // This is intentionally tiny and exists only for the first real-hardware
 // audio bring-up test; it is not part of the final RuneScape sound bank.
-const unsigned char ps2_audio_test_adpcm[] __attribute__((aligned(64))) = {
+const unsigned char ps2_audio_test_adpcm[] PS2_AUDIO_TEST_RODATA __attribute__((aligned(64))) = {
     0x41, 0x50, 0x43, 0x4d, 0x01, 0x01, 0x00, 0x00, 0x59, 0x07, 0x00, 0x00, 0x2b, 0x05, 0x00, 0x00,
     0x24, 0x00, 0x70, 0x20, 0x10, 0x00, 0xf0, 0xf0, 0x0e, 0xfe, 0xfe, 0xff, 0xff, 0x00, 0x1f, 0x01,
     0x48, 0x00, 0x77, 0x47, 0x75, 0x76, 0x56, 0x24, 0x03, 0xe0, 0xdc, 0xaa, 0xaa, 0xa8, 0xaa, 0xdb,
@@ -57,4 +63,4 @@ const unsigned char ps2_audio_test_adpcm[] __attribute__((aligned(64))) = {
     0x12, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
-const unsigned int ps2_audio_test_adpcm_size = sizeof(ps2_audio_test_adpcm);
+const unsigned int ps2_audio_test_adpcm_size PS2_AUDIO_TEST_RODATA __attribute__((aligned(4))) = sizeof(ps2_audio_test_adpcm);
