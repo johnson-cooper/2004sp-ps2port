@@ -15,6 +15,9 @@ extern Pix2D _Pix2D;
 void pix3d_init_global(void) {
     _Pix3D.reciprical15 = malloc(512 * sizeof(int));
     _Pix3D.reciprical16 = malloc(2048 * sizeof(int));
+#ifdef __PS2__
+    _Pix3D.projectionReciprocal = malloc(PIX3D_PS2_PROJECTION_RECIP_COUNT * sizeof(unsigned int));
+#endif
     _Pix3D.sin_table = malloc(2048 * sizeof(int));
     _Pix3D.cos_table = malloc(2048 * sizeof(int));
     _Pix3D.renderWidth = 512;
@@ -26,6 +29,17 @@ void pix3d_init_global(void) {
     for (int i = 1; i < 2048; i++) {
         _Pix3D.reciprical16[i] = 65536 / i;
     }
+#ifdef __PS2__
+    if (_Pix3D.projectionReciprocal) {
+        _Pix3D.projectionReciprocal[0] = 0;
+        _Pix3D.projectionReciprocal[1] = 0;
+        for (unsigned int i = 2; i < PIX3D_PS2_PROJECTION_RECIP_COUNT; i++) {
+            // ceil(2^32 / i) without 64-bit startup division:
+            // ceil(N/d) == floor((N-1)/d) + 1.
+            _Pix3D.projectionReciprocal[i] = 0xffffffffU / i + 1U;
+        }
+    }
+#endif
     for (int i = 0; i < 2048; i++) {
         _Pix3D.sin_table[i] = (int)(sin((double)i * 0.0030679615) * 65536.0);
         _Pix3D.cos_table[i] = (int)(cos((double)i * 0.0030679615) * 65536.0);
@@ -55,6 +69,9 @@ void pix3d_free_global(void) {
     free(_Pix3D.activeTexels);
     free(_Pix3D.reciprical15);
     free(_Pix3D.reciprical16);
+#ifdef __PS2__
+    free(_Pix3D.projectionReciprocal);
+#endif
     free(_Pix3D.sin_table);
     free(_Pix3D.cos_table);
     free(_Pix3D.textureHasTransparency);
