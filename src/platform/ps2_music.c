@@ -365,8 +365,12 @@ PS2_AUDIO_STATIC void ps2_midi_note_on(
         return;
     }
 
+    /*
+     * Leave headroom for polyphonic SPU2 summing. Driving every MIDI voice
+     * to the hardware maximum clips noticeably during chords/busy passages.
+     */
     uint32_t volume =
-        ((uint32_t)velocity * 0x3fffu + 63u) / 127u;
+        ((uint32_t)velocity * 0x1800u + 63u) / 127u;
 
     Rs2MidiRpcPacket packet __attribute__((aligned(64)));
     memset(&packet, 0, RS2MIDI_RPC_HEADER_BYTES);
