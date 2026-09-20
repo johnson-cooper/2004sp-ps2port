@@ -71,8 +71,6 @@
 #define PS2_CHECKPOINTS_ENABLED 0
 
 #ifdef __PS2__
-extern bool ps2_rs2midi_external_ping_test(void);
-
 static unsigned long ps2_live_update_count = 0;
 static int ps2_live_stage = 0;
 static int ps2_heap_tick_begin_kb = 0;
@@ -5866,12 +5864,6 @@ static void client_scenemap_free(Client *c) {
 
 void client_update_game(Client *c) {
 #ifdef __PS2__
-    // Milestone 3C: after the initial scene has been live for ~5 seconds,
-    // load the standalone rs2midi.irx from the install directory and send
-    // exactly one PING. The IRX is not embedded in this ELF.
-    static int ps2_rs2midi_external_ticks;
-    static bool ps2_rs2midi_external_attempted;
-
     ps2_live_update_count++;
     ps2_live_stage = 1; // entered game update
     ps2_heap_tick_begin_kb = mallinfo().fordblks / 1024;
@@ -5940,21 +5932,6 @@ void client_update_game(Client *c) {
 
     #ifdef __PS2__
     ps2_live_stage = 3; // entering non-network game logic
-
-    if (!ps2_rs2midi_external_attempted) {
-        if (c->ingame && c->scene_state == 2) {
-            if (++ps2_rs2midi_external_ticks >= 250) {
-                ps2_rs2midi_external_attempted = true;
-                rs2_log("audio: starting external rs2midi PING test after %d live ticks\n",
-                        ps2_rs2midi_external_ticks);
-                bool ping_ok = ps2_rs2midi_external_ping_test();
-                rs2_log("audio: external rs2midi PING hardware test %s\n",
-                        ping_ok ? "PASS" : "FAIL");
-            }
-        } else {
-            ps2_rs2midi_external_ticks = 0;
-        }
-    }
     #endif
     if (c->ingame) {
         for (int wave = 0; wave < c->wave_count; wave++) {

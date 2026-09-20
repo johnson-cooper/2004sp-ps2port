@@ -182,3 +182,20 @@ no SPU2/libsd work. The hardware acceptance test is:
 1. login and world entry still succeed before the trigger;
 2. external load + PING reports PASS;
 3. RuneScape networking remains healthy afterward.
+
+
+## Milestone 3D: reuse existing ps2_music_update hook, external load only
+
+Milestone 3C still failed at the title/login connection stage, before the delayed external load
+could execute. The external IRX therefore still was not the immediate cause. The regression was
+introduced by adding new EE-side loader/hook code to src/platform/ps2.c and src/entry/client.c.
+
+This checkpoint restores both of those source files byte-for-byte to the real-hardware-good
+548b27cb8ca4e30e60a8fcb4f8c7bd92c6004924 versions. The only runtime experiment is confined to
+the already-existing ps2_music.c object: the good build already calls ps2_music_update() every
+frame, so that existing no-op stub now watches the already-existing ps2_crash_client pointer.
+
+After ingame + scene_state == 2 remains true for 250 polls, ps2_music_update() performs exactly one
+SifLoadStartModule() of rs2midi.irx from the install/cache prefix. There is no EE-side RPC bind or
+PING in this milestone. This isolates whether a minimally invasive external module load can coexist
+with networking while leaving the PS2 platform/network translation unit unchanged.
