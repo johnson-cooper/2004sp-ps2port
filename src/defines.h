@@ -108,8 +108,11 @@
 #define PS2_PLAYER_RENDER_RADIUS 14
 // Hard cap for ordinary remote-player submissions; interaction-important players bypass it.
 #define PS2_PLAYER_RENDER_BUDGET 32
-#define PS2_LOC_MIN_TILE 16
-#define PS2_LOC_MAX_TILE 88
+// Edge-residency test: match static loc/model residency to the traversal-proven 80x80 terrain
+// bridge window. This should prevent buildings/fences from ending four tiles before terrain when
+// the player approaches a normal scene edge, at the cost of more resident static-world wrappers.
+#define PS2_LOC_MIN_TILE 12
+#define PS2_LOC_MAX_TILE 92
 #define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 12)
 #define PS2_TERRAIN_MAX_X_TILE 92
 #define PS2_TERRAIN_MAX_Z_TILE 92
