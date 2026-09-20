@@ -27,184 +27,6 @@ void pixfont_init_global(void) {
 
 extern Pix2D _Pix2D;
 
-#ifdef __PS2__
-static void pixfont_build_ps2_spans(PixFont *pixfont, int glyph) {
-    if (!pixfont || !pixfont->charSpanRows || !pixfont->charSpans || glyph < 0 || glyph >= 94) {
-        return;
-    }
-
-    int w = pixfont->charMaskWidth[glyph];
-    int h = pixfont->charMaskHeight[glyph];
-    int8_t *mask = pixfont->charMask[glyph];
-    if (!mask || w <= 0 || h <= 0) {
-        return;
-    }
-
-    int totalSpans = 0;
-    for (int y = 0; y < h; y++) {
-        bool inRun = false;
-        for (int x = 0; x < w; x++) {
-            bool set = mask[x + y * w] != 0;
-            if (set && !inRun) {
-                totalSpans++;
-                inRun = true;
-            } else if (!set) {
-                inRun = false;
-            }
-        }
-    }
-
-    if (totalSpans > 65535 || w > 255) {
-        return;
-    }
-
-    uint16_t *rows = malloc((size_t)(h + 1) * sizeof(uint16_t));
-    uint8_t *spans = totalSpans > 0 ? malloc((size_t)totalSpans * 2) : NULL;
-    if (!rows || (totalSpans > 0 && !spans)) {
-        free(rows);
-        free(spans);
-        return;
-    }
-
-    int span = 0;
-    for (int y = 0; y < h; y++) {
-        rows[y] = (uint16_t)span;
-        int x = 0;
-        while (x < w) {
-            while (x < w && mask[x + y * w] == 0) {
-                x++;
-            }
-            if (x >= w) {
-                break;
-            }
-
-            int start = x;
-            while (x < w && mask[x + y * w] != 0) {
-                x++;
-            }
-
-            int len = x - start;
-            if (len > 255) {
-                free(rows);
-                free(spans);
-                return;
-            }
-
-            spans[span * 2] = (uint8_t)start;
-            spans[span * 2 + 1] = (uint8_t)len;
-            span++;
-        }
-    }
-    rows[h] = (uint16_t)span;
-
-    pixfont->charSpanRows[glyph] = rows;
-    pixfont->charSpans[glyph] = spans;
-}
-
-static inline void pixfont_ps2_fill_run(int *dst, int len, int rgb) {
-    while (len >= 4) {
-        dst[0] = rgb;
-        dst[1] = rgb;
-        dst[2] = rgb;
-        dst[3] = rgb;
-        dst += 4;
-        len -= 4;
-    }
-
-    while (len-- > 0) {
-        *dst++ = rgb;
-    }
-}
-
-static void pixfont_draw_glyph_ps2(PixFont *pixfont, int glyph, int x, int y, int rgb) {
-    if (!pixfont) {
-        return;
-    }
-
-    if (glyph < 0 || glyph >= 94 || !pixfont->charSpanRows ||
-        !pixfont->charSpans || !pixfont->charSpanRows[glyph]) {
-        if (glyph >= 0 && glyph < 94) {
-            drawChar(pixfont->charMask[glyph], x, y,
-                     pixfont->charMaskWidth[glyph], pixfont->charMaskHeight[glyph], rgb);
-        }
-        return;
-    }
-
-    int w = pixfont->charMaskWidth[glyph];
-    int h = pixfont->charMaskHeight[glyph];
-    int srcX = 0;
-    int srcY = 0;
-
-    // Preserve the legacy drawChar() clipping semantics exactly so this is a
-    // performance-only change, including its historical right/bottom edge behavior.
-    if (y < _Pix2D.top) {
-        int cutoff = _Pix2D.top - y;
-        h -= cutoff;
-        y = _Pix2D.top;
-        srcY += cutoff;
-    }
-
-    if (y + h >= _Pix2D.bottom) {
-        h -= y + h + 1 - _Pix2D.bottom;
-    }
-
-    if (x < _Pix2D.left) {
-        int cutoff = _Pix2D.left - x;
-        w -= cutoff;
-        x = _Pix2D.left;
-        srcX += cutoff;
-    }
-
-    if (x + w >= _Pix2D.right) {
-        int cutoff = x + w + 1 - _Pix2D.right;
-        w -= cutoff;
-    }
-
-    if (w <= 0 || h <= 0) {
-        return;
-    }
-
-    uint16_t *rows = pixfont->charSpanRows[glyph];
-    uint8_t *spans = pixfont->charSpans[glyph];
-    int clipLeft = srcX;
-    int clipRight = srcX + w;
-
-    for (int row = 0; row < h; row++) {
-        int sourceRow = srcY + row;
-        int begin = rows[sourceRow];
-        int end = rows[sourceRow + 1];
-
-        for (int s = begin; s < end; s++) {
-            int runStart = spans[s * 2];
-            int runEnd = runStart + spans[s * 2 + 1];
-
-            if (runEnd <= clipLeft || runStart >= clipRight) {
-                continue;
-            }
-
-            if (runStart < clipLeft) {
-                runStart = clipLeft;
-            }
-            if (runEnd > clipRight) {
-                runEnd = clipRight;
-            }
-
-            int dstOff = x + (runStart - clipLeft) + (y + row) * _Pix2D.width;
-            pixfont_ps2_fill_run(&_Pix2D.pixels[dstOff], runEnd - runStart, rgb);
-        }
-    }
-}
-#endif
-
-static inline void pixfont_draw_glyph(PixFont *pixfont, int glyph, int x, int y, int rgb) {
-#ifdef __PS2__
-    pixfont_draw_glyph_ps2(pixfont, glyph, x, y, rgb);
-#else
-    drawChar(pixfont->charMask[glyph], x, y,
-             pixfont->charMaskWidth[glyph], pixfont->charMaskHeight[glyph], rgb);
-#endif
-}
-
 PixFont *pixfont_new(void) {
     PixFont *pixfont = calloc(1, sizeof(PixFont));
     pixfont->charMask = malloc(94 * sizeof(int8_t *));
@@ -214,30 +36,12 @@ PixFont *pixfont_new(void) {
     pixfont->charOffsetY = malloc(94 * sizeof(int));
     pixfont->charAdvance = malloc(95 * sizeof(int));
     pixfont->drawWidth = malloc(256 * sizeof(int));
-#ifdef __PS2__
-    pixfont->charSpanRows = calloc(94, sizeof(uint16_t *));
-    pixfont->charSpans = calloc(94, sizeof(uint8_t *));
-#endif
     pixfont->height = false;
     // pixfont->random;// = new Random(); // NOTE does this matter at all
     return pixfont;
 }
 
 void pixfont_free(PixFont *pixfont) {
-#ifdef __PS2__
-    if (pixfont->charSpanRows) {
-        for (int i = 0; i < 94; i++) {
-            free(pixfont->charSpanRows[i]);
-        }
-        free(pixfont->charSpanRows);
-    }
-    if (pixfont->charSpans) {
-        for (int i = 0; i < 94; i++) {
-            free(pixfont->charSpans[i]);
-        }
-        free(pixfont->charSpans);
-    }
-#endif
     for (int i = 0; i < 94; i++) {
         free(pixfont->charMask[i]);
     }
@@ -315,10 +119,6 @@ PixFont *pixfont_from_archive(Jagfile *title, const char *font) {
         if (space <= h / 7) {
             pixfont->charAdvance[i]--;
         }
-
-#ifdef __PS2__
-        pixfont_build_ps2_spans(pixfont, i);
-#endif
     }
 
     pixfont->charAdvance[94] = pixfont->charAdvance[8];
@@ -369,7 +169,7 @@ void drawString(PixFont *pixfont, int x, int y, const char *str, int rgb) {
     for (size_t i = 0; i < len; i++) {
         int c = CHARCODESET[(unsigned char)str[i]];
         if (c != 94) {
-            pixfont_draw_glyph(pixfont, c, x + pixfont->charOffsetX[c], offY + pixfont->charOffsetY[c], rgb);
+            drawChar(pixfont->charMask[c], x + pixfont->charOffsetX[c], offY + pixfont->charOffsetY[c], pixfont->charMaskWidth[c], pixfont->charMaskHeight[c], rgb);
         }
 
         x += pixfont->charAdvance[c];
@@ -397,7 +197,7 @@ void drawCenteredWave(PixFont *pixfont, int x, int y, const char *str, int rgb, 
         int c = CHARCODESET[(unsigned char)str[i]];
 
         if (c != 94) {
-            pixfont_draw_glyph(pixfont, c, x + pixfont->charOffsetX[c], offY + pixfont->charOffsetY[c] + (int)(sin((double)i / 2.0 + (double)phase / 5.0) * 5.0), rgb);
+            drawChar(pixfont->charMask[c], x + pixfont->charOffsetX[c], offY + pixfont->charOffsetY[c] + (int)(sin((double)i / 2.0 + (double)phase / 5.0) * 5.0), pixfont->charMaskWidth[c], pixfont->charMaskHeight[c], rgb);
         }
 
         x += pixfont->charAdvance[c];
@@ -422,10 +222,10 @@ void drawStringTaggable(PixFont *pixfont, int x, int y, const char *str, int rgb
             int c = CHARCODESET[(unsigned char)str[i]];
             if (c != 94) {
                 if (shadowed) {
-                    pixfont_draw_glyph(pixfont, c, x + pixfont->charOffsetX[c] + 1, offY + pixfont->charOffsetY[c] + 1, 0);
+                    drawChar(pixfont->charMask[c], x + pixfont->charOffsetX[c] + 1, offY + pixfont->charOffsetY[c] + 1, pixfont->charMaskWidth[c], pixfont->charMaskHeight[c], 0);
                 }
 
-                pixfont_draw_glyph(pixfont, c, x + pixfont->charOffsetX[c], offY + pixfont->charOffsetY[c], rgb);
+                drawChar(pixfont->charMask[c], x + pixfont->charOffsetX[c], offY + pixfont->charOffsetY[c], pixfont->charMaskWidth[c], pixfont->charMaskHeight[c], rgb);
             }
 
             x += pixfont->charAdvance[c];
