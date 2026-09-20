@@ -55,7 +55,30 @@ building audsrv: libsd/SPU2 initialization, RPC, ADPCM sample upload and voice p
 the PCM stream worker, stream semaphores, transfer callback, block DMA and format converter do not
 start.
 
-This is deliberately a one-variable real-hardware A/B test. Audio initialization is restored to
-its pre-title position after network/USB/pad setup. If the startup beep still plays and RuneScape
-can subsequently connect to the server, the continuous stock audsrv streaming engine was the
-conflicting component and this voice-only backend can support title-screen music.
+This one-variable A/B test is now confirmed on real PS2 hardware. With the custom voice-only
+audsrv package installed, the startup ADPCM beep played and RuneScape subsequently connected and
+entered the world normally. The earlier stock-audsrv build played the same beep but failed the
+later server connection. Treat the permanent PCM streaming thread / looping block DMA as the
+network-conflicting component; preserve the voice-only audsrv initialization for this port.
+
+## Milestone 2: scape_main through SPU2 voices
+
+The smoke beep is replaced by the client's existing title-music request:
+
+```c
+platform_set_midi("scape_main", 12345678, 40000);
+```
+
+The custom audsrv package now adds three small private RPCs: explicit-channel ADPCM start with an
+arbitrary SPU2 pitch, voice key-off, and live voice pitch changes. It still does not start the
+stock PCM streaming thread.
+
+`prepare-ps2-title-music.bat` converts the repository's
+`rom/SCC1_Florestan.sf2` and Jagex-packed `rom/cache/client/songs/scape_main.mid` into
+`build/bin/rom/ps2audio/scape_main.ps2m`. Only samples actually referenced by the title song are
+encoded. SF2 loops become SPU2 ADPCM loop flags, while preset selection, tempo, pitch, controller
+volume/pan and pitch-bend math are resolved offline.
+
+The EE runtime only advances compact timestamped events. Sample playback, pitch and mixing are
+performed by SPU2. This first music milestone intentionally leaves rev254 in-game MIDI_SONG/jingle
+protocol work and RuneScape SFX disabled so title music can be hardware-tested in isolation.
