@@ -24,16 +24,17 @@ SECTIONS {
         KEEP(*(.fini))
         QUAD(0)
 
-        /*
-         * Hardware-good client.elf ends normal .text at 0x001c8ef0.
-         * The PS2 has repeatedly regressed when audio experiments shifted
-         * downstream .data/.sdata/.bss. Allow code to shrink, pad it back to
-         * the proven boundary, and fail the link outright if it grows past it.
-         */
-        ASSERT(. <= 0x001c8ef0,
-               "normal .text exceeded hardware-good PS2 layout budget")
-        . = 0x001c8ef0;
     } :text
+
+    /*
+     * Hardware-good client.elf begins .ctors at 0x001c8ef0. The PS2 has
+     * repeatedly regressed when audio experiments shifted downstream
+     * .data/.sdata/.bss. Code may shrink into an unused gap, but if it grows
+     * past the proven boundary the link must fail instead of moving anything.
+     */
+    ASSERT(ADDR(.text) + SIZEOF(.text) <= 0x001c8ef0,
+           "normal .text exceeded hardware-good PS2 layout budget")
+    . = 0x001c8ef0;
 
     PROVIDE(_etext = .);
     PROVIDE(etext = .);
