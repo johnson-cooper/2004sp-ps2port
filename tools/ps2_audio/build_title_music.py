@@ -216,6 +216,7 @@ class ActiveLayer:
     release_start_us: int | None = None
     release_end_us: int | None = None
     released: bool = False
+    stolen_us: int | None = None
 
 
 class SoundFontResolver:
@@ -858,6 +859,10 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
     # one artificial 256-layer ceiling across the entire song.
     token_busy_until = [[-1] * 256 for _ in range(16)]
     token_cursor = [0] * 16
+    token_owner: list[list[ActiveLayer | None]] = [
+        [None] * 256 for _ in range(16)
+    ]
+    percussion_token_recycles = 0
     envelope_mix_events = 0
 
     def record_mix_state(time_us: int, channel: int):
@@ -881,6 +886,8 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
         return 127, 127, 64
 
     def allocate_token(time_us: int, channel: int) -> int:
+        nonlocal percussion_token_recycles
+
         busy = token_busy_until[channel]
         cursor = token_cursor[channel]
         for offset in range(256):
@@ -891,6 +898,42 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
                 busy[token] = 1 << 62
                 token_cursor[channel] = (token + 1) & 0xFF
                 return token
+
+        if channel == 9:
+            # General MIDI percussion commonly omits useful NOTE_OFFs and
+            # behaves as a stream of one-shot hits. The PS2 runtime has only
+            # 24 hardware voices and steals the oldest active voice whenever
+            # all 24 are occupied. If all 256 channel-scoped logical tokens
+            # are still reserved here, the oldest percussion layer cannot
+            # possibly still own a hardware voice. Retire that stale logical
+            # layer and reuse its token. Later envelope/KOFF generation is
+            # suppressed after stolen_us so it cannot affect the new owner.
+            candidates = [
+                (owner.note_on_us, token, owner)
+                for token, owner in enumerate(token_owner[channel])
+                if owner is not None
+            ]
+            if candidates:
+                _started, token, owner = min(
+                    candidates, key=lambda item: (item[0], item[1])
+                )
+                owner.stolen_us = int(time_us)
+
+                key = (owner.channel, owner.midi_note)
+                layers = active.get(key)
+                if layers:
+                    kept = [layer for layer in layers if layer is not owner]
+                    if kept:
+                        active[key] = kept
+                    else:
+                        active.pop(key, None)
+
+                busy[token] = 1 << 62
+                token_cursor[channel] = (token + 1) & 0xFF
+                token_owner[channel][token] = None
+                percussion_token_recycles += 1
+                return token
+
         raise ValueError(
             f"more than 256 overlapping accurate-pack note layers "
             f"on MIDI channel {channel} at "
@@ -1339,6 +1382,7 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
                 )
                 layers.append(layer)
                 all_layers.append(layer)
+                token_owner[channel][token] = layer
             continue
 
         if event_type == EV_NOTE_OFF:
@@ -1432,6 +1476,8 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
             if layer.release_end_us is not None
             else release_start
         )
+        if layer.stolen_us is not None:
+            release_end = min(release_end, layer.stolen_us)
         env = _tiny_amp_env(layer.region, layer.midi_note)
 
         delay_end = layer.note_on_us + int(
@@ -1533,13 +1579,16 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
             last_mix = mix
 
         # OUT_MIX at the release end is inserted first, then KOFF, so the
-        # final transition cannot leave a constant loop audible.
-        add_event(
-            release_end,
-            OUT_NOTE_OFF,
-            layer.channel,
-            layer.token,
-        )
+        # final transition cannot leave a constant loop audible. A layer
+        # retired by percussion token recycling no longer owns a hardware
+        # voice, so emitting its stale KOFF could stop the token's new owner.
+        if layer.stolen_us is None:
+            add_event(
+                release_end,
+                OUT_NOTE_OFF,
+                layer.channel,
+                layer.token,
+            )
 
     # Runtime uploads in hardware-proven 64-byte LOAD_ABS blocks and gives
     # each resident sample its own 64-byte-aligned SPU2 span.
@@ -1607,6 +1656,7 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
     print(f"ADPCM samples:    {len(sample_blobs)}")
     print(f"Sequence events:  {len(packed_events)}")
     print(f"Envelope events:  {envelope_mix_events}")
+    print(f"Perc token reuse: {percussion_token_recycles}")
     print(f"Pitch clamps:     {pitch_clamp_count}")
     if pitch_diff_by_program:
         print("TinySoundFont pitch deltas by bank/program:")
