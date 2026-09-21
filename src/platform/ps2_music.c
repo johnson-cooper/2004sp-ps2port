@@ -192,6 +192,8 @@ static const char ps2_pack_upload_fail_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M probe id=106 sample0 upload failed offset=%u chunk=%u status=%d xfer=%d\n";
 static const char ps2_pack_upload_ok_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M probe id=106 sample0 upload ok raw=%u chunks=%u addr=0x%08x xfer=%d\n";
+static const char ps2_pack_upload_before_fmt[] PS2_AUDIO_RODATA =
+    "audio: PS2M probe id=106 before slot8 RPC bytes=%u addr=0x%08x\n";
 
 PS2_AUDIO_STATIC uint16_t ps2_midi_be16(const uint8_t *p)
 {
@@ -1077,7 +1079,6 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
     uint32_t raw_size = blob_size - 16u;
     if ((raw_size & 0x0fu) != 0 ||
         raw_size < 16u ||
-        raw_size > PS2_PACK_SPU_LIMIT - PS2_PACK_SPU_BASE ||
         fseek(file, (long)(blob_offset + 16u), SEEK_SET) != 0) {
         rs2_log(ps2_pack_sample_bad_fmt,
                 (unsigned int)blob_offset,
@@ -1110,6 +1111,11 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
      */
     packet.words[0] = PS2_PACK_PROBE_SLOT;
     packet.words[1] = 16u;
+
+    rs2_log(ps2_pack_upload_before_fmt,
+            16u,
+            (unsigned int)PS2_PACK_SPU_BASE);
+
     int32_t status = ps2_audio_rpc_status(
         &ps2_music_state.rpc,
         RS2MIDI_RPC_LOAD_SLOT,
