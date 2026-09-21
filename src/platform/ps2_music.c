@@ -32,6 +32,7 @@
 #define RS2MIDI_RPC_LOAD_ABS   7
 #define RS2MIDI_RPC_NOTE_ON_ADDR 8
 #define RS2MIDI_RPC_SET_MIX      9
+#define RS2MIDI_RPC_SFX_NOTE_ON  10
 
 #define RS2MIDI_PONG 0x52533250u
 
@@ -54,6 +55,11 @@
 #define PS2_PACK_MAX_EVENTS         131072u
 #define PS2_PACK_SPU_BASE           0x00100000u
 #define PS2_PACK_SPU_LIMIT          0x001e0000u
+
+#define PS2_SFX_PROOF_ID             468
+#define PS2_SFX_SPU_BASE             0x001e2000u
+#define PS2_SFX_SPU_LIMIT            0x00200000u
+#define PS2_SFX_VOICE                23u
 
 #define PS2_PACK_OUT_WAIT           0
 #define PS2_PACK_OUT_NOTE_ON        1
@@ -144,6 +150,14 @@ typedef struct Ps2PackState {
     uint64_t duration_us;
 } Ps2PackState;
 
+typedef struct Ps2SfxState {
+    uint32_t magic;
+    uint32_t pitch;
+    uint32_t raw_bytes;
+    uint8_t loaded;
+    uint8_t failed;
+} Ps2SfxState;
+
 /*
  * Everything added by the PS2 music sequencer lives in the isolated high
  * audio PT_LOAD. Give the object a non-zero initializer so it is emitted as
@@ -165,6 +179,10 @@ static Ps2MusicState ps2_music_state PS2_AUDIO_STATE = {
  */
 static Ps2PackState ps2_pack_state PS2_AUDIO_STATE = {
     .magic = 0x5041434bu /* "PACK" */
+};
+
+static Ps2SfxState ps2_sfx_state PS2_AUDIO_STATE = {
+    .magic = 0x53465831u /* "SFX1" */
 };
 
 static const uint16_t ps2_midi_semitone_q12[12] PS2_AUDIO_RODATA = {
@@ -228,6 +246,17 @@ static const char ps2_pack_start_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M id=%d samples=%u events=%u spu=%u loop=%u accurate=1\n";
 static const char ps2_pack_fallback_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M id=%d unavailable/invalid; using compact MIDI fallback\n";
+
+static const char ps2_sfx_path_fmt[] PS2_AUDIO_RODATA =
+    "%srom/ps2sfx/468.ps2a";
+static const char ps2_sfx_open_fail_fmt[] PS2_AUDIO_RODATA =
+    "audio: SFX 468 open failed path=%s\n";
+static const char ps2_sfx_bad_fmt[] PS2_AUDIO_RODATA =
+    "audio: SFX 468 invalid path=%s size=%ld\n";
+static const char ps2_sfx_load_fmt[] PS2_AUDIO_RODATA =
+    "audio: SFX 468 loaded raw=%u pitch=%u\n";
+static const char ps2_sfx_play_fmt[] PS2_AUDIO_RODATA =
+    "audio: SFX 468 play status=%d\n";
 
 PS2_AUDIO_STATIC uint16_t ps2_midi_be16(const uint8_t *p)
 {
@@ -1588,6 +1617,139 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
 
     ps2_music_state.ready = 1;
     return true;
+}
+
+
+PS2_AUDIO_STATIC bool ps2_sfx_load_anvil(void)
+{
+    if (ps2_sfx_state.loaded) {
+        return true;
+    }
+    if (ps2_sfx_state.failed || !ps2_music_state.ready) {
+        return false;
+    }
+
+    char path[320];
+    snprintf(path, sizeof(path), ps2_sfx_path_fmt, ps2_cache_prefix());
+
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        rs2_log(ps2_sfx_open_fail_fmt, path);
+        ps2_sfx_state.failed = 1;
+        return false;
+    }
+
+    int seek_end = fseek(file, 0, SEEK_END);
+    long size_long = seek_end == 0 ? ftell(file) : -1;
+    int seek_start = 0;
+    if (size_long > 0) {
+        seek_start = fseek(file, 0, SEEK_SET);
+    }
+
+    if (seek_end != 0 ||
+        seek_start != 0 ||
+        size_long <= 16 ||
+        size_long > (long)(PS2_SFX_SPU_LIMIT - PS2_SFX_SPU_BASE + 16u)) {
+        rs2_log(ps2_sfx_bad_fmt, path, size_long);
+        fclose(file);
+        ps2_sfx_state.failed = 1;
+        return false;
+    }
+
+    uint8_t header[16];
+    if (fread(header, 1, sizeof(header), file) != sizeof(header) ||
+        header[0] != 'A' ||
+        header[1] != 'P' ||
+        header[2] != 'C' ||
+        header[3] != 'M' ||
+        header[4] != 1u ||
+        header[5] != 1u ||
+        header[6] != 0u) {
+        rs2_log(ps2_sfx_bad_fmt, path, size_long);
+        fclose(file);
+        ps2_sfx_state.failed = 1;
+        return false;
+    }
+
+    uint32_t pitch = ps2_pack_le32(header + 8);
+    uint32_t raw_size = (uint32_t)size_long - 16u;
+    uint32_t padded_size = (raw_size + 63u) & ~63u;
+    if (pitch == 0u ||
+        pitch > 0x3fffu ||
+        padded_size == 0u ||
+        padded_size > PS2_SFX_SPU_LIMIT - PS2_SFX_SPU_BASE) {
+        rs2_log(ps2_sfx_bad_fmt, path, size_long);
+        fclose(file);
+        ps2_sfx_state.failed = 1;
+        return false;
+    }
+
+    uint32_t remaining = raw_size;
+    uint32_t dest = PS2_SFX_SPU_BASE;
+    Rs2MidiRpcPacket packet __attribute__((aligned(64)));
+
+    while (remaining != 0u) {
+        uint32_t read_size = remaining > 64u ? 64u : remaining;
+        memset(&packet, 0, sizeof(packet));
+        if (fread(packet.sample, 1, read_size, file) != read_size) {
+            fclose(file);
+            ps2_sfx_state.failed = 1;
+            return false;
+        }
+
+        packet.words[0] = dest;
+        packet.words[1] = 64u;
+        if (ps2_audio_rpc_status(
+                &ps2_music_state.rpc,
+                RS2MIDI_RPC_LOAD_ABS,
+                &packet,
+                RS2MIDI_RPC_HEADER_BYTES + 64u) < 0) {
+            fclose(file);
+            ps2_sfx_state.failed = 1;
+            return false;
+        }
+
+        remaining -= read_size;
+        dest += 64u;
+    }
+
+    fclose(file);
+    ps2_sfx_state.pitch = pitch;
+    ps2_sfx_state.raw_bytes = raw_size;
+    ps2_sfx_state.loaded = 1;
+
+    rs2_log(ps2_sfx_load_fmt,
+            (unsigned int)raw_size,
+            (unsigned int)pitch);
+    return true;
+}
+
+void ps2_sfx_request(int id, int loops, int delay) PS2_AUDIO_CODE;
+void ps2_sfx_request(int id, int loops, int delay)
+{
+    (void)loops;
+
+    if (id != PS2_SFX_PROOF_ID ||
+        delay != 0 ||
+        !ps2_music_state.ready ||
+        !ps2_sfx_load_anvil()) {
+        return;
+    }
+
+    Rs2MidiRpcPacket packet __attribute__((aligned(64)));
+    memset(&packet, 0, sizeof(packet));
+    packet.words[0] = PS2_SFX_VOICE;
+    packet.words[1] = ps2_sfx_state.pitch;
+    packet.words[2] = 0x3fffu;
+    packet.words[3] = 0x3fffu;
+    packet.words[4] = PS2_SFX_SPU_BASE;
+
+    int32_t status = ps2_audio_rpc_status(
+        &ps2_music_state.rpc,
+        RS2MIDI_RPC_SFX_NOTE_ON,
+        &packet,
+        RS2MIDI_RPC_HEADER_BYTES);
+    rs2_log(ps2_sfx_play_fmt, (int)status);
 }
 
 
