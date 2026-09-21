@@ -41,6 +41,7 @@
 #include "../platform.h"
 #ifdef __PS2__
 #include "../platform/ps2_music.h"
+#include "../platform/ps2_sfx.h"
 #endif
 #include "../playerentity.h"
 #include "../projectileentity.h"
@@ -7412,6 +7413,14 @@ bool client_read(Client *c) {
         int id = g2(c->in);
         int loop = g1(c->in);
         int delay = g2(c->in);
+#ifdef __PS2__
+        /*
+         * PS2 lowmem intentionally skips sounds.dat/the legacy Wave/Tone
+         * synthesizer. Keep packet 25 server-compatible and hand only the
+         * decoded id/loop/delay to the isolated high-memory SFX overlay.
+         */
+        ps2_sfx_request(id, loop, delay);
+#endif
         if (c->wave_enabled && !_Client.lowmem && c->wave_count < 50) {
             c->wave_ids[c->wave_count] = id;
             c->wave_loops[c->wave_count] = loop;
