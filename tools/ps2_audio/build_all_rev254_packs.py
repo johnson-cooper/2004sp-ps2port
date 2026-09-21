@@ -26,6 +26,16 @@ def read_mapping(path: Path):
     return rows
 
 
+def index_midis(*directories: Path) -> dict[str, list[Path]]:
+    by_key: dict[str, list[Path]] = {}
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        for midi in sorted(directory.glob("*.mid")):
+            by_key.setdefault(canonical(midi.stem), []).append(midi)
+    return by_key
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -37,6 +47,14 @@ def main() -> None:
         "--songs",
         type=Path,
         default=Path("rom/cache/client/songs"),
+    )
+    parser.add_argument(
+        "--content",
+        type=Path,
+        help=(
+            "optional LostCityRS/Content checkout; missing local MIDIs are "
+            "resolved from its songs/ and jingles/ directories"
+        ),
     )
     parser.add_argument(
         "--mapping",
@@ -60,11 +78,24 @@ def main() -> None:
     if not args.songs.is_dir():
         raise SystemExit(f"song directory not found: {args.songs}")
 
-    by_key: dict[str, list[Path]] = {}
-    for midi in sorted(args.songs.glob("*.mid")):
-        by_key.setdefault(canonical(midi.stem), []).append(midi)
+    local_by_key = index_midis(args.songs)
+    content_by_key: dict[str, list[Path]] = {}
+    if args.content is not None:
+        if not args.content.is_dir():
+            raise SystemExit(f"Content checkout not found: {args.content}")
+
+        content_songs = args.content / "songs"
+        content_jingles = args.content / "jingles"
+        if not content_songs.is_dir() or not content_jingles.is_dir():
+            raise SystemExit(
+                "Content checkout must contain both songs/ and jingles/: "
+                f"{args.content}"
+            )
+        content_by_key = index_midis(content_songs, content_jingles)
 
     built = 0
+    built_local = 0
+    built_content = 0
     missing = 0
     failed = 0
     args.output.mkdir(parents=True, exist_ok=True)
@@ -73,11 +104,22 @@ def main() -> None:
         if name == "null":
             continue
 
-        matches = by_key.get(canonical(name), [])
+        key = canonical(name)
+        local_matches = local_by_key.get(key, [])
+        content_matches = content_by_key.get(key, [])
+
+        source = "local"
+        matches = local_matches
+        if len(local_matches) == 0 and args.content is not None:
+            source = "content"
+            matches = content_matches
+
         if len(matches) != 1:
+            detail = f"local matches={len(local_matches)}"
+            if args.content is not None:
+                detail += f", content matches={len(content_matches)}"
             print(
-                f"SKIP id={midi_id:3d} name={name!r}: "
-                f"local matches={len(matches)}"
+                f"SKIP id={midi_id:3d} name={name!r}: {detail}"
             )
             missing += 1
             continue
@@ -86,12 +128,16 @@ def main() -> None:
         out = args.output / f"{midi_id}.ps2m"
         print()
         print("=" * 72)
-        print(f"ID {midi_id}: {name} <- {midi.name}")
+        print(f"ID {midi_id}: {name} <- {midi} [{source}]")
         print("=" * 72)
 
         try:
             build_pack(args.soundfont, midi, out)
             built += 1
+            if source == "local":
+                built_local += 1
+            else:
+                built_content += 1
         except Exception as exc:
             failed += 1
             print(f"FAILED id={midi_id} name={name!r}: {exc}")
@@ -101,6 +147,8 @@ def main() -> None:
     print()
     print("=" * 72)
     print(f"Built:   {built}")
+    print(f"  local:   {built_local}")
+    print(f"  content: {built_content}")
     print(f"Missing: {missing}")
     print(f"Failed:  {failed}")
     print(f"Output:  {args.output}")
