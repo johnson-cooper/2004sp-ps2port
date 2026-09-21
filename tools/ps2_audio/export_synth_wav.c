@@ -8,6 +8,9 @@
 #include "platform.h"
 #include "sound/wave.h"
 
+/* wave.c owns this global; wave.h intentionally does not export it. */
+extern WaveData _Wave;
+
 static unsigned int rng_state = 0x4d595df4u;
 
 double jrand(void)
