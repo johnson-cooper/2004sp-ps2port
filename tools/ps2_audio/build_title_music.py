@@ -61,6 +61,14 @@ GEN_LOOP_END = 3
 GEN_START_COARSE = 4
 GEN_END_COARSE = 12
 GEN_PAN = 17
+GEN_DELAY_VOL_ENV = 33
+GEN_ATTACK_VOL_ENV = 34
+GEN_HOLD_VOL_ENV = 35
+GEN_DECAY_VOL_ENV = 36
+GEN_SUSTAIN_VOL_ENV = 37
+GEN_RELEASE_VOL_ENV = 38
+GEN_KEYNUM_TO_VOL_ENV_HOLD = 39
+GEN_KEYNUM_TO_VOL_ENV_DECAY = 40
 GEN_INSTRUMENT = 41
 GEN_KEY_RANGE = 43
 GEN_VEL_RANGE = 44
@@ -125,6 +133,17 @@ class Region:
     pan: int
     keynum: int | None
     fixed_velocity: int | None
+    sample_name: str
+    source_end: int
+    sample_modes: int
+    amp_delay_tc: int
+    amp_attack_tc: int
+    amp_hold_tc: int
+    amp_decay_tc: int
+    amp_sustain_cb: int
+    amp_release_tc: int
+    amp_keynum_to_hold: int
+    amp_keynum_to_decay: int
 
 
 @dataclass
@@ -287,6 +306,38 @@ class SoundFontResolver:
 
         sample_modes = instrument.get(GEN_SAMPLE_MODES, 0) & 0x3
 
+        # TinySoundFont-compatible amplitude-envelope values for diagnostics.
+        # Instrument defaults are absolute; preset values are relative and
+        # therefore contribute zero unless explicitly present.
+        env_defaults = {
+            GEN_DELAY_VOL_ENV: -12000,
+            GEN_ATTACK_VOL_ENV: -12000,
+            GEN_HOLD_VOL_ENV: -12000,
+            GEN_DECAY_VOL_ENV: -12000,
+            GEN_SUSTAIN_VOL_ENV: 0,
+            GEN_RELEASE_VOL_ENV: -12000,
+            GEN_KEYNUM_TO_VOL_ENV_HOLD: 0,
+            GEN_KEYNUM_TO_VOL_ENV_DECAY: 0,
+        }
+        env_limits = {
+            GEN_DELAY_VOL_ENV: (-12000, 5000),
+            GEN_ATTACK_VOL_ENV: (-12000, 8000),
+            GEN_HOLD_VOL_ENV: (-12000, 5000),
+            GEN_DECAY_VOL_ENV: (-12000, 8000),
+            GEN_SUSTAIN_VOL_ENV: (0, 1440),
+            GEN_RELEASE_VOL_ENV: (-12000, 8000),
+            GEN_KEYNUM_TO_VOL_ENV_HOLD: (-1200, 1200),
+            GEN_KEYNUM_TO_VOL_ENV_DECAY: (-1200, 1200),
+        }
+        amp_env = {}
+        for op, default in env_defaults.items():
+            value = (
+                cls._signed_value(instrument, op, default)
+                + cls._signed_value(preset, op, 0)
+            )
+            lo, hi = env_limits[op]
+            amp_env[op] = max(lo, min(hi, value))
+
         return {
             **sample_values,
             "key_range": (
@@ -303,6 +354,16 @@ class SoundFontResolver:
             "keynum": cls._substitution(instrument, GEN_KEYNUM),
             "fixed_velocity":
                 cls._substitution(instrument, GEN_VELOCITY),
+            "amp_delay_tc": amp_env[GEN_DELAY_VOL_ENV],
+            "amp_attack_tc": amp_env[GEN_ATTACK_VOL_ENV],
+            "amp_hold_tc": amp_env[GEN_HOLD_VOL_ENV],
+            "amp_decay_tc": amp_env[GEN_DECAY_VOL_ENV],
+            "amp_sustain_cb": amp_env[GEN_SUSTAIN_VOL_ENV],
+            "amp_release_tc": amp_env[GEN_RELEASE_VOL_ENV],
+            "amp_keynum_to_hold":
+                amp_env[GEN_KEYNUM_TO_VOL_ENV_HOLD],
+            "amp_keynum_to_decay":
+                amp_env[GEN_KEYNUM_TO_VOL_ENV_DECAY],
         }
 
     def _expand_sample(self, sample_id: int, values, pan_adjust: int = 0):
@@ -310,7 +371,7 @@ class SoundFontResolver:
             return []
 
         (
-            _raw_name, start, end, loop_start, loop_end, sample_rate,
+            raw_name, start, end, loop_start, loop_end, sample_rate,
             original_pitch, correction, sample_link, sample_type,
         ) = self.sample_headers[sample_id]
 
@@ -328,6 +389,7 @@ class SoundFontResolver:
         loop_start = max(start, min(loop_start, end))
         loop_end = max(loop_start, min(loop_end, end))
 
+        source_end = end
         looping = bool(values["sample_modes"] & 1) and loop_end > loop_start
         if looping:
             end = loop_end
@@ -356,6 +418,17 @@ class SoundFontResolver:
             pan=max(-500, min(500, values[GEN_PAN] + pan_adjust)),
             keynum=values["keynum"],
             fixed_velocity=values["fixed_velocity"],
+            sample_name=_name(raw_name),
+            source_end=source_end,
+            sample_modes=values["sample_modes"],
+            amp_delay_tc=values["amp_delay_tc"],
+            amp_attack_tc=values["amp_attack_tc"],
+            amp_hold_tc=values["amp_hold_tc"],
+            amp_decay_tc=values["amp_decay_tc"],
+            amp_sustain_cb=values["amp_sustain_cb"],
+            amp_release_tc=values["amp_release_tc"],
+            amp_keynum_to_hold=values["amp_keynum_to_hold"],
+            amp_keynum_to_decay=values["amp_keynum_to_decay"],
         )]
 
     def resolve(self, bank: int, program: int, note: int, velocity: int):
@@ -450,8 +523,71 @@ def _pitch_details(region: Region, note: int, state: ChannelState):
     return actual, raw, native, effective_note, bend, cents
 
 
+def _tiny_soundfont_pitch_details(
+    region: Region,
+    note: int,
+    state: ChannelState,
+):
+    """Reference TinySoundFont's pitch_keycenter/keytrack calculation."""
+    effective_note = region.keynum if region.keynum is not None else note
+    bend = (
+        (state.pitch_bend - 8192)
+        / 8192.0
+        * state.bend_range
+        * 100.0
+    )
+    tune_cents = (
+        region.coarse_tune * 100
+        + region.fine_tune
+        + region.correction
+    )
+    tuned_note = effective_note + tune_cents / 100.0
+    adjusted_note = (
+        region.root_key
+        + (tuned_note - region.root_key)
+        * (region.scale_tuning / 100.0)
+    )
+    cents = (adjusted_note - region.root_key) * 100.0 + bend
+    native = base_pitch(region.sample_rate)
+    raw = int(round(native * (2.0 ** (cents / 1200.0))))
+    actual = max(1, min(0x3FFF, raw))
+    return actual, raw, native, effective_note, bend, cents
+
+
 def _pitch(region: Region, note: int, state: ChannelState) -> int:
     return _pitch_details(region, note, state)[0]
+
+
+def _timecents_to_seconds(value: float, threshold: float = -11950.0):
+    if value < threshold:
+        return 0.0
+    return 2.0 ** (value / 1200.0)
+
+
+def _tiny_amp_env(region: Region, note: int):
+    hold_tc = (
+        region.amp_hold_tc
+        + region.amp_keynum_to_hold * (60.0 - note)
+    )
+    decay_tc = (
+        region.amp_decay_tc
+        + region.amp_keynum_to_decay * (60.0 - note)
+    )
+    hold_threshold = (
+        -10000.0 if region.amp_keynum_to_hold else -11950.0
+    )
+    decay_threshold = (
+        -10000.0 if region.amp_keynum_to_decay else -11950.0
+    )
+    return {
+        "delay": _timecents_to_seconds(region.amp_delay_tc),
+        "attack": _timecents_to_seconds(region.amp_attack_tc),
+        "hold": _timecents_to_seconds(hold_tc, hold_threshold),
+        "decay": _timecents_to_seconds(decay_tc, decay_threshold),
+        "sustain_gain":
+            10.0 ** (-max(0, region.amp_sustain_cb) / 200.0),
+        "release": _timecents_to_seconds(region.amp_release_tc),
+    }
 
 
 def _mix(region: Region, velocity: int, state: ChannelState) -> tuple[int, int]:
@@ -485,6 +621,81 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
     out_events = []
     pitch_clamp_count = 0
     pitch_clamp_by_program: dict[tuple[int, int], int] = {}
+    pitch_diff_by_program: dict[tuple[int, int], list[float]] = {}
+    pitch_diag_seen = set()
+    region_diag_seen = set()
+    diagnostic_programs = {
+        14: "Tubular Bells",
+        56: "Trumpet",
+    }
+
+    def diagnose_region(
+        time_us: int,
+        channel: int,
+        region: Region,
+        note: int,
+        state: ChannelState,
+    ):
+        bank = 128 if channel == 9 else state.bank
+        if bank != 0 or state.program not in diagnostic_programs:
+            return
+        key = (
+            bank,
+            state.program,
+            note,
+            region.sample_id,
+            region.root_key,
+            region.scale_tuning,
+            region.sample_modes,
+        )
+        if key in region_diag_seen:
+            return
+        region_diag_seen.add(key)
+
+        env = _tiny_amp_env(region, note)
+        mode = {
+            0: "none",
+            1: "continuous",
+            3: "sustain",
+        }.get(region.sample_modes & 3, "reserved")
+        release_tail = max(0, region.source_end - region.loop_end)
+        print(
+            "REGION DIAG: "
+            f"time={time_us / 1_000_000.0:.3f}s "
+            f"program={state.program} "
+            f"name={diagnostic_programs[state.program]!r} "
+            f"note={note} sample={region.sample_id} "
+            f"sample_name={region.sample_name!r} "
+            f"root={region.root_key} rate={region.sample_rate} "
+            f"scale={region.scale_tuning} "
+            f"coarse={region.coarse_tune} "
+            f"fine={region.fine_tune} "
+            f"correction={region.correction} "
+            f"loop_mode={mode} "
+            f"loop={region.loop_start}:{region.loop_end} "
+            f"source_end={region.source_end} "
+            f"release_tail_samples={release_tail}"
+        )
+        print(
+            "  AMP ENV: "
+            f"delay_tc={region.amp_delay_tc} "
+            f"attack_tc={region.amp_attack_tc} "
+            f"hold_tc={region.amp_hold_tc} "
+            f"decay_tc={region.amp_decay_tc} "
+            f"sustain_cb={region.amp_sustain_cb} "
+            f"release_tc={region.amp_release_tc} "
+            f"key_hold={region.amp_keynum_to_hold} "
+            f"key_decay={region.amp_keynum_to_decay}"
+        )
+        print(
+            "  TSF ENV: "
+            f"delay={env['delay']:.4f}s "
+            f"attack={env['attack']:.4f}s "
+            f"hold={env['hold']:.4f}s "
+            f"decay={env['decay']:.4f}s "
+            f"sustain_gain={env['sustain_gain']:.4f} "
+            f"release={env['release']:.4f}s"
+        )
 
     def pitch_for(
         time_us: int,
@@ -497,9 +708,60 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
         actual, raw, native, effective_note, bend, cents = _pitch_details(
             region, note, state
         )
+        (
+            tsf_actual,
+            tsf_raw,
+            _tsf_native,
+            _tsf_note,
+            _tsf_bend,
+            tsf_cents,
+        ) = _tiny_soundfont_pitch_details(region, note, state)
+        bank = 128 if channel == 9 else state.bank
+        delta_cents = cents - tsf_cents
+        pitch_diff_by_program.setdefault(
+            (bank, state.program), []
+        ).append(delta_cents)
+
+        diag_key = (
+            bank,
+            state.program,
+            note,
+            region.sample_id,
+            round(delta_cents, 4),
+        )
+        if (
+            abs(delta_cents) >= 0.5
+            or (
+                bank == 0
+                and state.program in diagnostic_programs
+                and diag_key not in pitch_diag_seen
+            )
+        ):
+            pitch_diag_seen.add(diag_key)
+            name = diagnostic_programs.get(
+                state.program, f"program {state.program}"
+            )
+            print(
+                "TSF PITCH: "
+                f"time={time_us / 1_000_000.0:.3f}s "
+                f"ch={channel} bank={bank} "
+                f"program={state.program} name={name!r} "
+                f"note={note} effective_note={effective_note} "
+                f"sample={region.sample_id} root={region.root_key} "
+                f"rate={region.sample_rate} "
+                f"scale={region.scale_tuning} "
+                f"tune={region.coarse_tune * 100 + region.fine_tune + region.correction}c "
+                f"ours_cents={cents:.3f} "
+                f"tsf_cents={tsf_cents:.3f} "
+                f"delta={delta_cents:+.3f}c "
+                f"ours=0x{actual:04X} "
+                f"tsf=0x{tsf_actual:04X} "
+                f"ours_raw=0x{raw:X} "
+                f"tsf_raw=0x{tsf_raw:X}"
+            )
+
         if raw < 1 or raw > 0x3FFF:
             pitch_clamp_count += 1
-            bank = 128 if channel == 9 else state.bank
             key = (bank, state.program)
             pitch_clamp_by_program[key] = (
                 pitch_clamp_by_program.get(key, 0) + 1
@@ -653,6 +915,9 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
 
             layers = active.setdefault((channel, note), [])
             for region in regions:
+                diagnose_region(
+                    time_us, channel, region, note, state
+                )
                 sample_index = ensure_sample(region)
                 volume, pan = _mix(region, velocity, state)
                 pitch = pitch_for(
@@ -741,6 +1006,25 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
     print(f"ADPCM samples:    {len(sample_blobs)}")
     print(f"Sequence events:  {len(packed_events)}")
     print(f"Pitch clamps:     {pitch_clamp_count}")
+    if pitch_diff_by_program:
+        print("TinySoundFont pitch deltas by bank/program:")
+        for (bank, program), values in sorted(
+            pitch_diff_by_program.items()
+        ):
+            if not values:
+                continue
+            max_abs = max(abs(value) for value in values)
+            mean = sum(values) / len(values)
+            if (
+                max_abs >= 0.5
+                or (bank == 0 and program in diagnostic_programs)
+            ):
+                print(
+                    f"  bank={bank:3d} program={program:3d} "
+                    f"count={len(values):4d} "
+                    f"mean={mean:+.3f}c "
+                    f"max_abs={max_abs:.3f}c"
+                )
     if pitch_clamp_by_program:
         print("Pitch clamps by bank/program:")
         for (bank, program), count in sorted(
