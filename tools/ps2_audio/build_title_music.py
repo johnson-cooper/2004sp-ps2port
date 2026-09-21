@@ -853,8 +853,11 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
         [(0, 127, 127, 64)]
         for _ in range(16)
     ]
-    token_busy_until = [-1] * 256
-    token_cursor = 0
+    # Tokens are matched by (MIDI channel, token) at runtime. Keep a
+    # separate 8-bit token namespace per MIDI channel instead of imposing
+    # one artificial 256-layer ceiling across the entire song.
+    token_busy_until = [[-1] * 256 for _ in range(16)]
+    token_cursor = [0] * 16
     envelope_mix_events = 0
 
     def record_mix_state(time_us: int, channel: int):
@@ -877,19 +880,21 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
                 return volume, expression, pan
         return 127, 127, 64
 
-    def allocate_token(time_us: int) -> int:
-        nonlocal token_cursor
+    def allocate_token(time_us: int, channel: int) -> int:
+        busy = token_busy_until[channel]
+        cursor = token_cursor[channel]
         for offset in range(256):
-            token = (token_cursor + offset) & 0xFF
+            token = (cursor + offset) & 0xFF
             # Never recycle on the exact release timestamp: the old
             # token's final OUT_MIX/KOFF events are sorted at that same time.
-            if token_busy_until[token] < time_us:
-                token_busy_until[token] = 1 << 62
-                token_cursor = (token + 1) & 0xFF
+            if busy[token] < time_us:
+                busy[token] = 1 << 62
+                token_cursor[channel] = (token + 1) & 0xFF
                 return token
         raise ValueError(
             f"more than 256 overlapping accurate-pack note layers "
-            f"at {time_us / 1_000_000.0:.3f}s"
+            f"on MIDI channel {channel} at "
+            f"{time_us / 1_000_000.0:.3f}s"
         )
 
     def begin_release(
@@ -911,7 +916,7 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
                 release_start_us
                 + round(release_seconds * 1_000_000.0)
             )
-        token_busy_until[layer.token] = layer.release_end_us
+        token_busy_until[layer.channel][layer.token] = layer.release_end_us
 
     def diagnose_region(
         time_us: int,
@@ -1318,7 +1323,7 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
                 pitch = pitch_for(
                     time_us, channel, region, note, state
                 )
-                token = allocate_token(time_us)
+                token = allocate_token(time_us, channel)
                 add_event(
                     time_us, OUT_NOTE_ON, channel, token, velocity,
                     sample_index, pitch, volume, pan,
