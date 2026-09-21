@@ -495,7 +495,17 @@ bool platform_init(void) {
     // model_calculate_bounds_cylinder() too small for further checkpoint-based bisection to resolve -
     // if it's a genuine bad pointer access, this will catch it and print the real EPC/BadVAddr instead
     // of more guessing.
-    ps2_install_exception_handler();
+    /*
+     * Do not install ps2_exception_handler here. SetVCommonHandler expects a
+     * raw exception-vector entry, not an ordinary C function. PS2SDK's
+     * eedebug path uses an assembly shim that preserves registers and switches
+     * to a dedicated exception stack before calling C. Directly entering our
+     * C handler can fault in its own prologue and replace the real Cause/EPC
+     * with the repeated cause=3 / epc=1 diagnostic we've been seeing.
+     *
+     * Keep the handler code compiled for now; this hardware A/B only removes
+     * its registration while the audio probe remains otherwise identical.
+     */
     dmaKit_init(D_CTRL_RELE_OFF, D_CTRL_MFD_OFF, D_CTRL_STS_UNSPEC, D_CTRL_STD_OFF, D_CTRL_RCYC_8, 1 << DMA_CHANNEL_GIF);
     dmaKit_chan_init(DMA_CHANNEL_GIF);
 
