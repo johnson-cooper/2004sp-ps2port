@@ -56,10 +56,15 @@
 #define PS2_PACK_SPU_BASE           0x00100000u
 #define PS2_PACK_SPU_LIMIT          0x001e0000u
 
-#define PS2_SFX_PROOF_ID             468
 #define PS2_SFX_SPU_BASE             0x001e2000u
 #define PS2_SFX_SPU_LIMIT            0x00200000u
 #define PS2_SFX_VOICE                23u
+#define PS2_SFX_QUEUE_COUNT          16u
+
+#define PS2_AUDIO_DAT_HEADER_BYTES   64u
+#define PS2_AUDIO_DAT_ENTRY_BYTES    16u
+#define PS2_AUDIO_DAT_VERSION        1u
+#define PS2_AUDIO_DAT_MAX_LOOPS      256u
 
 #define PS2_PACK_OUT_WAIT           0
 #define PS2_PACK_OUT_NOTE_ON        1
@@ -150,12 +155,48 @@ typedef struct Ps2PackState {
     uint64_t duration_us;
 } Ps2PackState;
 
+typedef struct Ps2AudioDatState {
+    uint32_t magic;
+    uint32_t music_count;
+    uint32_t sfx_count;
+    uint32_t sfx_loop_slots;
+    uint32_t entry_size;
+    uint32_t music_table_offset;
+    uint32_t sfx_table_offset;
+    uint32_t data_offset;
+    uint32_t file_size;
+    uint8_t valid;
+    uint8_t invalid;
+} Ps2AudioDatState;
+
+typedef struct Ps2SfxRequest {
+    uint32_t offset;
+    uint32_t size;
+    uint32_t duration_ms;
+    uint64_t request_ms;
+    uint64_t due_ms;
+    uint16_t id;
+    uint16_t delay_ticks;
+    uint16_t trim_ticks;
+    uint8_t loops;
+    uint8_t selected_loops;
+    uint8_t resolved;
+    uint8_t from_dat;
+} Ps2SfxRequest;
+
 typedef struct Ps2SfxState {
     uint32_t magic;
     uint32_t pitch;
     uint32_t raw_bytes;
+    uint32_t last_duration_ms;
+    uint64_t last_start_ms;
+    uint16_t loaded_id;
+    uint8_t loaded_loops;
     uint8_t loaded;
-    uint8_t failed;
+    uint8_t queue_head;
+    uint8_t queue_tail;
+    uint8_t queue_count;
+    Ps2SfxRequest queue[PS2_SFX_QUEUE_COUNT];
 } Ps2SfxState;
 
 /*
@@ -181,8 +222,13 @@ static Ps2PackState ps2_pack_state PS2_AUDIO_STATE = {
     .magic = 0x5041434bu /* "PACK" */
 };
 
+static Ps2AudioDatState ps2_audio_dat_state PS2_AUDIO_STATE = {
+    .magic = 0x44415431u /* "DAT1" */
+};
+
 static Ps2SfxState ps2_sfx_state PS2_AUDIO_STATE = {
-    .magic = 0x53465831u /* "SFX1" */
+    .magic = 0x53465831u, /* "SFX1" */
+    .loaded_id = 0xffffu
 };
 
 static const uint16_t ps2_midi_semitone_q12[12] PS2_AUDIO_RODATA = {
