@@ -970,12 +970,6 @@ PS2_AUDIO_STATIC bool ps2_pack_read_uleb32(uint32_t *value)
     return false;
 }
 
-PS2_AUDIO_STATIC void ps2_pack_store_le16(uint8_t *p, uint16_t value)
-{
-    p[0] = (uint8_t)(value & 0xffu);
-    p[1] = (uint8_t)(value >> 8);
-}
-
 PS2_AUDIO_STATIC void ps2_pack_store_le32(uint8_t *p, uint32_t value)
 {
     p[0] = (uint8_t)(value & 0xffu);
@@ -1169,9 +1163,14 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
 
     uint8_t header[PS2_PACK_HEADER_BYTES];
     size_t got = fread(header, 1, sizeof(header), file);
+    if (got != sizeof(header)) {
+        rs2_log(ps2_pack_bad_fmt, id, path);
+        fclose(file);
+        return -1;
+    }
+
     uint16_t pack_version = ps2_pack_le16(header + 4);
-    if (got != sizeof(header) ||
-        header[0] != 'R' ||
+    if (header[0] != 'R' ||
         header[1] != 'S' ||
         header[2] != 'M' ||
         header[3] != '1' ||
