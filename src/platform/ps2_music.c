@@ -996,28 +996,6 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
         ps2_music_state.bank_loaded = 0;
     }
 
-    /*
-     * Real-hardware A/B: issue the same extra 64-byte LOAD_SLOT while the
-     * backend is still in its proven initialization window, before ready=1
-     * and before any server-requested MIDI starts.
-     *
-     * This deliberately uses the embedded, already-proven ADPCM bytes and
-     * the already-proven slot-0 address. If this survives hardware while the
-     * identical post-init call crashes, the failure is timing/state related
-     * rather than data, USB, RPC command, transfer size, or SPU2 address.
-     */
-    if (ps2_audio_test_adpcm_size >= 80u) {
-        memset(&packet, 0, sizeof(packet));
-        memcpy(packet.sample, ps2_audio_test_adpcm + 16, 64u);
-        packet.words[0] = PS2_PACK_PROBE_SLOT;
-        packet.words[1] = 64u;
-        (void)ps2_audio_rpc_status(
-            &ps2_music_state.rpc,
-            RS2MIDI_RPC_LOAD_SLOT,
-            &packet,
-            RS2MIDI_RPC_HEADER_BYTES + 64);
-    }
-
     rs2_log(ps2_midi_bank_ready_fmt,
             (unsigned int)PS2_MIDI_BANK_SAMPLE_COUNT,
             (unsigned int)PS2_MIDI_BANK_SAMPLE_BYTES,
