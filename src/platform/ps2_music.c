@@ -29,12 +29,15 @@
 #define RS2MIDI_RPC_KEY_OFF    4
 #define RS2MIDI_RPC_GET_STATE  5
 #define RS2MIDI_RPC_LOAD_SLOT  6
+#define RS2MIDI_RPC_LOAD_ABS   7
 
 #define RS2MIDI_PONG 0x52533250u
 
 #define RS2MIDI_RPC_HEADER_BYTES  64u
 #define RS2MIDI_MAX_SAMPLE_BYTES  800u
 #define RS2MIDI_MAX_IRX_BYTES     (128u * 1024u)
+#define PS2_PACK_SPU_BASE          0x00100000u
+#define PS2_PACK_SPU_LIMIT         0x001e0000u
 
 #define PS2_MIDI_ARCHIVE           2
 #define PS2_MIDI_MAX_TRACKS        32
@@ -180,6 +183,14 @@ static const char ps2_pack_probe_invalid_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M probe id=106 invalid header path=%s\n";
 static const char ps2_pack_probe_ok_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M probe id=106 header ok samples=%u events=%u data=%u\n";
+static const char ps2_pack_sample_bad_fmt[] PS2_AUDIO_RODATA =
+    "audio: PS2M probe id=106 sample0 invalid offset=%u size=%u\n";
+static const char ps2_pack_sample_read_fmt[] PS2_AUDIO_RODATA =
+    "audio: PS2M probe id=106 sample0 read failed offset=%u chunk=%u\n";
+static const char ps2_pack_upload_fail_fmt[] PS2_AUDIO_RODATA =
+    "audio: PS2M probe id=106 sample0 upload failed offset=%u chunk=%u status=%d xfer=%d\n";
+static const char ps2_pack_upload_ok_fmt[] PS2_AUDIO_RODATA =
+    "audio: PS2M probe id=106 sample0 upload ok raw=%u chunks=%u addr=0x%08x xfer=%d\n";
 
 PS2_AUDIO_STATIC uint16_t ps2_midi_be16(const uint8_t *p)
 {
@@ -1000,7 +1011,6 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
 
     uint8_t header[40];
     size_t got = fread(header, 1, sizeof(header), file);
-    fclose(file);
 
     if (got != sizeof(header) ||
         header[0] != 'R' ||
@@ -1010,6 +1020,7 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
         ps2_pack_le16(header + 4) != 1u ||
         ps2_pack_le16(header + 6) != 40u) {
         rs2_log(ps2_pack_probe_invalid_fmt, path);
+        fclose(file);
         return;
     }
 
@@ -1025,8 +1036,10 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
         sample_table_offset < 40u ||
         event_table_offset < sample_table_offset ||
         data_offset < event_table_offset ||
-        data_size == 0) {
+        data_size == 0 ||
+        sample_table_offset > 0x7fffffffu) {
         rs2_log(ps2_pack_probe_invalid_fmt, path);
+        fclose(file);
         return;
     }
 
@@ -1034,6 +1047,93 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
             (unsigned int)sample_count,
             (unsigned int)event_count,
             (unsigned int)data_size);
+
+    uint8_t sample_rec[8];
+    if (fseek(file, (long)sample_table_offset, SEEK_SET) != 0 ||
+        fread(sample_rec, 1, sizeof(sample_rec), file) != sizeof(sample_rec)) {
+        rs2_log(ps2_pack_sample_bad_fmt, 0u, 0u);
+        fclose(file);
+        return;
+    }
+
+    uint32_t blob_offset = ps2_pack_le32(sample_rec);
+    uint32_t blob_size = ps2_pack_le32(sample_rec + 4);
+    uint32_t relative_offset =
+        blob_offset >= data_offset ? blob_offset - data_offset : data_size;
+
+    if (blob_size <= 16u ||
+        blob_offset < data_offset ||
+        relative_offset > data_size ||
+        blob_size > data_size - relative_offset ||
+        blob_offset > 0x7fffffffu - 16u) {
+        rs2_log(ps2_pack_sample_bad_fmt,
+                (unsigned int)blob_offset,
+                (unsigned int)blob_size);
+        fclose(file);
+        return;
+    }
+
+    uint32_t raw_size = blob_size - 16u;
+    if ((raw_size & 0x0fu) != 0 ||
+        raw_size == 0 ||
+        raw_size > PS2_PACK_SPU_LIMIT - PS2_PACK_SPU_BASE ||
+        fseek(file, (long)(blob_offset + 16u), SEEK_SET) != 0) {
+        rs2_log(ps2_pack_sample_bad_fmt,
+                (unsigned int)blob_offset,
+                (unsigned int)blob_size);
+        fclose(file);
+        return;
+    }
+
+    Rs2MidiRpcPacket packet __attribute__((aligned(64)));
+    uint32_t uploaded = 0;
+    uint32_t chunks = 0;
+    int32_t last_transfer = 0;
+
+    while (uploaded < raw_size) {
+        uint32_t chunk = raw_size - uploaded;
+        if (chunk > RS2MIDI_MAX_SAMPLE_BYTES) {
+            chunk = RS2MIDI_MAX_SAMPLE_BYTES;
+        }
+
+        memset(&packet, 0, sizeof(packet));
+        if (fread(packet.sample, 1, chunk, file) != chunk) {
+            rs2_log(ps2_pack_sample_read_fmt,
+                    (unsigned int)uploaded,
+                    (unsigned int)chunk);
+            fclose(file);
+            return;
+        }
+
+        packet.words[0] = PS2_PACK_SPU_BASE + uploaded;
+        packet.words[1] = chunk;
+        int32_t status = ps2_audio_rpc_status(
+            &ps2_music_state.rpc,
+            RS2MIDI_RPC_LOAD_ABS,
+            &packet,
+            RS2MIDI_RPC_HEADER_BYTES + (int)chunk);
+        last_transfer = (int32_t)packet.words[2];
+
+        if (status < 0) {
+            rs2_log(ps2_pack_upload_fail_fmt,
+                    (unsigned int)uploaded,
+                    (unsigned int)chunk,
+                    (int)status,
+                    (int)last_transfer);
+            fclose(file);
+            return;
+        }
+
+        uploaded += chunk;
+        chunks++;
+    }
+
+    fclose(file);
+    rs2_log(ps2_pack_upload_ok_fmt,
+            (unsigned int)raw_size,
+            (unsigned int)chunks,
+            (unsigned int)PS2_PACK_SPU_BASE,
+            (int)last_transfer);
 }
 
 void ps2_audio_update_late(void) PS2_AUDIO_CODE;
