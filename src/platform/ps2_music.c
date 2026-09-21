@@ -1950,39 +1950,127 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
 }
 
 
-PS2_AUDIO_STATIC bool ps2_sfx_load_anvil(void)
+PS2_AUDIO_STATIC void ps2_sfx_pop_request(void)
 {
-    if (ps2_sfx_state.loaded) {
-        return true;
-    }
-    if (ps2_sfx_state.failed || !ps2_music_state.ready) {
-        return false;
+    if (ps2_sfx_state.queue_count == 0u) {
+        return;
     }
 
+    memset(
+        &ps2_sfx_state.queue[ps2_sfx_state.queue_head],
+        0,
+        sizeof(Ps2SfxRequest));
+    ps2_sfx_state.queue_head =
+        (uint8_t)((ps2_sfx_state.queue_head + 1u) % PS2_SFX_QUEUE_COUNT);
+    ps2_sfx_state.queue_count--;
+}
+
+PS2_AUDIO_STATIC bool ps2_sfx_resolve_request(Ps2SfxRequest *request)
+{
     char path[320];
-    snprintf(path, sizeof(path), ps2_sfx_path_fmt, ps2_cache_prefix());
+    FILE *file = ps2_audio_dat_open(path, sizeof(path));
+    if (file) {
+        uint8_t selected = request->loops;
+        uint32_t offset = 0;
+        uint32_t size = 0;
+        uint16_t trim_ticks = 0;
+        uint32_t duration_ms = 0;
 
-    FILE *file = fopen(path, ps2_sfx_read_mode);
+        bool found = ps2_audio_dat_sfx_entry(
+            file,
+            request->id,
+            request->loops,
+            &selected,
+            &offset,
+            &size,
+            &trim_ticks,
+            &duration_ms);
+        fclose(file);
+
+        if (found) {
+            request->offset = offset;
+            request->size = size;
+            request->trim_ticks = trim_ticks;
+            request->duration_ms = duration_ms;
+            request->selected_loops = selected;
+            request->from_dat = 1;
+            request->resolved = 1;
+            request->due_ms =
+                request->request_ms +
+                ((uint64_t)request->delay_ticks +
+                 (uint64_t)request->trim_ticks) * 20ull;
+            return true;
+        }
+    }
+
+    /*
+     * Debug fallback: a loose <id>.ps2a can still be tested without rebuilding
+     * audio.dat. It has no index metadata, so only the server delay applies.
+     */
+    snprintf(
+        path,
+        sizeof(path),
+        ps2_sfx_path_fmt,
+        ps2_cache_prefix(),
+        (int)request->id);
+    file = fopen(path, ps2_audio_read_mode);
     if (!file) {
-        rs2_log(ps2_sfx_open_fail_fmt, path);
-        ps2_sfx_state.failed = 1;
         return false;
     }
 
     int seek_end = fseek(file, 0, SEEK_END);
     long size_long = seek_end == 0 ? ftell(file) : -1;
-    int seek_start = 0;
-    if (size_long > 0) {
-        seek_start = fseek(file, 0, SEEK_SET);
+    fclose(file);
+
+    if (size_long <= 16 ||
+        size_long > (long)(PS2_SFX_SPU_LIMIT - PS2_SFX_SPU_BASE + 16u)) {
+        return false;
     }
 
-    if (seek_end != 0 ||
-        seek_start != 0 ||
-        size_long <= 16 ||
-        size_long > (long)(PS2_SFX_SPU_LIMIT - PS2_SFX_SPU_BASE + 16u)) {
-        rs2_log(ps2_sfx_bad_fmt, path, size_long);
-        fclose(file);
-        ps2_sfx_state.failed = 1;
+    request->offset = 0;
+    request->size = (uint32_t)size_long;
+    request->trim_ticks = 0;
+    request->duration_ms = 0;
+    request->selected_loops = request->loops;
+    request->from_dat = 0;
+    request->resolved = 1;
+    request->due_ms =
+        request->request_ms + (uint64_t)request->delay_ticks * 20ull;
+    return true;
+}
+
+PS2_AUDIO_STATIC bool ps2_sfx_load_request(
+    const Ps2SfxRequest *request)
+{
+    if (ps2_sfx_state.loaded &&
+        ps2_sfx_state.loaded_id == request->id &&
+        ps2_sfx_state.loaded_loops == request->selected_loops) {
+        return true;
+    }
+
+    char path[320];
+    FILE *file = NULL;
+    if (request->from_dat) {
+        file = ps2_audio_dat_open(path, sizeof(path));
+    } else {
+        snprintf(
+            path,
+            sizeof(path),
+            ps2_sfx_path_fmt,
+            ps2_cache_prefix(),
+            (int)request->id);
+        file = fopen(path, ps2_audio_read_mode);
+    }
+
+    if (!file ||
+        request->size <= 16u ||
+        request->size >
+            PS2_SFX_SPU_LIMIT - PS2_SFX_SPU_BASE + 16u ||
+        request->offset > 0x7fffffffu ||
+        fseek(file, (long)request->offset, SEEK_SET) != 0) {
+        if (file) {
+            fclose(file);
+        }
         return false;
     }
 
@@ -1995,22 +2083,19 @@ PS2_AUDIO_STATIC bool ps2_sfx_load_anvil(void)
         header[4] != 1u ||
         header[5] != 1u ||
         header[6] != 0u) {
-        rs2_log(ps2_sfx_bad_fmt, path, size_long);
         fclose(file);
-        ps2_sfx_state.failed = 1;
         return false;
     }
 
     uint32_t pitch = ps2_pack_le32(header + 8);
-    uint32_t raw_size = (uint32_t)size_long - 16u;
+    uint32_t raw_size = request->size - 16u;
     uint32_t padded_size = (raw_size + 63u) & ~63u;
     if (pitch == 0u ||
         pitch > 0x3fffu ||
-        padded_size == 0u ||
+        raw_size == 0u ||
+        (raw_size & 0x0fu) != 0u ||
         padded_size > PS2_SFX_SPU_LIMIT - PS2_SFX_SPU_BASE) {
-        rs2_log(ps2_sfx_bad_fmt, path, size_long);
         fclose(file);
-        ps2_sfx_state.failed = 1;
         return false;
     }
 
@@ -2023,7 +2108,6 @@ PS2_AUDIO_STATIC bool ps2_sfx_load_anvil(void)
         memset(&packet, 0, sizeof(packet));
         if (fread(packet.sample, 1, read_size, file) != read_size) {
             fclose(file);
-            ps2_sfx_state.failed = 1;
             return false;
         }
 
@@ -2035,7 +2119,6 @@ PS2_AUDIO_STATIC bool ps2_sfx_load_anvil(void)
                 &packet,
                 RS2MIDI_RPC_HEADER_BYTES + 64u) < 0) {
             fclose(file);
-            ps2_sfx_state.failed = 1;
             return false;
         }
 
@@ -2046,42 +2129,118 @@ PS2_AUDIO_STATIC bool ps2_sfx_load_anvil(void)
     fclose(file);
     ps2_sfx_state.pitch = pitch;
     ps2_sfx_state.raw_bytes = raw_size;
+    ps2_sfx_state.loaded_id = request->id;
+    ps2_sfx_state.loaded_loops = request->selected_loops;
     ps2_sfx_state.loaded = 1;
 
-    rs2_log(ps2_sfx_load_fmt,
-            (unsigned int)raw_size,
-            (unsigned int)pitch);
+    rs2_log(
+        ps2_sfx_load_fmt,
+        (unsigned int)request->id,
+        (unsigned int)request->selected_loops,
+        (unsigned int)raw_size,
+        (unsigned int)pitch);
     return true;
+}
+
+PS2_AUDIO_STATIC void ps2_sfx_update(void)
+{
+    if (!ps2_music_state.ready || ps2_sfx_state.queue_count == 0u) {
+        return;
+    }
+
+    Ps2SfxRequest *request =
+        &ps2_sfx_state.queue[ps2_sfx_state.queue_head];
+
+    if (!request->resolved && !ps2_sfx_resolve_request(request)) {
+        rs2_log(
+            ps2_sfx_bad_fmt,
+            (unsigned int)request->id,
+            (unsigned int)request->loops);
+        ps2_sfx_pop_request();
+        return;
+    }
+
+    uint64_t now = rs2_now();
+    if (now < request->due_ms) {
+        return;
+    }
+
+    /*
+     * Match the legacy single-wave policy: a new effect only replaces the
+     * current one when it would outlive the remaining current playback.
+     */
+    bool should_play = true;
+    if (request->duration_ms != 0u &&
+        ps2_sfx_state.last_duration_ms != 0u &&
+        now + (uint64_t)request->duration_ms <=
+            ps2_sfx_state.last_start_ms +
+            (uint64_t)ps2_sfx_state.last_duration_ms) {
+        should_play = false;
+    }
+
+    if (should_play && ps2_sfx_load_request(request)) {
+        Rs2MidiRpcPacket packet __attribute__((aligned(64)));
+        memset(&packet, 0, sizeof(packet));
+        packet.words[0] = PS2_SFX_VOICE;
+        packet.words[1] = ps2_sfx_state.pitch;
+        packet.words[2] = 0x3fffu;
+        packet.words[3] = 0x3fffu;
+        packet.words[4] = PS2_SFX_SPU_BASE;
+
+        int32_t status = ps2_audio_rpc_status(
+            &ps2_music_state.rpc,
+            RS2MIDI_RPC_SFX_NOTE_ON,
+            &packet,
+            RS2MIDI_RPC_HEADER_BYTES);
+
+        rs2_log(
+            ps2_sfx_play_fmt,
+            (unsigned int)request->id,
+            (unsigned int)request->selected_loops,
+            (int)status);
+
+        if (status >= 0) {
+            ps2_sfx_state.last_start_ms = now;
+            ps2_sfx_state.last_duration_ms = request->duration_ms;
+        }
+    }
+
+    ps2_sfx_pop_request();
 }
 
 void ps2_sfx_request(int id, int loops, int delay) PS2_AUDIO_CODE;
 void ps2_sfx_request(int id, int loops, int delay)
 {
-    (void)loops;
-
-    if (id != PS2_SFX_PROOF_ID ||
-        delay != 0 ||
-        !ps2_music_state.ready ||
-        !ps2_sfx_load_anvil()) {
+    if (id < 0 ||
+        id > 0xffff ||
+        loops < 0 ||
+        loops > 0xff ||
+        delay < 0 ||
+        delay > 0xffff) {
         return;
     }
 
-    Rs2MidiRpcPacket packet __attribute__((aligned(64)));
-    memset(&packet, 0, sizeof(packet));
-    packet.words[0] = PS2_SFX_VOICE;
-    packet.words[1] = ps2_sfx_state.pitch;
-    packet.words[2] = 0x3fffu;
-    packet.words[3] = 0x3fffu;
-    packet.words[4] = PS2_SFX_SPU_BASE;
+    if (ps2_sfx_state.queue_count >= PS2_SFX_QUEUE_COUNT) {
+        rs2_log(
+            ps2_sfx_queue_full_fmt,
+            (unsigned int)id,
+            (unsigned int)loops,
+            (unsigned int)delay);
+        return;
+    }
 
-    int32_t status = ps2_audio_rpc_status(
-        &ps2_music_state.rpc,
-        RS2MIDI_RPC_SFX_NOTE_ON,
-        &packet,
-        RS2MIDI_RPC_HEADER_BYTES);
-    rs2_log(ps2_sfx_play_fmt, (int)status);
+    Ps2SfxRequest *request =
+        &ps2_sfx_state.queue[ps2_sfx_state.queue_tail];
+    memset(request, 0, sizeof(*request));
+    request->id = (uint16_t)id;
+    request->loops = (uint8_t)loops;
+    request->delay_ticks = (uint16_t)delay;
+    request->request_ms = rs2_now();
+
+    ps2_sfx_state.queue_tail =
+        (uint8_t)((ps2_sfx_state.queue_tail + 1u) % PS2_SFX_QUEUE_COUNT);
+    ps2_sfx_state.queue_count++;
 }
-
 
 void ps2_audio_update_late(void) PS2_AUDIO_CODE;
 void ps2_audio_update_late(void)
