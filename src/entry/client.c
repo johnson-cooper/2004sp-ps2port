@@ -5031,7 +5031,7 @@ static void handleControllerButtonInput(Client *c) {
         if (dpad_y != 0) {
             c->controller_settings_row += dpad_y;
             if (c->controller_settings_row < 0) c->controller_settings_row = 0;
-            if (c->controller_settings_row > 5) c->controller_settings_row = 5;
+            if (c->controller_settings_row > 6) c->controller_settings_row = 6;
         }
         if (dpad_x != 0) {
             if (c->controller_settings_row == 0) {
@@ -5047,6 +5047,10 @@ static void handleControllerButtonInput(Client *c) {
                 if (c->controller_camera_deadzone < 16) c->controller_camera_deadzone = 16;
                 if (c->controller_camera_deadzone > 64) c->controller_camera_deadzone = 64;
             } else if (c->controller_settings_row == 3) {
+                c->controller_audio_volume += dpad_x * 25;
+                if (c->controller_audio_volume < 0) c->controller_audio_volume = 0;
+                if (c->controller_audio_volume > 100) c->controller_audio_volume = 100;
+            } else if (c->controller_settings_row == 4) {
                 c->controller_render_radius += dpad_x;
                 if (c->controller_render_radius < CONTROLLER_RENDER_RADIUS_MIN) {
                     c->controller_render_radius = CONTROLLER_RENDER_RADIUS_MIN;
@@ -5054,7 +5058,7 @@ static void handleControllerButtonInput(Client *c) {
                 if (c->controller_render_radius > CONTROLLER_RENDER_RADIUS_MAX) {
                     c->controller_render_radius = CONTROLLER_RENDER_RADIUS_MAX;
                 }
-            } else if (c->controller_settings_row == 4) {
+            } else if (c->controller_settings_row == 5) {
                 // Presets keep the setting useful on a controller without an awkward numeric editor:
                 // Forever -> 5 -> 10 -> 15 -> 30 -> 60 minutes -> Forever.
                 if (dpad_x > 0) {
@@ -5078,10 +5082,11 @@ static void handleControllerButtonInput(Client *c) {
 
         if (c->controller_confirm_pressed) {
             c->controller_confirm_pressed = false;
-            if (c->controller_settings_row == 5) {
+            if (c->controller_settings_row == 6) {
                 c->controller_cursor_deadzone = 20;
                 c->controller_cursor_speed = 5;
                 c->controller_camera_deadzone = 40;
+                c->controller_audio_volume = 0;
                 c->controller_render_radius = CONTROLLER_RENDER_RADIUS_DEFAULT;
                 c->controller_afk_minutes = 0;
                 c->shell->idle_cycles = 0;
@@ -10494,16 +10499,17 @@ static void controller_settings_draw(Client *c) {
     pix2d_fill_rect(x + 1, y + 1, 0x303946, w - 2, 25);
     drawStringTaggableCenter(c->font_bold12, "PlayStation 2 Controller Settings", x + w / 2, y + 18, WHITE, true);
 
-    const char *labels[6] = {
+    const char *labels[7] = {
         "Left stick deadzone",
         "Cursor speed",
         "Right stick deadzone",
+        "Audio volume",
         "Render radius",
         "AFK timer",
         "Reset defaults"
     };
     char value[32];
-    for (int row = 0; row < 6; row++) {
+    for (int row = 0; row < 7; row++) {
         int rowY = y + 50 + row * 30;
         int color = row == c->controller_settings_row ? YELLOW : WHITE;
         if (row == 0) {
@@ -10513,8 +10519,14 @@ static void controller_settings_draw(Client *c) {
         } else if (row == 2) {
             snprintf(value, sizeof(value), "%d", c->controller_camera_deadzone);
         } else if (row == 3) {
-            snprintf(value, sizeof(value), "%d tiles", c->controller_render_radius);
+            if (c->controller_audio_volume <= 0) {
+                strcpy(value, "Off");
+            } else {
+                snprintf(value, sizeof(value), "%d%%", c->controller_audio_volume);
+            }
         } else if (row == 4) {
+            snprintf(value, sizeof(value), "%d tiles", c->controller_render_radius);
+        } else if (row == 5) {
             if (c->controller_afk_minutes <= 0) {
                 strcpy(value, "Forever");
             } else {
@@ -14011,6 +14023,7 @@ Client *client_new(void) {
     c->controller_cursor_deadzone = 20;
     c->controller_cursor_speed = 5;
     c->controller_camera_deadzone = 40;
+    c->controller_audio_volume = 0;
     c->controller_render_radius = CONTROLLER_RENDER_RADIUS_DEFAULT;
     c->controller_afk_minutes = 0;
     c->controller_grid_cancel_pressed = false;

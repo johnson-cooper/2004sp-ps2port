@@ -202,6 +202,11 @@ typedef struct Ps2SfxState {
     Ps2SfxRequest queue[PS2_SFX_QUEUE_COUNT];
 } Ps2SfxState;
 
+typedef struct Ps2AudioControlState {
+    uint32_t magic;
+    uint32_t applied_volume;
+} Ps2AudioControlState;
+
 /*
  * Everything added by the PS2 music sequencer lives in the isolated high
  * audio PT_LOAD. Give the object a non-zero initializer so it is emitted as
@@ -232,6 +237,15 @@ static Ps2AudioDatState ps2_audio_dat_state PS2_AUDIO_STATE = {
 static Ps2SfxState ps2_sfx_state PS2_AUDIO_STATE = {
     .magic = 0x53465831u, /* "SFX1" */
     .loaded_id = 0xffffu
+};
+
+/*
+ * Keep controller-master state in the high audio PT_LOAD too. The desired setting itself lives
+ * on Client; this tiny record only remembers what the backend has already applied.
+ */
+static Ps2AudioControlState ps2_audio_control_state PS2_AUDIO_STATE = {
+    .magic = 0x41554431u, /* "AUD1" */
+    .applied_volume = 0u
 };
 
 static const uint16_t ps2_midi_semitone_q12[12] PS2_AUDIO_RODATA = {
@@ -314,6 +328,28 @@ static const char ps2_sfx_play_fmt[] PS2_AUDIO_RODATA =
     "audio: SFX id=%u loops=%u play status=%d\n";
 static const char ps2_sfx_queue_full_fmt[] PS2_AUDIO_RODATA =
     "audio: SFX queue full; dropping id=%u loops=%u delay=%u\n";
+
+PS2_AUDIO_STATIC uint32_t ps2_audio_master_volume(void)
+{
+    Client *c = ps2_crash_client;
+    int volume = c ? c->controller_audio_volume : 0;
+    if (volume < 0) volume = 0;
+    if (volume > 100) volume = 100;
+    return (uint32_t)volume;
+}
+
+PS2_AUDIO_STATIC uint32_t ps2_audio_scale_volume(uint32_t volume)
+{
+    return (volume * ps2_audio_master_volume() + 50u) / 100u;
+}
+
+PS2_AUDIO_STATIC void ps2_audio_clear_sfx_queue(void)
+{
+    memset(ps2_sfx_state.queue, 0, sizeof(ps2_sfx_state.queue));
+    ps2_sfx_state.queue_head = 0;
+    ps2_sfx_state.queue_tail = 0;
+    ps2_sfx_state.queue_count = 0;
+}
 
 PS2_AUDIO_STATIC uint16_t ps2_midi_be16(const uint8_t *p)
 {
@@ -809,6 +845,7 @@ PS2_AUDIO_STATIC void ps2_midi_note_on(
     uint32_t max_volume = program == 14 ? 0x1000u : 0x1800u;
     uint32_t volume =
         ((uint32_t)velocity * max_volume + 63u) / 127u;
+    volume = ps2_audio_scale_volume(volume);
 
     Rs2MidiRpcPacket packet __attribute__((aligned(64)));
     memset(&packet, 0, RS2MIDI_RPC_HEADER_BYTES);
@@ -1089,6 +1126,7 @@ PS2_AUDIO_STATIC void ps2_pack_mix_volumes(
 {
     uint32_t base =
         ((uint32_t)(volume > 100 ? 100 : volume) * 0x1800u + 50u) / 100u;
+    base = ps2_audio_scale_volume(base);
     int p = (int)pan;
     if (p < -100) {
         p = -100;
@@ -2240,8 +2278,9 @@ PS2_AUDIO_STATIC void ps2_sfx_update(void)
         memset(&packet, 0, sizeof(packet));
         packet.words[0] = PS2_SFX_VOICE;
         packet.words[1] = ps2_sfx_state.pitch;
-        packet.words[2] = 0x3fffu;
-        packet.words[3] = 0x3fffu;
+        uint32_t sfx_volume = ps2_audio_scale_volume(0x3fffu);
+        packet.words[2] = sfx_volume;
+        packet.words[3] = sfx_volume;
         packet.words[4] = PS2_SFX_SPU_BASE;
 
         int32_t status = ps2_audio_rpc_status(
@@ -2274,6 +2313,11 @@ void ps2_sfx_request(int id, int loops, int delay)
         loops > 0xff ||
         delay < 0 ||
         delay > 0xffff) {
+        return;
+    }
+
+    // Master Off is a performance mode: do not queue file lookup/SPU2 upload work at all.
+    if (ps2_audio_master_volume() == 0u) {
         return;
     }
 
@@ -2339,6 +2383,47 @@ void ps2_audio_update_late(void)
      * player silent until the server happens to send another song change.
      */
     if (c->scene_state != 2) {
+        return;
+    }
+
+    uint32_t master_volume = ps2_audio_master_volume();
+    if (master_volume != ps2_audio_control_state.applied_volume) {
+        uint32_t previous_volume = ps2_audio_control_state.applied_volume;
+        ps2_audio_control_state.applied_volume = master_volume;
+
+        if (master_volume == 0u) {
+            // Stop all current music/SFX and discard queued effects. The backend remains loaded if
+            // it was already initialized, but no sequencer, USB audio.dat, or SFX work runs while Off.
+            if (ps2_music_state.ready) {
+                ps2_midi_stop_song();
+
+                Rs2MidiRpcPacket packet __attribute__((aligned(64)));
+                memset(&packet, 0, sizeof(packet));
+                packet.words[0] = PS2_SFX_VOICE;
+                (void)ps2_audio_rpc_status(
+                    &ps2_music_state.rpc, RS2MIDI_RPC_KEY_OFF, &packet, 4);
+            }
+            ps2_music_state.jingle_active = 0;
+            ps2_music_state.pending_valid = 0;
+            ps2_audio_clear_sfx_queue();
+            ps2_sfx_state.last_duration_ms = 0;
+        } else if (previous_volume == 0u &&
+                   ps2_music_state.desired_song_id >= 0) {
+            // Turning audio back on resumes the latest server-selected area song.
+            ps2_music_state.pending_midi_id = ps2_music_state.desired_song_id;
+            ps2_music_state.pending_loop = 1;
+            ps2_music_state.pending_valid = 1;
+        }
+    }
+
+    if (master_volume == 0u) {
+        // Preserve the proven ~5 second post-world delay without loading rs2midi.irx while muted.
+        // If the user enables audio after that point, initialization can begin immediately.
+        if (!ps2_music_state.ready &&
+            ps2_music_state.init_polls != UINT32_MAX &&
+            ps2_music_state.init_polls < 250u) {
+            ps2_music_state.init_polls++;
+        }
         return;
     }
 
