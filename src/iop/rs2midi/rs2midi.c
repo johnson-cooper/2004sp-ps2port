@@ -310,6 +310,18 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
             status = RS2MIDI_ERR_ARGS;
             break;
         }
+
+        /*
+         * Real-hardware A/B: make NOTE_OFF immediately inaudible before
+         * releasing the SPU2 voice. Accurate SoundFont samples can contain
+         * loop flags, so relying on KOFF alone can leave a releasing/looped
+         * tone audible while the EE already considers this voice reusable.
+         * NOTE_ON restores the intended mix when the voice is allocated again.
+         */
+        sceSdSetParam(
+            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLL, 0);
+        sceSdSetParam(
+            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLR, 0);
         sceSdSetSwitch(RS2MIDI_CORE | SD_SWITCH_KOFF, 1u << voice);
         break;
     }
