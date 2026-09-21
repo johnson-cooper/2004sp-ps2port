@@ -43,6 +43,7 @@ HEADER_SIZE = HEADER.size
 ENTRY_SIZE = ENTRY.size
 SFX_LOOP_SLOTS = 256
 SFX_SPU_BYTES = 0x00200000 - 0x001E2000
+SILENT_OFFSET = 0xFFFFFFFF
 
 SOUND_CALL = re.compile(
     r"(?<![A-Za-z0-9_])(?:\.)?sound_synth\s*\(\s*"
@@ -169,10 +170,17 @@ def export_variant(
     proc = subprocess.run(
         [str(exporter), str(synth), str(wav_path), str(loops)],
         cwd=repo_root,
-        check=True,
+        check=False,
         text=True,
         capture_output=True,
     )
+    if proc.returncode == 3 and loops == 0:
+        return b"", 0, 0
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"exporter failed rc={proc.returncode}: "
+            f"{proc.stderr.strip() or proc.stdout.strip()}"
+        )
     match = TRIM_LINE.search(proc.stdout)
     if not match:
         raise RuntimeError(
@@ -310,6 +318,7 @@ def main() -> None:
     wav_path = temp_root / "current.wav"
 
     sfx_payloads: dict[tuple[int, int], tuple[bytes, int, int]] = {}
+    silent_variants: set[tuple[int, int]] = set()
     failures: list[str] = []
     optional_skips: list[str] = []
     variants_built = 0
@@ -330,11 +339,14 @@ def main() -> None:
                     loops,
                     repo_root,
                 )
-                sfx_payloads[(synth_id, loops)] = (
-                    encoded,
-                    trim_ticks,
-                    duration_ms,
-                )
+                if not encoded:
+                    silent_variants.add((synth_id, loops))
+                else:
+                    sfx_payloads[(synth_id, loops)] = (
+                        encoded,
+                        trim_ticks,
+                        duration_ms,
+                    )
                 variants_built += 1
             except Exception as exc:
                 message = f"{synth_id}={name} loops={loops}: {exc}"
@@ -395,6 +407,15 @@ def main() -> None:
                 shutil.copyfileobj(src, out, length=1024 * 1024)
             music_table[music_id][:] = ENTRY.pack(pos, size, 0, 0)
             payload_count += 1
+
+        for synth_id, loops in sorted(silent_variants):
+            index = synth_id * SFX_LOOP_SLOTS + loops
+            sfx_table[index][:] = ENTRY.pack(
+                SILENT_OFFSET,
+                0,
+                0,
+                0,
+            )
 
         for (synth_id, loops), (blob, trim_ticks, duration_ms) in sorted(
             sfx_payloads.items()
@@ -461,6 +482,7 @@ def main() -> None:
         f"Synth ids:           {len(synth_map)}",
         f"SFX table slots:     {sfx_entries_count}",
         f"SFX variants built:  {variants_built}",
+        f"Silent SFX variants: {len(silent_variants)}",
         f"Unique SFX blobs:    {len(dedupe)}",
         f"SFX dedupe saving:   {dedupe_saved:,} bytes",
         f"Optional variants skipped: {len(optional_skips)}",
