@@ -701,7 +701,7 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
         [(0, 127, 127, 64)]
         for _ in range(16)
     ]
-    token_busy_until = [0] * 256
+    token_busy_until = [-1] * 256
     token_cursor = 0
     envelope_mix_events = 0
 
@@ -729,7 +729,9 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
         nonlocal token_cursor
         for offset in range(256):
             token = (token_cursor + offset) & 0xFF
-            if token_busy_until[token] <= time_us:
+            # Never recycle on the exact release timestamp: the old
+            # token's final OUT_MIX/KOFF events are sorted at that same time.
+            if token_busy_until[token] < time_us:
                 token_busy_until[token] = 1 << 62
                 token_cursor = (token + 1) & 0xFF
                 return token
