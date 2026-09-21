@@ -961,12 +961,14 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
 
     if (bank_ok) {
         /*
-         * Real-hardware A/B: keep the proven 64-byte slot-0 LOAD_SLOT, but
-         * source those bytes from Expanse sample 0 in the real .ps2m pack.
-         * No playback and no new SPU2 address/slot are introduced here.
+         * Real-hardware A/B: upload the complete Expanse sample-0 ADPCM
+         * payload using only the already-proven 64-byte LOAD_ABS primitive.
+         *
+         * The 16-byte APCM metadata header is not SPU2 sample data. Stream the
+         * payload directly from the pack so EE heap usage stays flat. The last
+         * partial block is zero-padded to 64 bytes, avoiding a new DMA size.
+         * Still no NOTE_ON_ADDR or playback in this test.
          */
-        uint8_t expanse_sample[64];
-        bool expanse_sample_ok = false;
         char pack_path[320];
         snprintf(pack_path, sizeof(pack_path),
                  ps2_pack_probe_path_fmt, ps2_cache_prefix());
@@ -1008,37 +1010,55 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
                             blob_offset >= data_offset ?
                                 blob_offset - data_offset : data_size;
 
-                        if (blob_size >= 80u &&
+                        if (blob_size > 16u &&
                             blob_offset >= data_offset &&
                             relative_offset <= data_size &&
                             blob_size <= data_size - relative_offset &&
                             blob_offset <= 0x7fffffffu - 16u &&
                             fseek(pack_file,
                                   (long)(blob_offset + 16u),
-                                  SEEK_SET) == 0 &&
-                            fread(expanse_sample,
-                                  1,
-                                  sizeof(expanse_sample),
-                                  pack_file) == sizeof(expanse_sample)) {
-                            expanse_sample_ok = true;
+                                  SEEK_SET) == 0) {
+                            uint32_t remaining = blob_size - 16u;
+                            uint32_t sample_addr = 0x00100000u;
+                            uint8_t expanse_sample[64];
+
+                            while (remaining != 0u) {
+                                uint32_t read_size =
+                                    remaining > 64u ? 64u : remaining;
+
+                                memset(expanse_sample, 0,
+                                       sizeof(expanse_sample));
+                                if (fread(expanse_sample,
+                                          1,
+                                          read_size,
+                                          pack_file) != read_size) {
+                                    break;
+                                }
+
+                                memset(&packet, 0, sizeof(packet));
+                                packet.words[0] = sample_addr;
+                                packet.words[1] = 64u;
+                                memcpy(packet.sample,
+                                       expanse_sample,
+                                       sizeof(expanse_sample));
+
+                                if (ps2_audio_rpc_status(
+                                        &ps2_music_state.rpc,
+                                        RS2MIDI_RPC_LOAD_ABS,
+                                        &packet,
+                                        RS2MIDI_RPC_HEADER_BYTES + 64u) < 0) {
+                                    break;
+                                }
+
+                                remaining -= read_size;
+                                sample_addr += 64u;
+                            }
                         }
                     }
                 }
             }
 
             fclose(pack_file);
-        }
-
-        if (expanse_sample_ok) {
-            memset(&packet, 0, sizeof(packet));
-            packet.words[0] = 0x00100000u;
-            packet.words[1] = 64u;
-            memcpy(packet.sample, expanse_sample, sizeof(expanse_sample));
-            (void)ps2_audio_rpc_status(
-                &ps2_music_state.rpc,
-                RS2MIDI_RPC_LOAD_ABS,
-                &packet,
-                RS2MIDI_RPC_HEADER_BYTES + 64u);
         }
 
         ps2_music_state.bank_loaded = 1;
