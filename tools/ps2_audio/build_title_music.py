@@ -434,7 +434,7 @@ class SoundFontResolver:
         return struct.unpack_from(f"<{count}h", self.data, byte_offset)
 
 
-def _pitch(region: Region, note: int, state: ChannelState) -> int:
+def _pitch_details(region: Region, note: int, state: ChannelState):
     effective_note = region.keynum if region.keynum is not None else note
     bend = (state.pitch_bend - 8192) / 8192.0 * state.bend_range * 100.0
     cents = (
@@ -444,8 +444,14 @@ def _pitch(region: Region, note: int, state: ChannelState) -> int:
         + region.correction
         + bend
     )
-    value = int(round(base_pitch(region.sample_rate) * (2.0 ** (cents / 1200.0))))
-    return max(1, min(0x3FFF, value))
+    native = base_pitch(region.sample_rate)
+    raw = int(round(native * (2.0 ** (cents / 1200.0))))
+    actual = max(1, min(0x3FFF, raw))
+    return actual, raw, native, effective_note, bend, cents
+
+
+def _pitch(region: Region, note: int, state: ChannelState) -> int:
+    return _pitch_details(region, note, state)[0]
 
 
 def _mix(region: Region, velocity: int, state: ChannelState) -> tuple[int, int]:
@@ -477,6 +483,45 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
     sample_index_by_key = {}
     active: dict[tuple[int, int], list[ActiveLayer]] = {}
     out_events = []
+    pitch_clamp_count = 0
+    pitch_clamp_by_program: dict[tuple[int, int], int] = {}
+
+    def pitch_for(
+        time_us: int,
+        channel: int,
+        region: Region,
+        note: int,
+        state: ChannelState,
+    ) -> int:
+        nonlocal pitch_clamp_count
+        actual, raw, native, effective_note, bend, cents = _pitch_details(
+            region, note, state
+        )
+        if raw < 1 or raw > 0x3FFF:
+            pitch_clamp_count += 1
+            bank = 128 if channel == 9 else state.bank
+            key = (bank, state.program)
+            pitch_clamp_by_program[key] = (
+                pitch_clamp_by_program.get(key, 0) + 1
+            )
+            direction = "LOW" if raw < 1 else "HIGH"
+            print(
+                "PITCH CLAMP "
+                f"#{pitch_clamp_count} {direction}: "
+                f"time={time_us / 1_000_000.0:.3f}s "
+                f"ch={channel} bank={bank} program={state.program} "
+                f"midi_note={note} effective_note={effective_note} "
+                f"sample={region.sample_id} root={region.root_key} "
+                f"sample_rate={region.sample_rate} "
+                f"native=0x{native:04X} "
+                f"scale={region.scale_tuning} "
+                f"coarse={region.coarse_tune} "
+                f"fine={region.fine_tune} "
+                f"correction={region.correction} "
+                f"bend={bend:.2f}c cents={cents:.2f} "
+                f"raw=0x{raw:X} actual=0x{actual:04X}"
+            )
+        return actual
 
     def ensure_sample(region: Region):
         key = (
@@ -529,7 +574,10 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
             for layer in layers:
                 add_event(
                     time_us, OUT_PITCH, ch, note, 0,
-                    layer.sample_index, _pitch(layer.region, note, state),
+                    layer.sample_index,
+                    pitch_for(
+                        time_us, ch, layer.region, note, state
+                    ),
                 )
 
     for time_us, event in timed:
@@ -607,7 +655,9 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
             for region in regions:
                 sample_index = ensure_sample(region)
                 volume, pan = _mix(region, velocity, state)
-                pitch = _pitch(region, note, state)
+                pitch = pitch_for(
+                    time_us, channel, region, note, state
+                )
                 add_event(
                     time_us, OUT_NOTE_ON, channel, note, velocity,
                     sample_index, pitch, volume, pan,
@@ -690,6 +740,16 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
     print(f"Duration:         {duration_us / 1_000_000.0:.3f} s")
     print(f"ADPCM samples:    {len(sample_blobs)}")
     print(f"Sequence events:  {len(packed_events)}")
+    print(f"Pitch clamps:     {pitch_clamp_count}")
+    if pitch_clamp_by_program:
+        print("Pitch clamps by bank/program:")
+        for (bank, program), count in sorted(
+            pitch_clamp_by_program.items()
+        ):
+            print(
+                f"  bank={bank:3d} program={program:3d} "
+                f"count={count}"
+            )
     print(f"SPU2 pack data:   {spu_payload:,} / {spu_budget:,} bytes")
     print(f"Pack size:        {output_path.stat().st_size:,} bytes")
     print(f"Wrote:            {output_path}")
