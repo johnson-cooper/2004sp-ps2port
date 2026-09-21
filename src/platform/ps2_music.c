@@ -1007,146 +1007,35 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
 
 PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
 {
-    char path[320];
-    snprintf(path, sizeof(path),
-             ps2_pack_probe_path_fmt, ps2_cache_prefix());
-
-    FILE *file = fopen(path, "rb");
-    if (!file) {
-        rs2_log(ps2_pack_probe_missing_fmt, path);
-        return;
-    }
-
-    uint8_t header[40];
-    size_t got = fread(header, 1, sizeof(header), file);
-
-    if (got != sizeof(header) ||
-        header[0] != 'R' ||
-        header[1] != 'S' ||
-        header[2] != 'M' ||
-        header[3] != '1' ||
-        ps2_pack_le16(header + 4) != 1u ||
-        ps2_pack_le16(header + 6) != 40u) {
-        rs2_log(ps2_pack_probe_invalid_fmt, path);
-        fclose(file);
-        return;
-    }
-
-    uint32_t sample_count = ps2_pack_le32(header + 8);
-    uint32_t event_count = ps2_pack_le32(header + 12);
-    uint32_t sample_table_offset = ps2_pack_le32(header + 16);
-    uint32_t event_table_offset = ps2_pack_le32(header + 20);
-    uint32_t data_offset = ps2_pack_le32(header + 24);
-    uint32_t data_size = ps2_pack_le32(header + 28);
-
-    if (sample_count == 0 ||
-        event_count == 0 ||
-        sample_table_offset < 40u ||
-        event_table_offset < sample_table_offset ||
-        data_offset < event_table_offset ||
-        data_size == 0 ||
-        sample_table_offset > 0x7fffffffu) {
-        rs2_log(ps2_pack_probe_invalid_fmt, path);
-        fclose(file);
-        return;
-    }
-
-    rs2_log(ps2_pack_probe_ok_fmt,
-            (unsigned int)sample_count,
-            (unsigned int)event_count,
-            (unsigned int)data_size);
-
-    uint8_t sample_rec[8];
-    if (fseek(file, (long)sample_table_offset, SEEK_SET) != 0 ||
-        fread(sample_rec, 1, sizeof(sample_rec), file) != sizeof(sample_rec)) {
-        rs2_log(ps2_pack_sample_bad_fmt, 0u, 0u);
-        fclose(file);
-        return;
-    }
-
-    uint32_t blob_offset = ps2_pack_le32(sample_rec);
-    uint32_t blob_size = ps2_pack_le32(sample_rec + 4);
-    uint32_t relative_offset =
-        blob_offset >= data_offset ? blob_offset - data_offset : data_size;
-
-    if (blob_size <= 16u ||
-        blob_offset < data_offset ||
-        relative_offset > data_size ||
-        blob_size > data_size - relative_offset ||
-        blob_offset > 0x7fffffffu - 16u) {
-        rs2_log(ps2_pack_sample_bad_fmt,
-                (unsigned int)blob_offset,
-                (unsigned int)blob_size);
-        fclose(file);
-        return;
-    }
-
-    uint32_t raw_size = blob_size - 16u;
-    if ((raw_size & 0x0fu) != 0 ||
-        raw_size < 64u ||
-        fseek(file, (long)(blob_offset + 16u), SEEK_SET) != 0) {
-        rs2_log(ps2_pack_sample_bad_fmt,
-                (unsigned int)blob_offset,
-                (unsigned int)blob_size);
-        fclose(file);
-        return;
-    }
-
     /*
-     * Hardware A/B: upload exactly FOUR 16-byte PS2 ADPCM frames (64 bytes).
+     * Real-hardware A/B: remove the .ps2m/USB path completely.
      *
-     * The previous full-sample probe connected successfully, then faulted a
-     * few seconds later while repeatedly reading/uploading sample chunks.
-     * Keep every other part of the proven header probe identical and reduce
-     * the new IOP interaction to one transfer matching LIBSD's observed
-     * 64-byte DMA granularity exactly.
+     * The header-only pack probe was hardware-safe, but every probe that
+     * subsequently sought/read sample bytes and then issued another audio RPC
+     * died at the same point on a real PS2.  For this test, use 64 bytes from
+     * the already-embedded, already-proven ADPCM sample and perform only the
+     * same post-init LOAD_SLOT operation.
+     *
+     * No fopen/fseek/fread/fclose, no .ps2m access, no probe logging, and no
+     * playback.  Slot 0 / 0x001e0000 is the exact destination already proven
+     * during the normal bank initialization.
      */
+    if (ps2_audio_test_adpcm_size < 80u) {
+        return;
+    }
+
     Rs2MidiRpcPacket packet __attribute__((aligned(64)));
     memset(&packet, 0, sizeof(packet));
-    if (fread(packet.sample, 1, 64u, file) != 64u) {
-        rs2_log(ps2_pack_sample_read_fmt, 0u, 64u);
-        fclose(file);
-        return;
-    }
-    fclose(file);
+    memcpy(packet.sample, ps2_audio_test_adpcm + 16, 64u);
 
-    /*
-     * Use the hardware-proven LOAD_SLOT handler and the exact slot-0 address
-     * (0x001e0000) already proven by the normal bank initialization. This
-     * temporarily overwrites only the first 64 bytes of slot 0 for the A/B.
-     *
-     * ROM LIBSD rounded the previous requested 16 bytes to an actual 64-byte
-     * transfer (xfer=64). Declare and provide all 64 bytes explicitly so the
-     * IOP sound DMA never consumes bytes beyond the SIF RPC payload.
-     */
     packet.words[0] = PS2_PACK_PROBE_SLOT;
     packet.words[1] = 64u;
 
-    rs2_log(ps2_pack_upload_before_fmt,
-            64u,
-            (unsigned int)PS2_PACK_SPU_BASE);
-
-    int32_t status = ps2_audio_rpc_status(
+    (void)ps2_audio_rpc_status(
         &ps2_music_state.rpc,
         RS2MIDI_RPC_LOAD_SLOT,
         &packet,
         RS2MIDI_RPC_HEADER_BYTES + 64);
-    int32_t transfer = (int32_t)packet.words[2];
-
-    if (status < 0) {
-        rs2_log(ps2_pack_upload_fail_fmt,
-                0u,
-                64u,
-                (int)status,
-                (int)transfer);
-        return;
-    }
-
-    rs2_log(ps2_pack_upload_ok_fmt,
-            64u,
-            1u,
-            (unsigned int)PS2_PACK_SPU_BASE,
-            (int)transfer);
 }
 
 void ps2_audio_update_late(void) PS2_AUDIO_CODE;
