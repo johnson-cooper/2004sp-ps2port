@@ -22,7 +22,7 @@ from midi_to_ps2seq import (
     EV_PROGRAM,
     events_with_time,
 )
-from ps2_adpcm import base_pitch, encode_mono_pcm16
+from ps2_adpcm import SAMPLES_PER_FRAME, base_pitch, encode_mono_pcm16
 from sf2_to_ps2bank import (
     BAG,
     GEN,
@@ -603,6 +603,114 @@ def _pitch(region: Region, note: int, state: ChannelState) -> int:
     return _pitch_details(region, note, state)[0]
 
 
+FRAME_EXACT_TRIGGER_CENTS = 50.0
+FRAME_EXACT_MAX_LOOP_SAMPLES = 8192
+
+
+def _loop_frame_plan(loop_start_sample: int, loop_end_sample: int):
+    """Describe the current SPU2 loop error and a bounded exact alternative."""
+    exact_loop = loop_end_sample - loop_start_sample
+    if exact_loop <= 0:
+        return {
+            "exact_loop": 0,
+            "legacy_loop": 0,
+            "legacy_cents": 0.0,
+            "repeat_count": 1,
+            "aligned_loop": 0,
+            "align_samples": 0,
+            "apply_exact": False,
+        }
+
+    legacy_start_frame = loop_start_sample // SAMPLES_PER_FRAME
+    legacy_end_frame = max(
+        legacy_start_frame,
+        (loop_end_sample - 1) // SAMPLES_PER_FRAME,
+    )
+    legacy_loop = (
+        legacy_end_frame - legacy_start_frame + 1
+    ) * SAMPLES_PER_FRAME
+    legacy_cents = 1200.0 * math.log2(exact_loop / legacy_loop)
+
+    # Repeating an SF2 cycle does not change its pitch. 28/gcd(L, 28)
+    # copies make the total cycle span exactly divisible by one SPU2 ADPCM
+    # frame, so the hardware loop flags no longer stretch the period.
+    repeat_count = (
+        SAMPLES_PER_FRAME
+        // math.gcd(exact_loop, SAMPLES_PER_FRAME)
+    )
+    aligned_loop = exact_loop * repeat_count
+    align_samples = (-loop_start_sample) % SAMPLES_PER_FRAME
+
+    apply_exact = (
+        abs(legacy_cents) >= FRAME_EXACT_TRIGGER_CENTS
+        and aligned_loop <= FRAME_EXACT_MAX_LOOP_SAMPLES
+    )
+    return {
+        "exact_loop": exact_loop,
+        "legacy_loop": legacy_loop,
+        "legacy_cents": legacy_cents,
+        "repeat_count": repeat_count,
+        "aligned_loop": aligned_loop,
+        "align_samples": align_samples,
+        "apply_exact": apply_exact,
+    }
+
+
+def _prepare_frame_exact_loop(
+    pcm,
+    loop_start_sample: int | None,
+    loop_end_sample: int | None,
+):
+    """Reframe a badly quantized loop without changing its waveform period."""
+    if (
+        loop_start_sample is None
+        or loop_end_sample is None
+        or loop_start_sample < 0
+        or loop_end_sample <= loop_start_sample
+        or loop_end_sample > len(pcm)
+    ):
+        return list(pcm), loop_start_sample, loop_end_sample
+
+    plan = _loop_frame_plan(loop_start_sample, loop_end_sample)
+    if not plan["apply_exact"]:
+        return list(pcm), loop_start_sample, loop_end_sample
+
+    cycle = list(pcm[loop_start_sample:loop_end_sample])
+    cycle_len = len(cycle)
+    align_samples = plan["align_samples"]
+
+    # Advance to the next ADPCM-frame boundary using real samples from the
+    # loop itself, then rotate the repeated cycle to that exact phase. This
+    # avoids inserting silence/clicks before the hardware loop starts.
+    prefix = list(pcm[:loop_start_sample])
+    if align_samples:
+        prefix.extend(
+            cycle[i % cycle_len]
+            for i in range(align_samples)
+        )
+
+    phase = align_samples % cycle_len
+    if phase:
+        cycle = cycle[phase:] + cycle[:phase]
+
+    loop_body = cycle * plan["repeat_count"]
+    aligned_start = len(prefix)
+    aligned_end = aligned_start + len(loop_body)
+    prepared = (
+        prefix
+        + loop_body
+        + list(pcm[loop_end_sample:])
+    )
+
+    if (
+        aligned_start % SAMPLES_PER_FRAME != 0
+        or aligned_end % SAMPLES_PER_FRAME != 0
+    ):
+        raise AssertionError("frame-exact loop preparation lost alignment")
+
+    return prepared, aligned_start, aligned_end
+
+
 def _timecents_to_seconds(value: float, threshold: float = -11950.0):
     if value < threshold:
         return 0.0
@@ -899,29 +1007,35 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
         }.get(region.sample_modes & 3, "reserved")
 
         exact_loop = 0
+        legacy_loop = 0
+        legacy_cents = 0.0
         ps2_loop = 0
-        period_error_pct = 0.0
-        equivalent_cents = 0.0
+        remaining_cents = 0.0
+        repeat_count = 1
+        align_samples = 0
+        frame_exact = False
         if (
             (region.sample_modes & 1)
             and region.loop_end > region.loop_start
         ):
-            exact_loop = region.loop_end - region.loop_start
-            ps2_start_frame = region.loop_start // 28
-            ps2_end_frame = max(
-                ps2_start_frame,
-                (region.loop_end - 1) // 28,
+            relative_loop_start = region.loop_start - region.start
+            relative_loop_end = region.loop_end - region.start
+            plan = _loop_frame_plan(
+                relative_loop_start,
+                relative_loop_end,
             )
-            ps2_loop = (
-                ps2_end_frame - ps2_start_frame + 1
-            ) * 28
-            if exact_loop > 0 and ps2_loop > 0:
-                period_error_pct = (
-                    ps2_loop / exact_loop - 1.0
-                ) * 100.0
-                equivalent_cents = 1200.0 * math.log2(
-                    exact_loop / ps2_loop
-                )
+            exact_loop = plan["exact_loop"]
+            legacy_loop = plan["legacy_loop"]
+            legacy_cents = plan["legacy_cents"]
+            repeat_count = plan["repeat_count"]
+            align_samples = plan["align_samples"]
+            frame_exact = plan["apply_exact"]
+            if frame_exact:
+                ps2_loop = plan["aligned_loop"]
+                remaining_cents = 0.0
+            else:
+                ps2_loop = legacy_loop
+                remaining_cents = legacy_cents
 
         pitch, raw_pitch, _native, _effective, _bend, cents = (
             _pitch_details(region, note, state)
@@ -938,9 +1052,13 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
             f"root={region.root_key} rate={region.sample_rate} "
             f"loop_mode={loop_mode} "
             f"sf2_loop_samples={exact_loop} "
+            f"legacy_ps2_loop_samples={legacy_loop} "
+            f"legacy_loop_pitch_error={legacy_cents:+.3f}c "
+            f"frame_exact={int(frame_exact)} "
+            f"loop_repeats={repeat_count} "
+            f"align_samples={align_samples} "
             f"ps2_loop_samples={ps2_loop} "
-            f"period_error={period_error_pct:+.3f}% "
-            f"loop_pitch_error={equivalent_cents:+.3f}c "
+            f"loop_pitch_error={remaining_cents:+.3f}c "
             f"pitch=0x{pitch:04X} raw=0x{raw_pitch:X} "
             f"pitch_cents={cents:+.3f}"
         )
@@ -1048,6 +1166,12 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
         pcm = resolver.pcm_for(region)
         loop_start = region.loop_start - region.start if region.looping else None
         loop_end = region.loop_end - region.start if region.looping else None
+        if region.looping:
+            pcm, loop_start, loop_end = _prepare_frame_exact_loop(
+                pcm,
+                loop_start,
+                loop_end,
+            )
         adp = encode_mono_pcm16(pcm, region.sample_rate, loop_start, loop_end)
         index = len(sample_blobs)
         if index >= 0xFFFF:
