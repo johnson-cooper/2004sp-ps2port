@@ -969,15 +969,15 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
          */
         memset(&packet, 0, sizeof(packet));
         packet.words[0] = 0u;
-        packet.words[1] = PS2_MIDI_BANK_SAMPLE_BYTES;
+        packet.words[1] = 64u;
         memcpy(packet.sample,
                ps2_midi_bank_adpcm[0],
-               PS2_MIDI_BANK_SAMPLE_BYTES);
+               64u);
         (void)ps2_audio_rpc_status(
             &ps2_music_state.rpc,
             RS2MIDI_RPC_LOAD_SLOT,
             &packet,
-            RS2MIDI_RPC_HEADER_BYTES + PS2_MIDI_BANK_SAMPLE_BYTES);
+            RS2MIDI_RPC_HEADER_BYTES + 64u);
 
         ps2_music_state.bank_loaded = 1;
         ps2_music_state.base_pitch = ps2_midi_bank_base_pitch;
