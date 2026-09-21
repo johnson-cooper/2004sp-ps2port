@@ -27,6 +27,7 @@
 // without increasing the expensive World3D/model workload.
 static bool ps2_visibility_map[51][51];
 
+__attribute__((section(".ps2_runtime_text"), noinline))
 static int ps2_runtime_render_radius(void) {
     int radius = CONTROLLER_RENDER_RADIUS_DEFAULT;
     Client *c = ps2_crash_client;
@@ -38,6 +39,7 @@ static int ps2_runtime_render_radius(void) {
     return radius;
 }
 
+__attribute__((section(".ps2_runtime_text"), noinline))
 static void ps2_update_visibility_map(int sinEyeYaw, int cosEyeYaw, int drawRadius) {
     const int backMargin = PS2_RENDER_BACK_MARGIN << 16;
     const int sideMargin = PS2_RENDER_SIDE_MARGIN << 16;
