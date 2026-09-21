@@ -100,15 +100,14 @@
 // Dense-scene inactive-loc budget: preserve nearby scenery, cap farther inactive Location draws.
 #define PS2_INACTIVE_LOC_ALWAYS_RADIUS 5
 #define PS2_INACTIVE_LOC_DRAW_BUDGET 48
-// Remote-player LOD for crowded areas. Nearby players retain normal animated models; mid-distance
-// players reuse their cached appearance mesh through the existing lowmem path; very distant remote
-// players are not submitted to World3D. Network state and interaction state are still maintained.
-#define PS2_PLAYER_FULL_DETAIL_RADIUS 6
-#define PS2_PLAYER_RENDER_RADIUS 14
+// Aggressive real-PS2 remote-player LOD for crowded areas. Only very nearby ordinary players keep
+// per-frame animated model transforms; mid-distance players use the cached lowmem appearance mesh;
+// players beyond 8 tiles are not submitted to World3D. Network/player state remains fully tracked.
+#define PS2_PLAYER_FULL_DETAIL_RADIUS 2
+#define PS2_PLAYER_RENDER_RADIUS 8
 // Hard cap for ordinary remote-player submissions; interaction-important players bypass it.
-// Real-PS2 crowd baseline: 12 keeps the nearest players visible while sharply reducing
-// animated-model transform/sort/raster cost in dense areas.
-#define PS2_PLAYER_RENDER_BUDGET 12
+// Five nearest ordinary players gives dense hubs a predictable upper bound on player raster cost.
+#define PS2_PLAYER_RENDER_BUDGET 5
 // Edge-residency test: match static loc/model residency to the traversal-proven 80x80 terrain
 // bridge window. This should prevent buildings/fences from ending four tiles before terrain when
 // the player approaches a normal scene edge, at the cost of more resident static-world wrappers.
