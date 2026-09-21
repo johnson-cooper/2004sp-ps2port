@@ -100,6 +100,43 @@ static struct padButtonStatus padData;
 // the stock PCM-stream worker that previously interfered with networking.
 static bool ps2_audio_ready;
 
+/*
+ * Keep the SFX proof out of the normal client data/BSS layout. The PS2 linker
+ * already reserves this high-memory overlay for audio-only state/code; using
+ * the same sections avoids perturbing hardware-sensitive networking globals.
+ */
+#define PS2_SFX_CODE __attribute__((section(".ps2_audio_text"), noinline))
+#define PS2_SFX_RODATA __attribute__((section(".ps2_audio_rodata"), used, aligned(1)))
+#define PS2_SFX_STATE __attribute__((section(".ps2_audio_data"), used, aligned(64)))
+
+typedef struct Ps2SfxProofState {
+    uint32_t magic;
+    audsrv_adpcm_t anvil;
+    void *anvil_source;
+    uint8_t anvil_loaded;
+    uint8_t anvil_failed;
+} Ps2SfxProofState;
+
+static Ps2SfxProofState ps2_sfx_state PS2_SFX_STATE = {
+    .magic = 0x53465831u /* "SFX1" */
+};
+
+static const char ps2_sfx_path_fmt[] PS2_SFX_RODATA =
+    "%srom/ps2sfx/468.ps2a";
+static const char ps2_sfx_read_mode[] PS2_SFX_RODATA = "rb";
+static const char ps2_sfx_open_fail_fmt[] PS2_SFX_RODATA =
+    "audio: PS2 SFX id=468 open failed path=%s\n";
+static const char ps2_sfx_bad_fmt[] PS2_SFX_RODATA =
+    "audio: PS2 SFX id=468 invalid path=%s size=%ld\n";
+static const char ps2_sfx_alloc_fail_fmt[] PS2_SFX_RODATA =
+    "audio: PS2 SFX id=468 alloc failed size=%u\n";
+static const char ps2_sfx_load_fmt[] PS2_SFX_RODATA =
+    "audio: PS2 SFX id=468 load=%d bytes=%u pitch=%d loop=%d channels=%d\n";
+static const char ps2_sfx_play_fmt[] PS2_SFX_RODATA =
+    "audio: PS2 SFX id=468 play ch=%d\n";
+static const char ps2_sfx_play_fail_fmt[] PS2_SFX_RODATA =
+    "audio: PS2 SFX id=468 play failed=%d\n";
+
 static void SleepCb(s32 alarmId, u16 time, void *common)
 {
 	iWakeupThread(*(int *)(common));
@@ -1222,8 +1259,124 @@ void platform_set_wave_volume(int wavevol) {
     (void)wavevol;
 }
 
+static void ps2_sfx_play_wave_late(int8_t *src, int length) PS2_SFX_CODE;
+static void ps2_sfx_play_wave_late(int8_t *src, int length) {
+    (void)src;
+    (void)length;
+
+    /*
+     * Proof scope: only the real rev254 anvil_4 effect (synth id 468).
+     * client.c sets last_wave_id immediately before calling this platform hook.
+     * Nothing is loaded or touched during boot/login/network initialization.
+     */
+    if (!ps2_audio_ready ||
+        !ps2_crash_client ||
+        ps2_crash_client->last_wave_id != 468) {
+        return;
+    }
+
+    if (!ps2_sfx_state.anvil_loaded) {
+        if (ps2_sfx_state.anvil_failed) {
+            return;
+        }
+
+        char path[320];
+        snprintf(path, sizeof(path), ps2_sfx_path_fmt, ps2_cache_prefix());
+
+        FILE *file = fopen(path, ps2_sfx_read_mode);
+        if (!file) {
+            rs2_log(ps2_sfx_open_fail_fmt, path);
+            ps2_sfx_state.anvil_failed = 1;
+            return;
+        }
+
+        int seek_end = fseek(file, 0, SEEK_END);
+        long size_long = seek_end == 0 ? ftell(file) : -1;
+        int seek_start = 0;
+        if (size_long > 0) {
+            seek_start = fseek(file, 0, SEEK_SET);
+        }
+
+        if (seek_end != 0 ||
+            seek_start != 0 ||
+            size_long <= 16 ||
+            size_long > (128 * 1024)) {
+            rs2_log(ps2_sfx_bad_fmt, path, size_long);
+            fclose(file);
+            ps2_sfx_state.anvil_failed = 1;
+            return;
+        }
+
+        uint32_t size = (uint32_t)size_long;
+        unsigned char *buffer =
+            (unsigned char *)memalign(64, (size_t)((size + 63u) & ~63u));
+        if (!buffer) {
+            rs2_log(ps2_sfx_alloc_fail_fmt, (unsigned int)size);
+            fclose(file);
+            ps2_sfx_state.anvil_failed = 1;
+            return;
+        }
+
+        memset(buffer, 0, (size_t)((size + 63u) & ~63u));
+        size_t got = fread(buffer, 1, size, file);
+        fclose(file);
+
+        if (got != size ||
+            buffer[0] != 'A' ||
+            buffer[1] != 'P' ||
+            buffer[2] != 'C' ||
+            buffer[3] != 'M') {
+            rs2_log(ps2_sfx_bad_fmt, path, size_long);
+            free(buffer);
+            ps2_sfx_state.anvil_failed = 1;
+            return;
+        }
+
+        int load = audsrv_load_adpcm(
+            &ps2_sfx_state.anvil, buffer, (int)size);
+        rs2_log(
+            ps2_sfx_load_fmt,
+            load,
+            (unsigned int)size,
+            ps2_sfx_state.anvil.pitch,
+            ps2_sfx_state.anvil.loop,
+            ps2_sfx_state.anvil.channels);
+
+        if (load != AUDSRV_ERR_NOERROR) {
+            free(buffer);
+            ps2_sfx_state.anvil_failed = 1;
+            return;
+        }
+
+        /*
+         * Keep the EE source alive for this first hardware proof. audsrv has
+         * already copied the sample to its IOP/SPU-side store, but retaining a
+         * few KB removes lifetime assumptions from the acceptance test.
+         */
+        ps2_sfx_state.anvil_source = buffer;
+        ps2_sfx_state.anvil_loaded = 1;
+    }
+
+    int channel = audsrv_ch_play_adpcm(-1, &ps2_sfx_state.anvil);
+    if (channel >= 0) {
+        (void)audsrv_adpcm_set_volume_and_pan(channel, MAX_VOLUME, 0);
+        rs2_log(ps2_sfx_play_fmt, channel);
+    } else {
+        rs2_log(ps2_sfx_play_fail_fmt, channel);
+    }
+}
+
 void platform_play_wave(int8_t *src, int length) {
-    (void)src, (void)length;
+    /*
+     * Preserve the normal-text call site as a tiny tail jump. The real SFX
+     * proof code lives entirely in the existing high audio overlay.
+     */
+    __asm__ volatile(
+        ".set noreorder\n"
+        "j ps2_sfx_play_wave_late\n"
+        "nop\n"
+        ".set reorder\n");
+    __builtin_unreachable();
 }
 
 void platform_set_midi_volume(float midivol) {
