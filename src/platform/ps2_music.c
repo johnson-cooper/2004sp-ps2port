@@ -960,24 +960,85 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
 
     if (bank_ok) {
         /*
-         * Real-hardware A/B: duplicate one already-proven bank upload using
-         * the exact same 720-byte transfer size, RPC command, slot-0 address,
-         * and source sample bytes as the normal bank initialization above.
-         *
-         * This isolates transfer count from the previously failing 64-byte
-         * probe size. No new slot, no new SPU2 address, and no new sample data.
+         * Real-hardware A/B: keep the proven 64-byte slot-0 LOAD_SLOT, but
+         * source those bytes from Expanse sample 0 in the real .ps2m pack.
+         * No playback and no new SPU2 address/slot are introduced here.
          */
-        memset(&packet, 0, sizeof(packet));
-        packet.words[0] = 0u;
-        packet.words[1] = 64u;
-        memcpy(packet.sample,
-               ps2_midi_bank_adpcm[0],
-               64u);
-        (void)ps2_audio_rpc_status(
-            &ps2_music_state.rpc,
-            RS2MIDI_RPC_LOAD_SLOT,
-            &packet,
-            RS2MIDI_RPC_HEADER_BYTES + 64u);
+        uint8_t expanse_sample[64];
+        bool expanse_sample_ok = false;
+        char pack_path[320];
+        snprintf(pack_path, sizeof(pack_path),
+                 ps2_pack_probe_path_fmt, ps2_cache_prefix());
+
+        FILE *pack_file = fopen(pack_path, "rb");
+        if (pack_file) {
+            uint8_t header[40];
+            size_t got = fread(header, 1, sizeof(header), pack_file);
+
+            if (got == sizeof(header) &&
+                header[0] == 'R' &&
+                header[1] == 'S' &&
+                header[2] == 'M' &&
+                header[3] == '1' &&
+                ps2_pack_le16(header + 4) == 1u &&
+                ps2_pack_le16(header + 6) == 40u) {
+                uint32_t sample_count = ps2_pack_le32(header + 8);
+                uint32_t sample_table_offset = ps2_pack_le32(header + 16);
+                uint32_t event_table_offset = ps2_pack_le32(header + 20);
+                uint32_t data_offset = ps2_pack_le32(header + 24);
+                uint32_t data_size = ps2_pack_le32(header + 28);
+
+                if (sample_count != 0 &&
+                    sample_table_offset >= 40u &&
+                    event_table_offset >= sample_table_offset &&
+                    data_offset >= event_table_offset &&
+                    data_size != 0 &&
+                    sample_table_offset <= 0x7fffffffu) {
+                    uint8_t sample_rec[8];
+
+                    if (fseek(pack_file,
+                              (long)sample_table_offset,
+                              SEEK_SET) == 0 &&
+                        fread(sample_rec, 1, sizeof(sample_rec), pack_file) ==
+                            sizeof(sample_rec)) {
+                        uint32_t blob_offset = ps2_pack_le32(sample_rec);
+                        uint32_t blob_size = ps2_pack_le32(sample_rec + 4);
+                        uint32_t relative_offset =
+                            blob_offset >= data_offset ?
+                                blob_offset - data_offset : data_size;
+
+                        if (blob_size >= 80u &&
+                            blob_offset >= data_offset &&
+                            relative_offset <= data_size &&
+                            blob_size <= data_size - relative_offset &&
+                            blob_offset <= 0x7fffffffu - 16u &&
+                            fseek(pack_file,
+                                  (long)(blob_offset + 16u),
+                                  SEEK_SET) == 0 &&
+                            fread(expanse_sample,
+                                  1,
+                                  sizeof(expanse_sample),
+                                  pack_file) == sizeof(expanse_sample)) {
+                            expanse_sample_ok = true;
+                        }
+                    }
+                }
+            }
+
+            fclose(pack_file);
+        }
+
+        if (expanse_sample_ok) {
+            memset(&packet, 0, sizeof(packet));
+            packet.words[0] = 0u;
+            packet.words[1] = 64u;
+            memcpy(packet.sample, expanse_sample, sizeof(expanse_sample));
+            (void)ps2_audio_rpc_status(
+                &ps2_music_state.rpc,
+                RS2MIDI_RPC_LOAD_SLOT,
+                &packet,
+                RS2MIDI_RPC_HEADER_BYTES + 64u);
+        }
 
         ps2_music_state.bank_loaded = 1;
         ps2_music_state.base_pitch = ps2_midi_bank_base_pitch;
