@@ -1078,7 +1078,7 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
 
     uint32_t raw_size = blob_size - 16u;
     if ((raw_size & 0x0fu) != 0 ||
-        raw_size < 16u ||
+        raw_size < 64u ||
         fseek(file, (long)(blob_offset + 16u), SEEK_SET) != 0) {
         rs2_log(ps2_pack_sample_bad_fmt,
                 (unsigned int)blob_offset,
@@ -1088,52 +1088,56 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
     }
 
     /*
-     * Hardware A/B: upload exactly ONE 16-byte PS2 ADPCM frame.
+     * Hardware A/B: upload exactly FOUR 16-byte PS2 ADPCM frames (64 bytes).
      *
      * The previous full-sample probe connected successfully, then faulted a
      * few seconds later while repeatedly reading/uploading sample chunks.
      * Keep every other part of the proven header probe identical and reduce
-     * the new IOP interaction to one aligned minimum-size transfer.
+     * the new IOP interaction to one transfer matching LIBSD's observed
+     * 64-byte DMA granularity exactly.
      */
     Rs2MidiRpcPacket packet __attribute__((aligned(64)));
     memset(&packet, 0, sizeof(packet));
-    if (fread(packet.sample, 1, 16u, file) != 16u) {
-        rs2_log(ps2_pack_sample_read_fmt, 0u, 16u);
+    if (fread(packet.sample, 1, 64u, file) != 64u) {
+        rs2_log(ps2_pack_sample_read_fmt, 0u, 64u);
         fclose(file);
         return;
     }
     fclose(file);
 
     /*
-     * Route the exact same 16-byte transfer through the hardware-proven
-     * LOAD_SLOT handler. Slot 8 is probe-only and maps to 0x001e2000 in the
-     * companion IRX; normal music still uses slots 0..7.
+     * Use the hardware-proven LOAD_SLOT handler. Slot 8 is probe-only and
+     * maps to 0x001e2000 in the companion IRX; normal music uses slots 0..7.
+     *
+     * ROM LIBSD rounded the previous requested 16 bytes to an actual 64-byte
+     * transfer (xfer=64). Declare and provide all 64 bytes explicitly so the
+     * IOP sound DMA never consumes bytes beyond the SIF RPC payload.
      */
     packet.words[0] = PS2_PACK_PROBE_SLOT;
-    packet.words[1] = 16u;
+    packet.words[1] = 64u;
 
     rs2_log(ps2_pack_upload_before_fmt,
-            16u,
+            64u,
             (unsigned int)PS2_PACK_SPU_BASE);
 
     int32_t status = ps2_audio_rpc_status(
         &ps2_music_state.rpc,
         RS2MIDI_RPC_LOAD_SLOT,
         &packet,
-        RS2MIDI_RPC_HEADER_BYTES + 16);
+        RS2MIDI_RPC_HEADER_BYTES + 64);
     int32_t transfer = (int32_t)packet.words[2];
 
     if (status < 0) {
         rs2_log(ps2_pack_upload_fail_fmt,
                 0u,
-                16u,
+                64u,
                 (int)status,
                 (int)transfer);
         return;
     }
 
     rs2_log(ps2_pack_upload_ok_fmt,
-            16u,
+            64u,
             1u,
             (unsigned int)PS2_PACK_SPU_BASE,
             (int)transfer);
