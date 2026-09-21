@@ -182,6 +182,7 @@ typedef struct Ps2SfxRequest {
     uint8_t selected_loops;
     uint8_t resolved;
     uint8_t from_dat;
+    uint8_t used;
 } Ps2SfxRequest;
 
 typedef struct Ps2SfxState {
@@ -1950,19 +1951,20 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
 }
 
 
-PS2_AUDIO_STATIC void ps2_sfx_pop_request(void)
+PS2_AUDIO_STATIC void ps2_sfx_pop_request(uint32_t index)
 {
-    if (ps2_sfx_state.queue_count == 0u) {
+    if (index >= PS2_SFX_QUEUE_COUNT ||
+        !ps2_sfx_state.queue[index].used) {
         return;
     }
 
     memset(
-        &ps2_sfx_state.queue[ps2_sfx_state.queue_head],
+        &ps2_sfx_state.queue[index],
         0,
         sizeof(Ps2SfxRequest));
-    ps2_sfx_state.queue_head =
-        (uint8_t)((ps2_sfx_state.queue_head + 1u) % PS2_SFX_QUEUE_COUNT);
-    ps2_sfx_state.queue_count--;
+    if (ps2_sfx_state.queue_count != 0u) {
+        ps2_sfx_state.queue_count--;
+    }
 }
 
 PS2_AUDIO_STATIC bool ps2_sfx_resolve_request(Ps2SfxRequest *request)
@@ -2148,22 +2150,48 @@ PS2_AUDIO_STATIC void ps2_sfx_update(void)
         return;
     }
 
-    Ps2SfxRequest *request =
-        &ps2_sfx_state.queue[ps2_sfx_state.queue_head];
-
-    if (!request->resolved && !ps2_sfx_resolve_request(request)) {
-        rs2_log(
-            ps2_sfx_bad_fmt,
-            (unsigned int)request->id,
-            (unsigned int)request->loops);
-        ps2_sfx_pop_request();
-        return;
-    }
-
     uint64_t now = rs2_now();
-    if (now < request->due_ms) {
+    int chosen = -1;
+    uint64_t chosen_due = UINT64_MAX;
+    bool resolved_one = false;
+
+    /*
+     * Requests are scheduled independently. Resolve at most one new DAT entry
+     * per frame, then play at most one due sound, so USB work stays bounded.
+     */
+    for (uint32_t i = 0; i < PS2_SFX_QUEUE_COUNT; i++) {
+        Ps2SfxRequest *request = &ps2_sfx_state.queue[i];
+        if (!request->used) {
+            continue;
+        }
+
+        if (!request->resolved) {
+            if (resolved_one) {
+                continue;
+            }
+            resolved_one = true;
+            if (!ps2_sfx_resolve_request(request)) {
+                rs2_log(
+                    ps2_sfx_bad_fmt,
+                    (unsigned int)request->id,
+                    (unsigned int)request->loops);
+                ps2_sfx_pop_request(i);
+                continue;
+            }
+        }
+
+        if (request->due_ms <= now &&
+            request->due_ms < chosen_due) {
+            chosen = (int)i;
+            chosen_due = request->due_ms;
+        }
+    }
+
+    if (chosen < 0) {
         return;
     }
+
+    Ps2SfxRequest *request = &ps2_sfx_state.queue[chosen];
 
     /*
      * Match the legacy single-wave policy: a new effect only replaces the
@@ -2205,7 +2233,7 @@ PS2_AUDIO_STATIC void ps2_sfx_update(void)
         }
     }
 
-    ps2_sfx_pop_request();
+    ps2_sfx_pop_request((uint32_t)chosen);
 }
 
 void ps2_sfx_request(int id, int loops, int delay) PS2_AUDIO_CODE;
@@ -2229,16 +2257,24 @@ void ps2_sfx_request(int id, int loops, int delay)
         return;
     }
 
-    Ps2SfxRequest *request =
-        &ps2_sfx_state.queue[ps2_sfx_state.queue_tail];
+    int free_slot = -1;
+    for (uint32_t i = 0; i < PS2_SFX_QUEUE_COUNT; i++) {
+        if (!ps2_sfx_state.queue[i].used) {
+            free_slot = (int)i;
+            break;
+        }
+    }
+    if (free_slot < 0) {
+        return;
+    }
+
+    Ps2SfxRequest *request = &ps2_sfx_state.queue[free_slot];
     memset(request, 0, sizeof(*request));
     request->id = (uint16_t)id;
     request->loops = (uint8_t)loops;
     request->delay_ticks = (uint16_t)delay;
     request->request_ms = rs2_now();
-
-    ps2_sfx_state.queue_tail =
-        (uint8_t)((ps2_sfx_state.queue_tail + 1u) % PS2_SFX_QUEUE_COUNT);
+    request->used = 1;
     ps2_sfx_state.queue_count++;
 }
 
