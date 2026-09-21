@@ -101,3 +101,37 @@ pitch-bend and controller-derived volume/pan changes are resolved on the host. T
 instead of emitting a pack if the required ADPCM sample payload exceeds audsrv's usable SPU2 RAM.
 
 The generated `.ps2m` file is build output and should not be committed.
+
+
+## Full rev254 song/jingle catalog
+
+`build_all_rev254_packs.py` can use a local checkout of
+`LostCityRS/Content` branch `254` as a fallback MIDI source. The PS2
+repository's existing `rom/cache/client/songs` files always take priority;
+the external Content checkout is consulted only when a mapped MIDI is absent
+locally.
+
+Clone the matching Content branch once, outside this repository:
+
+```bat
+git clone --branch 254 --single-branch https://github.com/LostCityRS/Content.git LostCity-Content
+```
+
+Then build the complete mapped catalog:
+
+```bat
+py -3 tools\ps2_audio\build_all_rev254_packs.py ^
+  --soundfont "build\diagnostics\Older RuneScape.sf2" ^
+  --content "C:\path\to\LostCity-Content" ^
+  --keep-going
+```
+
+The fallback searches both `Content/songs` and `Content/jingles`. Generated
+packs are still written to `build/bin/rom/ps2audio`; no MIDI files are copied
+into this repository and neither `client.elf` nor `rs2midi.irx` is modified
+by this batch conversion step.
+
+The final summary reports how many successfully built packs came from the
+local PS2 repository versus the external Content checkout. `--keep-going`
+continues through per-song conversion failures so those can be diagnosed
+separately after the complete catalog has been attempted.
