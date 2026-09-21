@@ -122,6 +122,17 @@ SECTIONS {
         KEEP(*(.ps2_audio_text.*))
     } :audio
 
+    /*
+     * PS2-only gameplay/runtime helpers may live here when adding them to normal
+     * .text would move the hardware-sensitive client layout past its proven
+     * boundary. Keep this executable and inside the same high-memory PT_LOAD;
+     * unlike the audio state, these functions own no persistent high-memory data.
+     */
+    .ps2_runtime_text ALIGN(64) : {
+        KEEP(*(.ps2_runtime_text))
+        KEEP(*(.ps2_runtime_text.*))
+    } :audio
+
     .ps2_audio_rodata ALIGN(64) : {
         KEEP(*(.ps2_audio_rodata))
         KEEP(*(.ps2_audio_rodata.*))

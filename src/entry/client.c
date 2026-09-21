@@ -12248,6 +12248,9 @@ void pushProjectiles(Client *c) {
     }
 }
 
+#ifdef __PS2__
+__attribute__((section(".ps2_runtime_text"), noinline))
+#endif
 void pushNpcs(Client *c) {
 #ifdef __PS2__
     // Dense NPC hubs are the same worst-case software-raster shape as player crowds. Build a
