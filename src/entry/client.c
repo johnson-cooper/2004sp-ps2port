@@ -11045,35 +11045,7 @@ static void draw2DEntityElements(Client *c) {
         if (index == -1) {
             entity = &c->local_player->pathing_entity;
         } else if (index < c->player_count) {
-            int playerIndex = c->player_ids[index];
-            PlayerEntity *player = c->players[playerIndex];
-            if (!player) {
-                continue;
-            }
-            entity = &player->pathing_entity;
-#ifdef __PS2__
-            /*
-             * Don't project headicons/chat/hitbars for distant crowd members
-             * whose 3D model is already outside the PS2 player render radius.
-             * Preserve explicit hint/combat targets regardless of distance.
-             */
-            int dx = (entity->x >> 7) -
-                     (c->local_player->pathing_entity.x >> 7);
-            int dz = (entity->z >> 7) -
-                     (c->local_player->pathing_entity.z >> 7);
-            if (dx < 0) dx = -dx;
-            if (dz < 0) dz = -dz;
-            bool important =
-                (c->hint_type == 10 && c->hint_player == playerIndex) ||
-                c->local_player->pathing_entity.targetId ==
-                    playerIndex + 32768 ||
-                entity->targetId == LOCAL_PLAYER_INDEX + 32768;
-            if (!important &&
-                (dx > PS2_PLAYER_RENDER_RADIUS ||
-                 dz > PS2_PLAYER_RENDER_RADIUS)) {
-                continue;
-            }
-#endif
+            entity = &c->players[c->player_ids[index]]->pathing_entity;
         } else {
             entity = &c->npcs[c->npc_ids[index - c->player_count]]->pathing_entity;
         }
