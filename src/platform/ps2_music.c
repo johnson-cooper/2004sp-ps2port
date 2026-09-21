@@ -1169,12 +1169,13 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
 
     uint8_t header[PS2_PACK_HEADER_BYTES];
     size_t got = fread(header, 1, sizeof(header), file);
+    uint16_t pack_version = ps2_pack_le16(header + 4);
     if (got != sizeof(header) ||
         header[0] != 'R' ||
         header[1] != 'S' ||
         header[2] != 'M' ||
         header[3] != '1' ||
-        ps2_pack_le16(header + 4) != 1u ||
+        (pack_version != 1u && pack_version != 2u) ||
         ps2_pack_le16(header + 6) != PS2_PACK_HEADER_BYTES) {
         rs2_log(ps2_pack_bad_fmt, id, path);
         fclose(file);
@@ -1199,8 +1200,9 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
         sample_table_offset < PS2_PACK_HEADER_BYTES ||
         sample_count > (UINT32_MAX - sample_table_offset) /
                            PS2_PACK_SAMPLE_REC_BYTES ||
-        event_count > (UINT32_MAX - event_table_offset) /
-                          PS2_PACK_EVENT_BYTES) {
+        (pack_version == 1u &&
+         event_count > (UINT32_MAX - event_table_offset) /
+                           PS2_PACK_EVENT_BYTES)) {
         rs2_log(ps2_pack_bad_fmt, id, path);
         fclose(file);
         return -1;
@@ -1209,15 +1211,19 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
     uint32_t file_size = (uint32_t)file_size_long;
     uint32_t sample_table_end =
         sample_table_offset + sample_count * PS2_PACK_SAMPLE_REC_BYTES;
-    uint32_t event_table_end =
-        event_table_offset + event_count * PS2_PACK_EVENT_BYTES;
+    uint32_t event_table_end = data_offset;
+    if (pack_version == 1u) {
+        event_table_end =
+            event_table_offset + event_count * PS2_PACK_EVENT_BYTES;
+    }
 
     if (event_table_offset < sample_table_end ||
         data_offset < event_table_end ||
         sample_table_end > file_size ||
         event_table_end > file_size ||
         data_offset > file_size ||
-        data_size > file_size - data_offset) {
+        data_size > file_size - data_offset ||
+        (pack_version == 2u && data_offset <= event_table_offset)) {
         rs2_log(ps2_pack_bad_fmt, id, path);
         fclose(file);
         return -1;
@@ -1332,6 +1338,9 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
     ps2_pack_state.event_count = event_count;
     ps2_pack_state.duration_us = duration_us;
     ps2_pack_state.spu_bytes = spu_cursor - PS2_PACK_SPU_BASE;
+    ps2_pack_state.event_data_end = data_offset;
+    ps2_pack_state.event_stream_pos = event_table_offset;
+    ps2_pack_state.pack_version = (uint8_t)pack_version;
 
     if (!ps2_pack_reset_timeline()) {
         rs2_log(ps2_pack_bad_fmt, id, path);
