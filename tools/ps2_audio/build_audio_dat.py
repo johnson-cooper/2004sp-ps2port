@@ -297,6 +297,7 @@ def main() -> None:
 
     sfx_payloads: dict[tuple[int, int], tuple[bytes, int, int]] = {}
     failures: list[str] = []
+    optional_skips: list[str] = []
     variants_built = 0
 
     ids = sorted(synth_map)
@@ -322,14 +323,20 @@ def main() -> None:
                 )
                 variants_built += 1
             except Exception as exc:
-                failures.append(
-                    f"{synth_id}={name} loops={loops}: {exc}"
-                )
+                message = f"{synth_id}={name} loops={loops}: {exc}"
+                if loops in (0, 1):
+                    failures.append(message)
+                else:
+                    # Keep the complete base catalog buildable even if one
+                    # unusually long repeated-loop variant exceeds the fixed
+                    # 120 KiB SFX SPU2 window. Runtime falls back to loop 1/0.
+                    optional_skips.append(message)
 
         if number % 25 == 0 or number == len(ids):
             print(
                 f"SFX {number:4d}/{len(ids)}  "
-                f"variants={variants_built} failures={len(failures)}"
+                f"variants={variants_built} failures={len(failures)} "
+                f"optional-skips={len(optional_skips)}"
             )
 
     if failures:
@@ -442,10 +449,22 @@ def main() -> None:
         f"SFX variants built:  {variants_built}",
         f"Unique SFX blobs:    {len(dedupe)}",
         f"SFX dedupe saving:   {dedupe_saved:,} bytes",
+        f"Optional variants skipped: {len(optional_skips)}",
         f"Dynamic loop values: {sorted(dynamic_loops)}",
-        f"Unresolved loop args:{unresolved}",
+        f"Unresolved loop args: {unresolved}",
         f"Payload writes:      {payload_count}",
     ]
+    if file_size > 0x7FFFFFFF:
+        output.unlink(missing_ok=True)
+        raise SystemExit(
+            f"audio.dat is {file_size:,} bytes; PS2 runtime requires < 2 GiB"
+        )
+
+    if optional_skips:
+        report_lines.append("")
+        report_lines.append("Optional loop variants skipped (runtime falls back to 1/0):")
+        report_lines.extend(f"  {line}" for line in optional_skips)
+
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
 
