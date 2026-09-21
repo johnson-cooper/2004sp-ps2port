@@ -36,9 +36,9 @@
 #define RS2MIDI_RPC_HEADER_BYTES  64u
 #define RS2MIDI_MAX_SAMPLE_BYTES  800u
 #define RS2MIDI_MAX_IRX_BYTES     (128u * 1024u)
-#define PS2_PACK_SPU_BASE          0x001e2000u
-#define PS2_PACK_SPU_LIMIT         0x001e2400u
-#define PS2_PACK_PROBE_SLOT        8u
+#define PS2_PACK_SPU_BASE          0x001e0000u
+#define PS2_PACK_SPU_LIMIT         0x001e0400u
+#define PS2_PACK_PROBE_SLOT        0u
 
 #define PS2_MIDI_ARCHIVE           2
 #define PS2_MIDI_MAX_TRACKS        32
@@ -193,7 +193,7 @@ static const char ps2_pack_upload_fail_fmt[] PS2_AUDIO_RODATA =
 static const char ps2_pack_upload_ok_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M probe id=106 sample0 upload ok raw=%u chunks=%u addr=0x%08x xfer=%d\n";
 static const char ps2_pack_upload_before_fmt[] PS2_AUDIO_RODATA =
-    "audio: PS2M probe id=106 before slot8 RPC bytes=%u addr=0x%08x\n";
+    "audio: PS2M probe id=106 before proven-slot RPC bytes=%u addr=0x%08x\n";
 
 PS2_AUDIO_STATIC uint16_t ps2_midi_be16(const uint8_t *p)
 {
@@ -1106,8 +1106,9 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
     fclose(file);
 
     /*
-     * Use the hardware-proven LOAD_SLOT handler. Slot 8 is probe-only and
-     * maps to 0x001e2000 in the companion IRX; normal music uses slots 0..7.
+     * Use the hardware-proven LOAD_SLOT handler and the exact slot-0 address
+     * (0x001e0000) already proven by the normal bank initialization. This
+     * temporarily overwrites only the first 64 bytes of slot 0 for the A/B.
      *
      * ROM LIBSD rounded the previous requested 16 bytes to an actual 64-byte
      * transfer (xfer=64). Declare and provide all 64 bytes explicitly so the
