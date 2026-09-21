@@ -142,9 +142,6 @@ typedef struct Ps2PackState {
     uint64_t next_event_us;
     uint64_t last_ms;
     uint64_t duration_us;
-    uint32_t event_data_end;
-    uint32_t event_stream_pos;
-    uint8_t pack_version;
 } Ps2PackState;
 
 /*
@@ -228,7 +225,7 @@ static const char ps2_pack_path_fmt[] PS2_AUDIO_RODATA =
 static const char ps2_pack_bad_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M id=%d unavailable/invalid path=%s\n";
 static const char ps2_pack_start_fmt[] PS2_AUDIO_RODATA =
-    "audio: PS2M v%u id=%d samples=%u events=%u spu=%u loop=%u accurate=1\n";
+    "audio: PS2M id=%d samples=%u events=%u spu=%u loop=%u accurate=1\n";
 static const char ps2_pack_fallback_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M id=%d unavailable/invalid; using compact MIDI fallback\n";
 
@@ -740,9 +737,6 @@ PS2_AUDIO_STATIC void ps2_pack_clear_stream(void)
     ps2_pack_state.next_event_us = 0;
     ps2_pack_state.last_ms = 0;
     ps2_pack_state.duration_us = 0;
-    ps2_pack_state.event_data_end = 0;
-    ps2_pack_state.event_stream_pos = 0;
-    ps2_pack_state.pack_version = 0;
     memset(ps2_pack_state.sustain, 0, sizeof(ps2_pack_state.sustain));
     memset(ps2_pack_state.voice_sample_index, 0xff,
            sizeof(ps2_pack_state.voice_sample_index));
@@ -882,8 +876,7 @@ PS2_AUDIO_STATIC void ps2_pack_update_pitch(
         if (!slot->active ||
             slot->channel != channel ||
             slot->key != key ||
-            (sample_index != 0xffffu &&
-             ps2_pack_state.voice_sample_index[voice] != sample_index)) {
+            ps2_pack_state.voice_sample_index[voice] != sample_index) {
             continue;
         }
 
@@ -912,8 +905,7 @@ PS2_AUDIO_STATIC void ps2_pack_update_mix(
         if (!slot->active ||
             slot->channel != channel ||
             slot->key != key ||
-            (sample_index != 0xffffu &&
-             ps2_pack_state.voice_sample_index[voice] != sample_index)) {
+            ps2_pack_state.voice_sample_index[voice] != sample_index) {
             continue;
         }
 
@@ -925,147 +917,6 @@ PS2_AUDIO_STATIC void ps2_pack_update_mix(
         (void)ps2_audio_rpc_status(
             &ps2_music_state.rpc, RS2MIDI_RPC_SET_MIX, &packet, 12);
     }
-}
-
-PS2_AUDIO_STATIC bool ps2_pack_stream_read(void *dst, uint32_t size)
-{
-    if (!ps2_pack_state.file ||
-        ps2_pack_state.event_stream_pos > ps2_pack_state.event_data_end ||
-        size > ps2_pack_state.event_data_end -
-                   ps2_pack_state.event_stream_pos) {
-        return false;
-    }
-
-    if (fread(dst, 1, size, ps2_pack_state.file) != size) {
-        return false;
-    }
-
-    ps2_pack_state.event_stream_pos += size;
-    return true;
-}
-
-PS2_AUDIO_STATIC bool ps2_pack_read_uleb32(uint32_t *value)
-{
-    uint32_t result = 0;
-    uint32_t shift = 0;
-
-    for (int i = 0; i < 5; i++) {
-        uint8_t byte = 0;
-        if (!ps2_pack_stream_read(&byte, 1)) {
-            return false;
-        }
-
-        if (i == 4 && (byte & 0xf0u) != 0) {
-            return false;
-        }
-
-        result |= ((uint32_t)(byte & 0x7fu)) << shift;
-        if ((byte & 0x80u) == 0) {
-            *value = result;
-            return true;
-        }
-        shift += 7;
-    }
-
-    return false;
-}
-
-PS2_AUDIO_STATIC void ps2_pack_store_le32(uint8_t *p, uint32_t value)
-{
-    p[0] = (uint8_t)(value & 0xffu);
-    p[1] = (uint8_t)((value >> 8) & 0xffu);
-    p[2] = (uint8_t)((value >> 16) & 0xffu);
-    p[3] = (uint8_t)((value >> 24) & 0xffu);
-}
-
-PS2_AUDIO_STATIC bool ps2_pack_read_event(void)
-{
-    if (ps2_pack_state.pack_version == 1u) {
-        if (!ps2_pack_stream_read(
-                ps2_pack_state.current_event,
-                PS2_PACK_EVENT_BYTES)) {
-            return false;
-        }
-        return true;
-    }
-
-    if (ps2_pack_state.pack_version != 2u) {
-        return false;
-    }
-
-    uint32_t delta = 0;
-    uint8_t tag = 0;
-    if (!ps2_pack_read_uleb32(&delta) ||
-        !ps2_pack_stream_read(&tag, 1)) {
-        return false;
-    }
-
-    uint8_t kind = (uint8_t)(tag >> 4);
-    uint8_t channel = tag & 0x0fu;
-    if (kind > PS2_PACK_OUT_MIX) {
-        return false;
-    }
-
-    memset(ps2_pack_state.current_event, 0, PS2_PACK_EVENT_BYTES);
-    ps2_pack_store_le32(ps2_pack_state.current_event, delta);
-    ps2_pack_state.current_event[4] = kind;
-    ps2_pack_state.current_event[5] = channel;
-    ps2_pack_state.current_event[8] = 0xffu;
-    ps2_pack_state.current_event[9] = 0xffu;
-
-    uint8_t payload[7];
-
-    if (kind == PS2_PACK_OUT_WAIT) {
-        return true;
-    }
-
-    if (kind == PS2_PACK_OUT_NOTE_ON) {
-        if (!ps2_pack_stream_read(payload, 7)) {
-            return false;
-        }
-        ps2_pack_state.current_event[6] = payload[0];
-        ps2_pack_state.current_event[8] = payload[1];
-        ps2_pack_state.current_event[9] = payload[2];
-        ps2_pack_state.current_event[10] = payload[3];
-        ps2_pack_state.current_event[11] = payload[4];
-        ps2_pack_state.current_event[12] = payload[5];
-        ps2_pack_state.current_event[13] = payload[6];
-        return true;
-    }
-
-    if (kind == PS2_PACK_OUT_NOTE_OFF) {
-        if (!ps2_pack_stream_read(payload, 1)) {
-            return false;
-        }
-        ps2_pack_state.current_event[6] = payload[0];
-        return true;
-    }
-
-    if (kind == PS2_PACK_OUT_SUSTAIN) {
-        if (!ps2_pack_stream_read(payload, 1)) {
-            return false;
-        }
-        ps2_pack_state.current_event[7] = payload[0];
-        return true;
-    }
-
-    if (kind == PS2_PACK_OUT_PITCH) {
-        if (!ps2_pack_stream_read(payload, 3)) {
-            return false;
-        }
-        ps2_pack_state.current_event[6] = payload[0];
-        ps2_pack_state.current_event[10] = payload[1];
-        ps2_pack_state.current_event[11] = payload[2];
-        return true;
-    }
-
-    if (!ps2_pack_stream_read(payload, 3)) {
-        return false;
-    }
-    ps2_pack_state.current_event[6] = payload[0];
-    ps2_pack_state.current_event[12] = payload[1];
-    ps2_pack_state.current_event[13] = payload[2];
-    return true;
 }
 
 PS2_AUDIO_STATIC void ps2_pack_process_event(const uint8_t *event)
@@ -1130,14 +981,11 @@ PS2_AUDIO_STATIC bool ps2_pack_reset_timeline(void)
 
     if (fseek(ps2_pack_state.file,
               (long)ps2_pack_state.event_table_offset,
-              SEEK_SET) != 0) {
-        ps2_pack_state.event_valid = 0;
-        return false;
-    }
-
-    ps2_pack_state.event_stream_pos =
-        ps2_pack_state.event_table_offset;
-    if (!ps2_pack_read_event()) {
+              SEEK_SET) != 0 ||
+        fread(ps2_pack_state.current_event,
+              1,
+              PS2_PACK_EVENT_BYTES,
+              ps2_pack_state.file) != PS2_PACK_EVENT_BYTES) {
         ps2_pack_state.event_valid = 0;
         return false;
     }
@@ -1163,18 +1011,12 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
 
     uint8_t header[PS2_PACK_HEADER_BYTES];
     size_t got = fread(header, 1, sizeof(header), file);
-    if (got != sizeof(header)) {
-        rs2_log(ps2_pack_bad_fmt, id, path);
-        fclose(file);
-        return -1;
-    }
-
-    uint16_t pack_version = ps2_pack_le16(header + 4);
-    if (header[0] != 'R' ||
+    if (got != sizeof(header) ||
+        header[0] != 'R' ||
         header[1] != 'S' ||
         header[2] != 'M' ||
         header[3] != '1' ||
-        (pack_version != 1u && pack_version != 2u) ||
+        ps2_pack_le16(header + 4) != 1u ||
         ps2_pack_le16(header + 6) != PS2_PACK_HEADER_BYTES) {
         rs2_log(ps2_pack_bad_fmt, id, path);
         fclose(file);
@@ -1199,9 +1041,8 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
         sample_table_offset < PS2_PACK_HEADER_BYTES ||
         sample_count > (UINT32_MAX - sample_table_offset) /
                            PS2_PACK_SAMPLE_REC_BYTES ||
-        (pack_version == 1u &&
-         event_count > (UINT32_MAX - event_table_offset) /
-                           PS2_PACK_EVENT_BYTES)) {
+        event_count > (UINT32_MAX - event_table_offset) /
+                          PS2_PACK_EVENT_BYTES) {
         rs2_log(ps2_pack_bad_fmt, id, path);
         fclose(file);
         return -1;
@@ -1210,19 +1051,15 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
     uint32_t file_size = (uint32_t)file_size_long;
     uint32_t sample_table_end =
         sample_table_offset + sample_count * PS2_PACK_SAMPLE_REC_BYTES;
-    uint32_t event_table_end = data_offset;
-    if (pack_version == 1u) {
-        event_table_end =
-            event_table_offset + event_count * PS2_PACK_EVENT_BYTES;
-    }
+    uint32_t event_table_end =
+        event_table_offset + event_count * PS2_PACK_EVENT_BYTES;
 
     if (event_table_offset < sample_table_end ||
         data_offset < event_table_end ||
         sample_table_end > file_size ||
         event_table_end > file_size ||
         data_offset > file_size ||
-        data_size > file_size - data_offset ||
-        (pack_version == 2u && data_offset <= event_table_offset)) {
+        data_size > file_size - data_offset) {
         rs2_log(ps2_pack_bad_fmt, id, path);
         fclose(file);
         return -1;
@@ -1337,9 +1174,6 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
     ps2_pack_state.event_count = event_count;
     ps2_pack_state.duration_us = duration_us;
     ps2_pack_state.spu_bytes = spu_cursor - PS2_PACK_SPU_BASE;
-    ps2_pack_state.event_data_end = data_offset;
-    ps2_pack_state.event_stream_pos = event_table_offset;
-    ps2_pack_state.pack_version = (uint8_t)pack_version;
 
     if (!ps2_pack_reset_timeline()) {
         rs2_log(ps2_pack_bad_fmt, id, path);
@@ -1353,7 +1187,6 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
     ps2_music_state.active_midi_id = id;
 
     rs2_log(ps2_pack_start_fmt,
-            (unsigned int)pack_version,
             id,
             (unsigned int)sample_count,
             (unsigned int)event_count,
@@ -1399,7 +1232,10 @@ PS2_AUDIO_STATIC void ps2_pack_update_song(void)
         events++;
 
         if (ps2_pack_state.event_index < ps2_pack_state.event_count) {
-            if (!ps2_pack_read_event()) {
+            if (fread(ps2_pack_state.current_event,
+                      1,
+                      PS2_PACK_EVENT_BYTES,
+                      ps2_pack_state.file) != PS2_PACK_EVENT_BYTES) {
                 ps2_pack_finish_song();
                 return;
             }
