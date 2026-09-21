@@ -24,8 +24,6 @@
  *
  * This is deliberately a tiny proof, not the final music allocator.
  */
-#define RS2MIDI_PACK_SPU_BASE      0x00100000u
-#define RS2MIDI_PACK_SPU_LIMIT     0x001e0000u
 #define RS2MIDI_SPU_ADDR           0x001e0000u
 #define RS2MIDI_SAMPLE_STRIDE      0x00000400u
 #define RS2MIDI_SAMPLE_SLOTS       9u
@@ -52,9 +50,6 @@ static u32 rs2midi_sample_loaded_mask;
 
 static u32 rs2midi_sample_addr(u32 slot)
 {
-    if (slot == RS2MIDI_PACK_PROBE_SLOT) {
-        return RS2MIDI_PACK_SPU_BASE;
-    }
     return RS2MIDI_SPU_ADDR + slot * RS2MIDI_SAMPLE_STRIDE;
 }
 

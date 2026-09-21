@@ -36,8 +36,8 @@
 #define RS2MIDI_RPC_HEADER_BYTES  64u
 #define RS2MIDI_MAX_SAMPLE_BYTES  800u
 #define RS2MIDI_MAX_IRX_BYTES     (128u * 1024u)
-#define PS2_PACK_SPU_BASE          0x00100000u
-#define PS2_PACK_SPU_LIMIT         0x001e0000u
+#define PS2_PACK_SPU_BASE          0x001e2000u
+#define PS2_PACK_SPU_LIMIT         0x001e2400u
 #define PS2_PACK_PROBE_SLOT        8u
 
 #define PS2_MIDI_ARCHIVE           2
@@ -1105,7 +1105,7 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
 
     /*
      * Route the exact same 16-byte transfer through the hardware-proven
-     * LOAD_SLOT handler. Slot 8 is probe-only and maps to 0x00100000 in the
+     * LOAD_SLOT handler. Slot 8 is probe-only and maps to 0x001e2000 in the
      * companion IRX; normal music still uses slots 0..7.
      */
     packet.words[0] = PS2_PACK_PROBE_SLOT;
