@@ -78,14 +78,17 @@ SECTIONS {
         *(.gnu.linkonce.r*)
 
         /*
-         * Hardware-good normal rodata ends exactly at 0x00200a60. New PS2-only
-         * strings must live in the high-memory runtime overlay instead of moving
-         * the orphan .MIPS.abiflags and, through alignment, .sdata/.bss.
+         * Preserve the exact hardware-good .rodata extent. If real content grows
+         * past this address, ld will reject the attempted backwards move instead
+         * of shifting .MIPS.abiflags/.sdata/.bss.
          */
-        ASSERT(. <= 0x00200a60,
-               "normal .rodata exceeded hardware-good PS2 layout budget")
         . = 0x00200a60;
     }
+
+    ASSERT(ADDR(.rodata) == 0x001f3e80,
+           "normal .rodata start moved from hardware-good PS2 layout")
+    ASSERT(SIZEOF(.rodata) == 0x0000cbe0,
+           "normal .rodata size moved from hardware-good PS2 layout")
 
     .rdata ALIGN(128): { *(.rdata) }
     .gcc_except_table ALIGN(128): { *(.gcc_except_table) }
