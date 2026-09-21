@@ -708,6 +708,8 @@ PS2_AUDIO_STATIC bool ps2_midi_any_track_active(void)
     return false;
 }
 
+PS2_AUDIO_STATIC void ps2_midi_stop_song(void);
+
 PS2_AUDIO_STATIC void ps2_pack_mix_volumes(
     uint8_t volume,
     int8_t pan,

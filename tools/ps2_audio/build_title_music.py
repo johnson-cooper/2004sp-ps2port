@@ -47,8 +47,12 @@ OUT_SUSTAIN = 3
 OUT_PITCH = 4
 OUT_MIX = 5
 
-SPU2_BYTES = 2 * 1024 * 1024
-AUDSRV_FIRST_SAMPLE = 0x5010
+# Runtime rs2midi reserves 0x100000..0x1dffff for accurate per-song packs.
+# The compact fallback bank starts at 0x1e0000, while frozen audsrv remains
+# below the pack region.
+PACK_SPU_BASE = 0x00100000
+PACK_SPU_LIMIT = 0x001E0000
+PACK_SPU_BYTES = PACK_SPU_LIMIT - PACK_SPU_BASE
 
 GEN_START = 0
 GEN_END = 1
@@ -541,11 +545,12 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
                 active.pop((channel, note), None)
 
     spu_payload = sum(max(0, len(blob) - 16) for blob in sample_blobs)
-    spu_budget = SPU2_BYTES - AUDSRV_FIRST_SAMPLE
+    spu_budget = PACK_SPU_BYTES
     if spu_payload > spu_budget:
         raise ValueError(
-            f"title-song sample set needs {spu_payload:,} SPU2 bytes; "
-            f"audsrv budget is {spu_budget:,}. A residency cache is required."
+            f"song sample set needs {spu_payload:,} SPU2 bytes; "
+            f"accurate-pack region is {spu_budget:,}. "
+            "A residency/cache split is required for this song."
         )
 
     packed_events = []
@@ -599,7 +604,7 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
     print(f"Duration:         {duration_us / 1_000_000.0:.3f} s")
     print(f"ADPCM samples:    {len(sample_blobs)}")
     print(f"Sequence events:  {len(packed_events)}")
-    print(f"SPU2 sample data: {spu_payload:,} / {spu_budget:,} bytes")
+    print(f"SPU2 pack data:   {spu_payload:,} / {spu_budget:,} bytes")
     print(f"Pack size:        {output_path.stat().st_size:,} bytes")
     print(f"Wrote:            {output_path}")
 
