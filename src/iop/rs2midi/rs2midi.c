@@ -64,6 +64,16 @@ static int rs2midi_valid_pack_range(u32 addr, u32 size)
     if (size == 0 || (addr & 0x0f) != 0 || (size & 0x0f) != 0) {
         return 0;
     }
+
+    /*
+     * Real-hardware A/B only: allow LOAD_ABS to address the exact compact
+     * slot-0 range already proven safe through LOAD_SLOT. This keeps the SPU2
+     * destination identical while comparing only the RPC upload primitive.
+     */
+    if (addr == RS2MIDI_SPU_ADDR && size <= RS2MIDI_SAMPLE_STRIDE) {
+        return 1;
+    }
+
     if (addr < RS2MIDI_PACK_SPU_BASE || addr >= RS2MIDI_PACK_SPU_LIMIT) {
         return 0;
     }

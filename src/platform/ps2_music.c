@@ -29,6 +29,7 @@
 #define RS2MIDI_RPC_KEY_OFF    4
 #define RS2MIDI_RPC_GET_STATE  5
 #define RS2MIDI_RPC_LOAD_SLOT  6
+#define RS2MIDI_RPC_LOAD_ABS   7
 
 #define RS2MIDI_PONG 0x52533250u
 
@@ -1030,12 +1031,12 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
 
         if (expanse_sample_ok) {
             memset(&packet, 0, sizeof(packet));
-            packet.words[0] = 0u;
+            packet.words[0] = 0x001e0000u;
             packet.words[1] = 64u;
             memcpy(packet.sample, expanse_sample, sizeof(expanse_sample));
             (void)ps2_audio_rpc_status(
                 &ps2_music_state.rpc,
-                RS2MIDI_RPC_LOAD_SLOT,
+                RS2MIDI_RPC_LOAD_ABS,
                 &packet,
                 RS2MIDI_RPC_HEADER_BYTES + 64u);
         }
