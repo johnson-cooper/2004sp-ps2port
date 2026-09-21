@@ -1321,11 +1321,53 @@ PS2_AUDIO_STATIC bool ps2_pack_reset_timeline(void)
 PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
 {
     char path[320];
-    snprintf(path, sizeof(path), ps2_pack_path_fmt, ps2_cache_prefix(), id);
+    FILE *file = NULL;
+    uint32_t pack_base = 0;
+    uint32_t pack_size = 0;
 
-    FILE *file = fopen(path, "rb");
+    /*
+     * Prefer the unified container. The entry payload is the original PS2M v1
+     * byte stream unchanged; only its file base is different.
+     */
+    file = ps2_audio_dat_open(path, sizeof(path));
+    if (file) {
+        if (!ps2_audio_dat_music_entry(
+                file, id, &pack_base, &pack_size)) {
+            fclose(file);
+            file = NULL;
+        }
+    }
+
+    /* Loose packs remain a debugging/backward-compatibility fallback. */
     if (!file) {
-        return 0;
+        snprintf(
+            path,
+            sizeof(path),
+            ps2_pack_path_fmt,
+            ps2_cache_prefix(),
+            id);
+        file = fopen(path, ps2_audio_read_mode);
+        if (!file) {
+            return 0;
+        }
+
+        int seek_end = fseek(file, 0, SEEK_END);
+        long loose_size = seek_end == 0 ? ftell(file) : -1;
+        if (loose_size <= 0 || loose_size > 0x7fffffffL) {
+            fclose(file);
+            return -1;
+        }
+        pack_base = 0;
+        pack_size = (uint32_t)loose_size;
+    }
+
+    if (pack_base > 0x7fffffffu ||
+        pack_size < PS2_PACK_HEADER_BYTES ||
+        pack_size > 0x7fffffffu - pack_base ||
+        fseek(file, (long)pack_base, SEEK_SET) != 0) {
+        rs2_log(ps2_pack_bad_fmt, id, path);
+        fclose(file);
+        return -1;
     }
 
     uint8_t header[PS2_PACK_HEADER_BYTES];
@@ -1350,10 +1392,7 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
     uint32_t data_size = ps2_pack_le32(header + 28);
     uint64_t duration_us = ps2_pack_le64(header + 32);
 
-    int seek_end = fseek(file, 0, SEEK_END);
-    long file_size_long = seek_end == 0 ? ftell(file) : -1;
-    if (file_size_long <= 0 ||
-        sample_count == 0 ||
+    if (sample_count == 0 ||
         sample_count > PS2_PACK_MAX_SAMPLES ||
         event_count == 0 ||
         event_count > PS2_PACK_MAX_EVENTS ||
@@ -1367,7 +1406,6 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
         return -1;
     }
 
-    uint32_t file_size = (uint32_t)file_size_long;
     uint32_t sample_table_end =
         sample_table_offset + sample_count * PS2_PACK_SAMPLE_REC_BYTES;
     uint32_t event_table_end =
@@ -1375,10 +1413,10 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
 
     if (event_table_offset < sample_table_end ||
         data_offset < event_table_end ||
-        sample_table_end > file_size ||
-        event_table_end > file_size ||
-        data_offset > file_size ||
-        data_size > file_size - data_offset) {
+        sample_table_end > pack_size ||
+        event_table_end > pack_size ||
+        data_offset > pack_size ||
+        data_size > pack_size - data_offset) {
         rs2_log(ps2_pack_bad_fmt, id, path);
         fclose(file);
         return -1;
@@ -1393,8 +1431,9 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
         uint32_t rec_pos =
             sample_table_offset + i * PS2_PACK_SAMPLE_REC_BYTES;
 
-        if (rec_pos > 0x7fffffffu ||
-            fseek(file, (long)rec_pos, SEEK_SET) != 0 ||
+        if (rec_pos > pack_size ||
+            pack_base > 0x7fffffffu - rec_pos ||
+            fseek(file, (long)(pack_base + rec_pos), SEEK_SET) != 0 ||
             fread(rec, 1, sizeof(rec), file) != sizeof(rec)) {
             upload_ok = false;
             break;
@@ -1404,8 +1443,8 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
         uint32_t blob_size = ps2_pack_le32(rec + 4);
         if (blob_size <= 16u ||
             blob_offset < data_offset ||
-            blob_offset > file_size ||
-            blob_size > file_size - blob_offset) {
+            blob_offset > pack_size ||
+            blob_size > pack_size - blob_offset) {
             upload_ok = false;
             break;
         }
@@ -1425,14 +1464,14 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
         uint32_t padded_size = (raw_size + 63u) & ~63u;
         if (spu_cursor > PS2_PACK_SPU_LIMIT ||
             padded_size > PS2_PACK_SPU_LIMIT - spu_cursor ||
-            blob_offset > 0x7fffffffu) {
+            pack_base > 0x7fffffffu - blob_offset) {
             upload_ok = false;
             break;
         }
 
         ps2_pack_state.sample_addr[i] = spu_cursor;
 
-        if (fseek(file, (long)blob_offset, SEEK_SET) != 0) {
+        if (fseek(file, (long)(pack_base + blob_offset), SEEK_SET) != 0) {
             upload_ok = false;
             break;
         }
@@ -1481,7 +1520,8 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
         spu_cursor += padded_size;
     }
 
-    if (!upload_ok) {
+    if (!upload_ok ||
+        pack_base > 0x7fffffffu - event_table_offset) {
         rs2_log(ps2_pack_bad_fmt, id, path);
         fclose(file);
         return -1;
@@ -1489,7 +1529,7 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
 
     ps2_pack_state.file = file;
     ps2_pack_state.sample_count = (uint16_t)sample_count;
-    ps2_pack_state.event_table_offset = event_table_offset;
+    ps2_pack_state.event_table_offset = pack_base + event_table_offset;
     ps2_pack_state.event_count = event_count;
     ps2_pack_state.duration_us = duration_us;
     ps2_pack_state.spu_bytes = spu_cursor - PS2_PACK_SPU_BASE;
