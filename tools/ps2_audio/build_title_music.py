@@ -123,6 +123,8 @@ class Region:
     scale_tuning: int
     attenuation: int
     pan: int
+    keynum: int | None
+    fixed_velocity: int | None
 
 
 @dataclass
@@ -184,59 +186,123 @@ class SoundFontResolver:
         return global_zone, locals_
 
     @staticmethod
-    def _combined_values(zone_groups):
-        key_lo, key_hi = 0, 127
-        vel_lo, vel_hi = 0, 127
-        sums = {
-            GEN_START: 0,
-            GEN_END: 0,
-            GEN_LOOP_START: 0,
-            GEN_LOOP_END: 0,
-            GEN_START_COARSE: 0,
-            GEN_END_COARSE: 0,
-            GEN_LOOP_START_COARSE: 0,
-            GEN_LOOP_END_COARSE: 0,
-            GEN_PAN: 0,
-            GEN_ATTENUATION: 0,
-            GEN_COARSE_TUNE: 0,
-            GEN_FINE_TUNE: 0,
-        }
-        scale_values = []
-        root_key = None
-        sample_modes = 0
-        keynum = None
-        fixed_velocity = None
+    def _zone_map(global_zone, local_zone):
+        """Resolve one SF2 level: local generators replace matching globals."""
+        values = {}
+        for op, amount in global_zone:
+            values[op] = amount
+        for op, amount in local_zone:
+            values[op] = amount
+        return values
 
-        for gens in zone_groups:
-            for op, amount in gens:
-                if op == GEN_KEY_RANGE:
-                    lo, hi = _range(amount)
-                    key_lo, key_hi = max(key_lo, lo), min(key_hi, hi)
-                elif op == GEN_VEL_RANGE:
-                    lo, hi = _range(amount)
-                    vel_lo, vel_hi = max(vel_lo, lo), min(vel_hi, hi)
-                elif op in sums:
-                    sums[op] += _s16(amount)
-                elif op == GEN_SCALE_TUNING:
-                    scale_values.append(_s16(amount))
-                elif op == GEN_ROOT_KEY:
-                    root_key = amount & 0xFF
-                elif op == GEN_SAMPLE_MODES:
-                    sample_modes = amount & 0x3
-                elif op == GEN_KEYNUM:
-                    keynum = amount & 0x7F
-                elif op == GEN_VELOCITY:
-                    fixed_velocity = amount & 0x7F
+    @staticmethod
+    def _zone_range(values, op: int) -> tuple[int, int]:
+        amount = values.get(op)
+        return _range(amount) if amount is not None else (0, 127)
+
+    @staticmethod
+    def _signed_value(values, op: int, default: int = 0) -> int:
+        amount = values.get(op)
+        return _s16(amount) if amount is not None else default
+
+    @staticmethod
+    def _substitution(values, op: int) -> int | None:
+        amount = values.get(op)
+        if amount is None or amount == 0xFFFF:
+            return None
+        return amount & 0x7F
+
+    @classmethod
+    def _combined_values(
+        cls,
+        preset_global,
+        preset_local,
+        instrument_global,
+        instrument_local,
+    ):
+        """
+        Resolve the generator hierarchy from SF2 §9.4.
+
+        At a single level, a local generator replaces the matching global
+        generator. Value generators at preset level are then added to the
+        resolved instrument value. Range generators instead intersect between
+        preset and instrument levels. Sample/substitution generators are
+        instrument-only and are never added from the preset.
+        """
+        preset = cls._zone_map(preset_global, preset_local)
+        instrument = cls._zone_map(instrument_global, instrument_local)
+
+        preset_key_lo, preset_key_hi = cls._zone_range(
+            preset, GEN_KEY_RANGE
+        )
+        inst_key_lo, inst_key_hi = cls._zone_range(
+            instrument, GEN_KEY_RANGE
+        )
+        preset_vel_lo, preset_vel_hi = cls._zone_range(
+            preset, GEN_VEL_RANGE
+        )
+        inst_vel_lo, inst_vel_hi = cls._zone_range(
+            instrument, GEN_VEL_RANGE
+        )
+
+        # Sample generators are defined only at instrument level.
+        sample_values = {
+            GEN_START: cls._signed_value(instrument, GEN_START),
+            GEN_END: cls._signed_value(instrument, GEN_END),
+            GEN_LOOP_START: cls._signed_value(instrument, GEN_LOOP_START),
+            GEN_LOOP_END: cls._signed_value(instrument, GEN_LOOP_END),
+            GEN_START_COARSE:
+                cls._signed_value(instrument, GEN_START_COARSE),
+            GEN_END_COARSE:
+                cls._signed_value(instrument, GEN_END_COARSE),
+            GEN_LOOP_START_COARSE:
+                cls._signed_value(instrument, GEN_LOOP_START_COARSE),
+            GEN_LOOP_END_COARSE:
+                cls._signed_value(instrument, GEN_LOOP_END_COARSE),
+        }
+
+        # Value generators: instrument value/default + preset contribution.
+        for op in (
+            GEN_PAN,
+            GEN_ATTENUATION,
+            GEN_COARSE_TUNE,
+            GEN_FINE_TUNE,
+        ):
+            sample_values[op] = (
+                cls._signed_value(instrument, op)
+                + cls._signed_value(preset, op)
+            )
+
+        # scaleTuning's instrument default is 100 cents/key. The preset level
+        # contributes zero unless it explicitly contains scaleTuning.
+        scale_tuning = (
+            cls._signed_value(instrument, GEN_SCALE_TUNING, 100)
+            + cls._signed_value(preset, GEN_SCALE_TUNING, 0)
+        )
+
+        root_amount = instrument.get(GEN_ROOT_KEY)
+        root_key = None
+        if root_amount is not None and root_amount != 0xFFFF:
+            root_key = root_amount & 0xFF
+
+        sample_modes = instrument.get(GEN_SAMPLE_MODES, 0) & 0x3
 
         return {
-            **sums,
-            "key_range": (key_lo, key_hi),
-            "vel_range": (vel_lo, vel_hi),
-            "scale_tuning": sum(scale_values) if scale_values else 100,
+            **sample_values,
+            "key_range": (
+                max(preset_key_lo, inst_key_lo),
+                min(preset_key_hi, inst_key_hi),
+            ),
+            "vel_range": (
+                max(preset_vel_lo, inst_vel_lo),
+                min(preset_vel_hi, inst_vel_hi),
+            ),
+            "scale_tuning": scale_tuning,
             "root_key": root_key,
             "sample_modes": sample_modes,
-            "keynum": keynum,
-            "fixed_velocity": fixed_velocity,
+            "keynum": cls._substitution(instrument, GEN_KEYNUM),
+            "fixed_velocity":
+                cls._substitution(instrument, GEN_VELOCITY),
         }
 
     def _expand_sample(self, sample_id: int, values, pan_adjust: int = 0):
@@ -288,6 +354,8 @@ class SoundFontResolver:
             scale_tuning=values["scale_tuning"],
             attenuation=max(0, values[GEN_ATTENUATION]),
             pan=max(-500, min(500, values[GEN_PAN] + pan_adjust)),
+            keynum=values["keynum"],
+            fixed_velocity=values["fixed_velocity"],
         )]
 
     def resolve(self, bank: int, program: int, note: int, velocity: int):
@@ -314,16 +382,18 @@ class SoundFontResolver:
                 sample_id = _find_selector(izone, GEN_SAMPLE_ID)
                 if sample_id is None:
                     continue
-                values = self._combined_values((preset_global, pzone, inst_global, izone))
+                values = self._combined_values(
+                    preset_global,
+                    pzone,
+                    inst_global,
+                    izone,
+                )
                 key_lo, key_hi = values["key_range"]
                 vel_lo, vel_hi = values["vel_range"]
-                effective_note = values["keynum"] if values["keynum"] is not None else note
-                effective_velocity = (
-                    values["fixed_velocity"]
-                    if values["fixed_velocity"] is not None
-                    else velocity
-                )
-                if not (key_lo <= effective_note <= key_hi and vel_lo <= effective_velocity <= vel_hi):
+                if not (
+                    key_lo <= note <= key_hi
+                    and vel_lo <= velocity <= vel_hi
+                ):
                     continue
 
                 if sample_id >= len(self.sample_headers):
@@ -347,7 +417,10 @@ class SoundFontResolver:
             key = (
                 region.sample_id, region.start, region.end,
                 region.loop_start, region.loop_end, region.pan,
-                region.root_key, region.coarse_tune, region.fine_tune,
+                region.root_key, region.correction,
+                region.coarse_tune, region.fine_tune,
+                region.scale_tuning, region.attenuation,
+                region.keynum, region.fixed_velocity,
             )
             unique[key] = region
         return list(unique.values())
@@ -362,9 +435,10 @@ class SoundFontResolver:
 
 
 def _pitch(region: Region, note: int, state: ChannelState) -> int:
+    effective_note = region.keynum if region.keynum is not None else note
     bend = (state.pitch_bend - 8192) / 8192.0 * state.bend_range * 100.0
     cents = (
-        (note - region.root_key) * region.scale_tuning
+        (effective_note - region.root_key) * region.scale_tuning
         + region.coarse_tune * 100
         + region.fine_tune
         + region.correction
@@ -375,7 +449,14 @@ def _pitch(region: Region, note: int, state: ChannelState) -> int:
 
 
 def _mix(region: Region, velocity: int, state: ChannelState) -> tuple[int, int]:
-    velocity_gain = math.sqrt(max(0.0, min(1.0, velocity / 127.0)))
+    effective_velocity = (
+        region.fixed_velocity
+        if region.fixed_velocity is not None
+        else velocity
+    )
+    velocity_gain = math.sqrt(
+        max(0.0, min(1.0, effective_velocity / 127.0))
+    )
     controller_gain = (state.volume / 127.0) * (state.expression / 127.0)
     sf_gain = 10.0 ** (-max(0, region.attenuation) / 200.0)
     volume = int(round(100.0 * velocity_gain * controller_gain * sf_gain))
