@@ -165,8 +165,11 @@ int main(int argc, char **argv)
     }
 
     int loop_count = argc == 4 ? atoi(argv[3]) : 1;
-    if (loop_count < 1) {
-        loop_count = 1;
+    if (loop_count < 0) {
+        loop_count = 0;
+    }
+    if (loop_count > 255) {
+        loop_count = 255;
     }
 
     int synth_size = 0;
