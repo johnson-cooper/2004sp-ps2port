@@ -5048,10 +5048,10 @@ static void handleControllerButtonInput(Client *c) {
                 if (c->controller_camera_deadzone > 64) c->controller_camera_deadzone = 64;
             } else if (c->controller_settings_row == 3) {
                 c->controller_render_radius += dpad_x;
-                if (c->controller_render_radius < PS2_RENDER_RADIUS_MIN) {
-                    c->controller_render_radius = PS2_RENDER_RADIUS_MIN;
+                if (c->controller_render_radius < CONTROLLER_RENDER_RADIUS_MIN) {
+                    c->controller_render_radius = CONTROLLER_RENDER_RADIUS_MIN;
                 }
-                if (c->controller_render_radius > PS2_RENDER_RADIUS) {
+                if (c->controller_render_radius > CONTROLLER_RENDER_RADIUS_MAX) {
                     c->controller_render_radius = PS2_RENDER_RADIUS;
                 }
             } else if (c->controller_settings_row == 4) {
@@ -5082,7 +5082,7 @@ static void handleControllerButtonInput(Client *c) {
                 c->controller_cursor_deadzone = 20;
                 c->controller_cursor_speed = 5;
                 c->controller_camera_deadzone = 40;
-                c->controller_render_radius = PS2_RENDER_RADIUS_DEFAULT;
+                c->controller_render_radius = CONTROLLER_RENDER_RADIUS_DEFAULT;
                 c->controller_afk_minutes = 0;
                 c->shell->idle_cycles = 0;
             }
@@ -14011,7 +14011,7 @@ Client *client_new(void) {
     c->controller_cursor_deadzone = 20;
     c->controller_cursor_speed = 5;
     c->controller_camera_deadzone = 40;
-    c->controller_render_radius = PS2_RENDER_RADIUS_DEFAULT;
+    c->controller_render_radius = CONTROLLER_RENDER_RADIUS_DEFAULT;
     c->controller_afk_minutes = 0;
     c->controller_grid_cancel_pressed = false;
     c->controller_hotkey_run_pressed = false;

@@ -64,6 +64,12 @@
 #define USE_FLOATS
 #endif
 
+// The controller settings code is shared by several builds, so keep its harmless render-radius
+// bounds platform-visible even though only the PS2 World3D path consumes the value today.
+#define CONTROLLER_RENDER_RADIUS_MIN 8
+#define CONTROLLER_RENDER_RADIUS_DEFAULT 12
+#define CONTROLLER_RENDER_RADIUS_MAX 16
+
 #if defined(__PS2__)
 // Gameplay-first 32 MiB profile. Prefer bounded geometry and entities over cosmetic fidelity.
 #define MODEL_MAX_DEPTH 600
@@ -79,11 +85,9 @@
 // safety margin to reduce edge/near-camera popping. Radius 16 recovers useful EE frame-time headroom
 // for SPU2 MIDI RPC traffic while retaining substantially more forward visibility than the old radius-14 baseline.
 // Terrain/static residency limits remain unchanged; this is render traversal only.
-#define PS2_RENDER_RADIUS 16
-// Runtime controller setting: keep 16 as the compile-time/proven maximum so fixed visibility
-// storage and scene assumptions never grow at runtime. Start at 12 for the performance profile.
-#define PS2_RENDER_RADIUS_DEFAULT 12
-#define PS2_RENDER_RADIUS_MIN 8
+#define PS2_RENDER_RADIUS CONTROLLER_RENDER_RADIUS_MAX
+// Runtime controller setting keeps the compiled/proven maximum above, so fixed visibility storage
+// and scene assumptions never grow at runtime. The controller default is 12 for performance.
 // Slightly relax the camera-facing visibility wedge. The previous 2-tile rear / 4-tile side
 // guard could reject a wall's owning tile while part of the wall was still visibly crossing the
 // screen near oblique camera angles. These small margins keep that edge geometry alive without

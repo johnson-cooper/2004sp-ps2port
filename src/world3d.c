@@ -28,12 +28,12 @@
 static bool ps2_visibility_map[51][51];
 
 static int ps2_runtime_render_radius(void) {
-    int radius = PS2_RENDER_RADIUS_DEFAULT;
+    int radius = CONTROLLER_RENDER_RADIUS_DEFAULT;
     Client *c = ps2_crash_client;
     if (c) {
         radius = c->controller_render_radius;
     }
-    if (radius < PS2_RENDER_RADIUS_MIN) radius = PS2_RENDER_RADIUS_MIN;
+    if (radius < CONTROLLER_RENDER_RADIUS_MIN) radius = CONTROLLER_RENDER_RADIUS_MIN;
     if (radius > PS2_RENDER_RADIUS) radius = PS2_RENDER_RADIUS;
     return radius;
 }
