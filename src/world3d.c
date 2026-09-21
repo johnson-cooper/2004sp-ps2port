@@ -27,7 +27,18 @@
 // without increasing the expensive World3D/model workload.
 static bool ps2_visibility_map[51][51];
 
-static void ps2_update_visibility_map(int sinEyeYaw, int cosEyeYaw) {
+static int ps2_runtime_render_radius(void) {
+    int radius = PS2_RENDER_RADIUS_DEFAULT;
+    Client *c = ps2_crash_client;
+    if (c) {
+        radius = c->controller_render_radius;
+    }
+    if (radius < PS2_RENDER_RADIUS_MIN) radius = PS2_RENDER_RADIUS_MIN;
+    if (radius > PS2_RENDER_RADIUS) radius = PS2_RENDER_RADIUS;
+    return radius;
+}
+
+static void ps2_update_visibility_map(int sinEyeYaw, int cosEyeYaw, int drawRadius) {
     const int backMargin = PS2_RENDER_BACK_MARGIN << 16;
     const int sideMargin = PS2_RENDER_SIDE_MARGIN << 16;
 
@@ -35,7 +46,7 @@ static void ps2_update_visibility_map(int sinEyeYaw, int cosEyeYaw) {
         int dx = x - 25;
         for (int z = 0; z < 51; z++) {
             int dz = z - 25;
-            if (abs(dx) > PS2_RENDER_RADIUS || abs(dz) > PS2_RENDER_RADIUS) {
+            if (abs(dx) > drawRadius || abs(dz) > drawRadius) {
                 ps2_visibility_map[x][z] = false;
                 continue;
             }
@@ -233,7 +244,8 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.cosEyePitch = _Pix3D.cos_table[eyePitch];
     _World3D.sinEyeYaw = _Pix3D.sin_table[eyeYaw];
     _World3D.cosEyeYaw = _Pix3D.cos_table[eyeYaw];
-    ps2_update_visibility_map(_World3D.sinEyeYaw, _World3D.cosEyeYaw);
+    const int drawRadius = ps2_runtime_render_radius();
+    ps2_update_visibility_map(_World3D.sinEyeYaw, _World3D.cosEyeYaw, drawRadius);
     ps2_inactive_loc_draw_count = 0;
     _World3D.visibilityMap = ps2_visibility_map;
     _World3D.eyeX = eyeX;
@@ -243,7 +255,6 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.eyeTileZ = eyeZ / 128;
     _World3D.topLevel = topLevel;
 
-    const int drawRadius = PS2_RENDER_RADIUS;
     _World3D.minDrawTileX = _World3D.eyeTileX - drawRadius;
     if (_World3D.minDrawTileX < 0) _World3D.minDrawTileX = 0;
     _World3D.minDrawTileZ = _World3D.eyeTileZ - drawRadius;

@@ -80,6 +80,10 @@
 // for SPU2 MIDI RPC traffic while retaining substantially more forward visibility than the old radius-14 baseline.
 // Terrain/static residency limits remain unchanged; this is render traversal only.
 #define PS2_RENDER_RADIUS 16
+// Runtime controller setting: keep 16 as the compile-time/proven maximum so fixed visibility
+// storage and scene assumptions never grow at runtime. Start at 12 for the performance profile.
+#define PS2_RENDER_RADIUS_DEFAULT 12
+#define PS2_RENDER_RADIUS_MIN 8
 // Slightly relax the camera-facing visibility wedge. The previous 2-tile rear / 4-tile side
 // guard could reject a wall's owning tile while part of the wall was still visibly crossing the
 // screen near oblique camera angles. These small margins keep that edge geometry alive without

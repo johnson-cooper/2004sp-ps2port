@@ -270,6 +270,8 @@ struct Client {
     int controller_cursor_deadzone;   // left stick per-axis deadzone, 0..127 units around center
     int controller_cursor_speed;      // virtual cursor max pixels/tick
     int controller_camera_deadzone;   // right stick per-axis deadzone
+    int controller_render_radius;     // PS2 World3D traversal radius, bounded by the compiled maximum
+    int controller_afk_minutes;       // 0 = never send the inactivity logout timer
     int controller_grid_component;    // active TYPE_INV component id, -1 until D-pad enters a grid
     int controller_grid_slot;         // selected row-major slot inside that component
     int controller_grid_screen_x;     // renderer-confirmed full-screen center of selected slot

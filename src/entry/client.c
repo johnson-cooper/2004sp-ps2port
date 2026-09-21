@@ -5031,7 +5031,7 @@ static void handleControllerButtonInput(Client *c) {
         if (dpad_y != 0) {
             c->controller_settings_row += dpad_y;
             if (c->controller_settings_row < 0) c->controller_settings_row = 0;
-            if (c->controller_settings_row > 3) c->controller_settings_row = 3;
+            if (c->controller_settings_row > 5) c->controller_settings_row = 5;
         }
         if (dpad_x != 0) {
             if (c->controller_settings_row == 0) {
@@ -5046,15 +5046,45 @@ static void handleControllerButtonInput(Client *c) {
                 c->controller_camera_deadzone += dpad_x * 4;
                 if (c->controller_camera_deadzone < 16) c->controller_camera_deadzone = 16;
                 if (c->controller_camera_deadzone > 64) c->controller_camera_deadzone = 64;
+            } else if (c->controller_settings_row == 3) {
+                c->controller_render_radius += dpad_x;
+                if (c->controller_render_radius < PS2_RENDER_RADIUS_MIN) {
+                    c->controller_render_radius = PS2_RENDER_RADIUS_MIN;
+                }
+                if (c->controller_render_radius > PS2_RENDER_RADIUS) {
+                    c->controller_render_radius = PS2_RENDER_RADIUS;
+                }
+            } else if (c->controller_settings_row == 4) {
+                // Presets keep the setting useful on a controller without an awkward numeric editor:
+                // Forever -> 5 -> 10 -> 15 -> 30 -> 60 minutes -> Forever.
+                if (dpad_x > 0) {
+                    if (c->controller_afk_minutes <= 0) c->controller_afk_minutes = 5;
+                    else if (c->controller_afk_minutes <= 5) c->controller_afk_minutes = 10;
+                    else if (c->controller_afk_minutes <= 10) c->controller_afk_minutes = 15;
+                    else if (c->controller_afk_minutes <= 15) c->controller_afk_minutes = 30;
+                    else if (c->controller_afk_minutes <= 30) c->controller_afk_minutes = 60;
+                    else c->controller_afk_minutes = 0;
+                } else {
+                    if (c->controller_afk_minutes <= 0) c->controller_afk_minutes = 60;
+                    else if (c->controller_afk_minutes <= 5) c->controller_afk_minutes = 0;
+                    else if (c->controller_afk_minutes <= 10) c->controller_afk_minutes = 5;
+                    else if (c->controller_afk_minutes <= 15) c->controller_afk_minutes = 10;
+                    else if (c->controller_afk_minutes <= 30) c->controller_afk_minutes = 15;
+                    else c->controller_afk_minutes = 30;
+                }
+                c->shell->idle_cycles = 0;
             }
         }
 
         if (c->controller_confirm_pressed) {
             c->controller_confirm_pressed = false;
-            if (c->controller_settings_row == 3) {
+            if (c->controller_settings_row == 5) {
                 c->controller_cursor_deadzone = 20;
                 c->controller_cursor_speed = 5;
                 c->controller_camera_deadzone = 40;
+                c->controller_render_radius = PS2_RENDER_RADIUS_DEFAULT;
+                c->controller_afk_minutes = 0;
+                c->shell->idle_cycles = 0;
             }
         }
         if (c->controller_back_pressed) {
@@ -6158,12 +6188,31 @@ void client_update_game(Client *c) {
 
         handleInputKey(c);
         c->shell->idle_cycles++;
+#ifdef __PS2__
+        // The stock client reports inactivity after ~90 seconds and the server then owns the idle
+        // logout. PS2 makes that threshold user-selectable. A value of zero means Forever: retain
+        // normal heartbeats/networking, but never emit IDLE_TIMER solely because the pad is idle.
+        if (c->controller_afk_minutes <= 0) {
+            // Keep this signed counter bounded during multi-hour/overnight sessions.
+            if (c->shell->idle_cycles > 4500) {
+                c->shell->idle_cycles = 4500;
+            }
+        } else {
+            int ps2IdleLimitCycles = c->controller_afk_minutes * 60 * 50;
+            if (c->shell->idle_cycles > ps2IdleLimitCycles) {
+                c->idle_timeout = 250;
+                c->shell->idle_cycles -= 500;
+                p1isaac(c->out, 144); // IDLE_TIMER
+            }
+        }
+#else
         if (c->shell->idle_cycles > 4500) {
             c->idle_timeout = 250;
             c->shell->idle_cycles -= 500;
             // IDLE_TIMER
             p1isaac(c->out, 144); // IDLE_TIMER
         }
+#endif
 
         c->cameraOffsetCycle++;
         if (c->cameraOffsetCycle > 500) {
@@ -10436,24 +10485,26 @@ static void controller_settings_draw(Client *c) {
     pixmap_bind(c->area_viewport);
     _Pix3D.line_offset = c->area_viewport_offsets;
 
-    const int x = 92;
-    const int y = 54;
-    const int w = 328;
-    const int h = 218;
+    const int x = 72;
+    const int y = 18;
+    const int w = 368;
+    const int h = 298;
     pix2d_fill_rect(x, y, 0x20252d, w, h);
     pix2d_draw_rect(x, y, WHITE, w, h);
     pix2d_fill_rect(x + 1, y + 1, 0x303946, w - 2, 25);
     drawStringTaggableCenter(c->font_bold12, "PlayStation 2 Controller Settings", x + w / 2, y + 18, WHITE, true);
 
-    const char *labels[4] = {
+    const char *labels[6] = {
         "Left stick deadzone",
         "Cursor speed",
         "Right stick deadzone",
+        "Render radius",
+        "AFK timer",
         "Reset defaults"
     };
     char value[32];
-    for (int row = 0; row < 4; row++) {
-        int rowY = y + 52 + row * 31;
+    for (int row = 0; row < 6; row++) {
+        int rowY = y + 50 + row * 30;
         int color = row == c->controller_settings_row ? YELLOW : WHITE;
         if (row == 0) {
             snprintf(value, sizeof(value), "%d", c->controller_cursor_deadzone);
@@ -10461,6 +10512,14 @@ static void controller_settings_draw(Client *c) {
             snprintf(value, sizeof(value), "%d", c->controller_cursor_speed);
         } else if (row == 2) {
             snprintf(value, sizeof(value), "%d", c->controller_camera_deadzone);
+        } else if (row == 3) {
+            snprintf(value, sizeof(value), "%d tiles", c->controller_render_radius);
+        } else if (row == 4) {
+            if (c->controller_afk_minutes <= 0) {
+                strcpy(value, "Forever");
+            } else {
+                snprintf(value, sizeof(value), "%dm", c->controller_afk_minutes);
+            }
         } else {
             strcpy(value, "X");
         }
@@ -10468,7 +10527,7 @@ static void controller_settings_draw(Client *c) {
             pix2d_fill_rect(x + 12, rowY - 15, 0x394757, w - 24, 22);
         }
         drawString(c->font_plain12, x + 22, rowY, labels[row], color);
-        drawStringTaggable(c->font_bold12, x + w - 62, rowY, value, color, true);
+        drawStringTaggable(c->font_bold12, x + w - 92, rowY, value, color, true);
     }
 
     drawStringTaggableCenter(c->font_plain12, "D-Pad: Navigate / Adjust", x + w / 2, y + h - 34, 0xc0c0c0, true);
@@ -13952,6 +14011,8 @@ Client *client_new(void) {
     c->controller_cursor_deadzone = 20;
     c->controller_cursor_speed = 5;
     c->controller_camera_deadzone = 40;
+    c->controller_render_radius = PS2_RENDER_RADIUS_DEFAULT;
+    c->controller_afk_minutes = 0;
     c->controller_grid_cancel_pressed = false;
     c->controller_hotkey_run_pressed = false;
     c->controller_run_enabled = false;
