@@ -5052,7 +5052,7 @@ static void handleControllerButtonInput(Client *c) {
                     c->controller_render_radius = CONTROLLER_RENDER_RADIUS_MIN;
                 }
                 if (c->controller_render_radius > CONTROLLER_RENDER_RADIUS_MAX) {
-                    c->controller_render_radius = PS2_RENDER_RADIUS;
+                    c->controller_render_radius = CONTROLLER_RENDER_RADIUS_MAX;
                 }
             } else if (c->controller_settings_row == 4) {
                 // Presets keep the setting useful on a controller without an awkward numeric editor:
