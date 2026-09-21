@@ -195,6 +195,19 @@ def export_variant(
     return encoded, trim_ticks, duration_ms
 
 
+def validate_v1_ps2m(path: Path) -> None:
+    with path.open("rb") as file:
+        header = file.read(8)
+    if len(header) != 8 or header[:4] != b"RSM1":
+        raise ValueError(f"{path} is not a PS2M pack")
+    version, header_size = struct.unpack_from("<HH", header, 4)
+    if version != 1 or header_size != 40:
+        raise ValueError(
+            f"{path} is PS2M version {version} header={header_size}; "
+            "audio.dat requires the hardware-good v1 packs"
+        )
+
+
 def numeric_music_files(root: Path) -> dict[int, Path]:
     result: dict[int, Path] = {}
     if not root.is_dir():
@@ -206,6 +219,7 @@ def numeric_music_files(root: Path) -> dict[int, Path]:
             continue
         if music_id < 0 or music_id > 0xFFFF:
             continue
+        validate_v1_ps2m(path)
         result[music_id] = path
     return result
 
