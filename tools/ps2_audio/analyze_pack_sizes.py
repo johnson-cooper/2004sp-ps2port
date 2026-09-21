@@ -59,6 +59,56 @@ def compact_event_size(event: tuple[int, ...]) -> int:
     return EVENT_REC_BYTES
 
 
+def parse_compact_events(
+    data: bytes,
+    start: int,
+    end: int,
+    event_count: int,
+) -> dict[int, int]:
+    counts: dict[int, int] = {}
+    pos = start
+    payload_sizes = {
+        OUT_WAIT: 0,
+        OUT_NOTE_ON: 7,
+        OUT_NOTE_OFF: 1,
+        OUT_SUSTAIN: 1,
+        OUT_PITCH: 3,
+        OUT_MIX: 3,
+    }
+
+    for _ in range(event_count):
+        for index in range(5):
+            if pos >= end:
+                raise ValueError("truncated compact event delta")
+            byte = data[pos]
+            pos += 1
+            if index == 4 and (byte & 0xF0):
+                raise ValueError("compact event delta exceeds uint32")
+            if not (byte & 0x80):
+                break
+        else:
+            raise ValueError("invalid compact event delta")
+
+        if pos >= end:
+            raise ValueError("truncated compact event tag")
+        tag = data[pos]
+        pos += 1
+        kind = tag >> 4
+        payload = payload_sizes.get(kind)
+        if payload is None:
+            raise ValueError(f"unknown compact event kind {kind}")
+        if payload > end - pos:
+            raise ValueError("truncated compact event payload")
+        pos += payload
+        counts[kind] = counts.get(kind, 0) + 1
+
+    if pos != end:
+        raise ValueError(
+            f"compact event table has {end - pos} trailing bytes"
+        )
+    return counts
+
+
 def human(value: int) -> str:
     units = ("B", "KiB", "MiB", "GiB")
     amount = float(value)
@@ -93,6 +143,7 @@ def main() -> None:
     sample_refs = 0
     event_kind_counts: dict[int, int] = {}
     compact_event_bytes = 0
+    version_counts: dict[int, int] = {}
 
     for path in files:
         data = path.read_bytes()
@@ -114,24 +165,38 @@ def main() -> None:
             _duration_us,
         ) = HEADER.unpack_from(data)
 
-        if magic != MAGIC or version != 1 or header_size != HEADER.size:
+        if magic != MAGIC or version not in (1, 2) or header_size != HEADER.size:
             print(f"SKIP {path.name}: unsupported header")
             continue
 
+        version_counts[version] = version_counts.get(version, 0) + 1
         sample_table_bytes = sample_count * SAMPLE_REC.size
-        event_table_bytes = event_count * EVENT_REC_BYTES
+        if version == 1:
+            event_table_bytes = event_count * EVENT_REC_BYTES
+        else:
+            event_table_bytes = data_offset - event_table_offset
 
         total_headers += header_size
         total_sample_tables += sample_table_bytes
         total_event_tables += event_table_bytes
         total_sample_data += data_size
 
-        for index in range(event_count):
-            pos = event_table_offset + index * EVENT_REC_BYTES
-            event = EVENT_REC.unpack_from(data, pos)
-            kind = event[1]
-            event_kind_counts[kind] = event_kind_counts.get(kind, 0) + 1
-            compact_event_bytes += compact_event_size(event)
+        if version == 1:
+            for index in range(event_count):
+                pos = event_table_offset + index * EVENT_REC_BYTES
+                event = EVENT_REC.unpack_from(data, pos)
+                kind = event[1]
+                event_kind_counts[kind] = event_kind_counts.get(kind, 0) + 1
+                compact_event_bytes += compact_event_size(event)
+        else:
+            counts = parse_compact_events(
+                data, event_table_offset, data_offset, event_count
+            )
+            for kind, count in counts.items():
+                event_kind_counts[kind] = (
+                    event_kind_counts.get(kind, 0) + count
+                )
+            compact_event_bytes += event_table_bytes
 
         for index in range(sample_count):
             pos = sample_table_offset + index * SAMPLE_REC.size
@@ -154,6 +219,12 @@ def main() -> None:
     )
 
     print(f"Packs:                     {len(files)}")
+    if version_counts:
+        versions = ", ".join(
+            f"v{version}={count}"
+            for version, count in sorted(version_counts.items())
+        )
+        print(f"Pack formats:              {versions}")
     print(f"Current total:             {human(total_files)}")
     print(f"Headers:                   {human(total_headers)}")
     print(f"Sample tables:             {human(total_sample_tables)}")
