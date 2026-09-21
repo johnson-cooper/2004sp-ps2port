@@ -921,7 +921,14 @@ PS2_AUDIO_STATIC void ps2_pack_update_mix(
 
 PS2_AUDIO_STATIC void ps2_pack_process_event(const uint8_t *event)
 {
-    uint8_t kind = event[4];
+    /*
+     * Keep this as explicit branches on PS2. With event kinds 0..5 GCC can
+     * recognize an ordinary if/else chain as a switch and emit a six-entry
+     * jump table in normal .rodata. That 24-byte leak moves the hardware-
+     * sensitive .sdata/.bss addresses. Volatile forces the comparisons to
+     * remain loads/branches inside the isolated audio text section.
+     */
+    volatile uint8_t kind = event[4];
     uint8_t channel = event[5] & 0x0fu;
     uint8_t note = event[6];
     uint8_t value = event[7];
@@ -933,17 +940,25 @@ PS2_AUDIO_STATIC void ps2_pack_process_event(const uint8_t *event)
     if (kind == PS2_PACK_OUT_NOTE_ON) {
         ps2_pack_note_on(
             channel, note, sample_index, pitch, volume, pan);
-    } else if (kind == PS2_PACK_OUT_NOTE_OFF) {
+        return;
+    }
+    if (kind == PS2_PACK_OUT_NOTE_OFF) {
         ps2_pack_note_off(channel, note);
-    } else if (kind == PS2_PACK_OUT_SUSTAIN) {
+        return;
+    }
+    if (kind == PS2_PACK_OUT_SUSTAIN) {
         uint8_t was = ps2_pack_state.sustain[channel];
         ps2_pack_state.sustain[channel] = value ? 1 : 0;
         if (was && !ps2_pack_state.sustain[channel]) {
             ps2_pack_release_deferred(channel);
         }
-    } else if (kind == PS2_PACK_OUT_PITCH) {
+        return;
+    }
+    if (kind == PS2_PACK_OUT_PITCH) {
         ps2_pack_update_pitch(channel, note, sample_index, pitch);
-    } else if (kind == PS2_PACK_OUT_MIX) {
+        return;
+    }
+    if (kind == PS2_PACK_OUT_MIX) {
         ps2_pack_update_mix(
             channel, note, sample_index, volume, pan);
     }
