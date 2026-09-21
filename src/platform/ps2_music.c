@@ -293,17 +293,24 @@ static const char ps2_pack_start_fmt[] PS2_AUDIO_RODATA =
 static const char ps2_pack_fallback_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M id=%d unavailable/invalid; using compact MIDI fallback\n";
 
+static const char ps2_audio_dat_path_fmt[] PS2_AUDIO_RODATA =
+    "%srom/audio.dat";
+static const char ps2_audio_read_mode[] PS2_AUDIO_RODATA = "rb";
+static const char ps2_audio_dat_bad_fmt[] PS2_AUDIO_RODATA =
+    "audio: audio.dat unavailable/invalid path=%s\n";
+static const char ps2_audio_dat_ready_fmt[] PS2_AUDIO_RODATA =
+    "audio: audio.dat ready music=%u sfx=%u loopslots=%u bytes=%u\n";
+
 static const char ps2_sfx_path_fmt[] PS2_AUDIO_RODATA =
-    "%srom/ps2sfx/468.ps2a";
-static const char ps2_sfx_read_mode[] PS2_AUDIO_RODATA = "rb";
-static const char ps2_sfx_open_fail_fmt[] PS2_AUDIO_RODATA =
-    "audio: SFX 468 open failed path=%s\n";
+    "%srom/ps2sfx/%d.ps2a";
 static const char ps2_sfx_bad_fmt[] PS2_AUDIO_RODATA =
-    "audio: SFX 468 invalid path=%s size=%ld\n";
+    "audio: SFX id=%u loops=%u unavailable/invalid\n";
 static const char ps2_sfx_load_fmt[] PS2_AUDIO_RODATA =
-    "audio: SFX 468 loaded raw=%u pitch=%u\n";
+    "audio: SFX id=%u loops=%u loaded raw=%u pitch=%u\n";
 static const char ps2_sfx_play_fmt[] PS2_AUDIO_RODATA =
-    "audio: SFX 468 play status=%d\n";
+    "audio: SFX id=%u loops=%u play status=%d\n";
+static const char ps2_sfx_queue_full_fmt[] PS2_AUDIO_RODATA =
+    "audio: SFX queue full; dropping id=%u loops=%u delay=%u\n";
 
 PS2_AUDIO_STATIC uint16_t ps2_midi_be16(const uint8_t *p)
 {
