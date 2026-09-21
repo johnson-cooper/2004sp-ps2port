@@ -959,6 +959,26 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
     }
 
     if (bank_ok) {
+        /*
+         * Real-hardware A/B: duplicate one already-proven bank upload using
+         * the exact same 720-byte transfer size, RPC command, slot-0 address,
+         * and source sample bytes as the normal bank initialization above.
+         *
+         * This isolates transfer count from the previously failing 64-byte
+         * probe size. No new slot, no new SPU2 address, and no new sample data.
+         */
+        memset(&packet, 0, sizeof(packet));
+        packet.words[0] = 0u;
+        packet.words[1] = PS2_MIDI_BANK_SAMPLE_BYTES;
+        memcpy(packet.sample,
+               ps2_midi_bank_adpcm[0],
+               PS2_MIDI_BANK_SAMPLE_BYTES);
+        (void)ps2_audio_rpc_status(
+            &ps2_music_state.rpc,
+            RS2MIDI_RPC_LOAD_SLOT,
+            &packet,
+            RS2MIDI_RPC_HEADER_BYTES + PS2_MIDI_BANK_SAMPLE_BYTES);
+
         ps2_music_state.bank_loaded = 1;
         ps2_music_state.base_pitch = ps2_midi_bank_base_pitch;
     } else {
