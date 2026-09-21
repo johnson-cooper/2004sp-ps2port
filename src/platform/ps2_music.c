@@ -228,7 +228,7 @@ static const char ps2_pack_path_fmt[] PS2_AUDIO_RODATA =
 static const char ps2_pack_bad_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M id=%d unavailable/invalid path=%s\n";
 static const char ps2_pack_start_fmt[] PS2_AUDIO_RODATA =
-    "audio: PS2M id=%d samples=%u events=%u spu=%u loop=%u accurate=1\n";
+    "audio: PS2M v%u id=%d samples=%u events=%u spu=%u loop=%u accurate=1\n";
 static const char ps2_pack_fallback_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M id=%d unavailable/invalid; using compact MIDI fallback\n";
 
@@ -1353,6 +1353,7 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
     ps2_music_state.active_midi_id = id;
 
     rs2_log(ps2_pack_start_fmt,
+            (unsigned int)pack_version,
             id,
             (unsigned int)sample_count,
             (unsigned int)event_count,
