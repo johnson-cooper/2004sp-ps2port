@@ -10,8 +10,53 @@ from pathlib import Path
 
 HEADER = struct.Struct("<4sHHIIIIIIQ")
 SAMPLE_REC = struct.Struct("<II")
-EVENT_REC_BYTES = 16
+EVENT_REC = struct.Struct("<IBBBBHHBbH")
+EVENT_REC_BYTES = EVENT_REC.size
 MAGIC = b"RSM1"
+
+OUT_WAIT = 0
+OUT_NOTE_ON = 1
+OUT_NOTE_OFF = 2
+OUT_SUSTAIN = 3
+OUT_PITCH = 4
+OUT_MIX = 5
+
+EVENT_NAMES = {
+    OUT_WAIT: "WAIT",
+    OUT_NOTE_ON: "NOTE_ON",
+    OUT_NOTE_OFF: "NOTE_OFF",
+    OUT_SUSTAIN: "SUSTAIN",
+    OUT_PITCH: "PITCH",
+    OUT_MIX: "MIX",
+}
+
+
+def uleb_size(value: int) -> int:
+    size = 1
+    while value >= 0x80:
+        value >>= 7
+        size += 1
+    return size
+
+
+def compact_event_size(event: tuple[int, ...]) -> int:
+    delta, kind, _channel, _note, _value, _sample, _pitch, _volume, _pan, _aux = event
+    # Compact v2 estimate: ULEB128 delta + one byte containing kind/channel,
+    # followed only by the fields each runtime event actually consumes.
+    base = uleb_size(delta) + 1
+    if kind == OUT_WAIT:
+        return base
+    if kind == OUT_NOTE_ON:
+        return base + 1 + 2 + 2 + 1 + 1
+    if kind == OUT_NOTE_OFF:
+        return base + 1
+    if kind == OUT_SUSTAIN:
+        return base + 1
+    if kind == OUT_PITCH:
+        return base + 1 + 2 + 2
+    if kind == OUT_MIX:
+        return base + 1 + 2 + 1 + 1
+    return EVENT_REC_BYTES
 
 
 def human(value: int) -> str:
@@ -46,6 +91,8 @@ def main() -> None:
     unique_sample_data = 0
     unique: dict[bytes, int] = {}
     sample_refs = 0
+    event_kind_counts: dict[int, int] = {}
+    compact_event_bytes = 0
 
     for path in files:
         data = path.read_bytes()
@@ -79,6 +126,13 @@ def main() -> None:
         total_event_tables += event_table_bytes
         total_sample_data += data_size
 
+        for index in range(event_count):
+            pos = event_table_offset + index * EVENT_REC_BYTES
+            event = EVENT_REC.unpack_from(data, pos)
+            kind = event[1]
+            event_kind_counts[kind] = event_kind_counts.get(kind, 0) + 1
+            compact_event_bytes += compact_event_size(event)
+
         for index in range(sample_count):
             pos = sample_table_offset + index * SAMPLE_REC.size
             offset, size = SAMPLE_REC.unpack_from(data, pos)
@@ -92,6 +146,12 @@ def main() -> None:
     structural = total_headers + total_sample_tables + total_event_tables
     duplicate_sample_bytes = total_sample_data - unique_sample_data
     theoretical_shared = structural + unique_sample_data
+    compact_total = (
+        total_headers
+        + total_sample_tables
+        + compact_event_bytes
+        + total_sample_data
+    )
 
     print(f"Packs:                     {len(files)}")
     print(f"Current total:             {human(total_files)}")
@@ -103,6 +163,24 @@ def main() -> None:
     print(f"Unique ADPCM blobs:        {len(unique)}")
     print(f"Unique ADPCM bytes:        {human(unique_sample_data)}")
     print(f"Duplicate ADPCM bytes:     {human(duplicate_sample_bytes)}")
+    print()
+    print("Event kinds:")
+    total_events = sum(event_kind_counts.values())
+    for kind, count in sorted(event_kind_counts.items()):
+        name = EVENT_NAMES.get(kind, f"kind_{kind}")
+        pct = (count * 100.0 / total_events) if total_events else 0.0
+        print(f"  {name:10s} {count:10d}  {pct:5.1f}%")
+    print(f"Total events:              {total_events}")
+    print(f"Current event bytes:       {human(total_event_tables)}")
+    print(f"Compact-v2 event estimate: {human(compact_event_bytes)}")
+    if total_event_tables:
+        event_saving = total_event_tables - compact_event_bytes
+        event_pct = event_saving * 100.0 / total_event_tables
+        print(
+            f"Event-format saving:       {human(event_saving)} "
+            f"({event_pct:.1f}%)"
+        )
+    print(f"Compact-v2 total estimate: {human(compact_total)}")
     print()
     print(
         "Ideal shared-sample floor: "
