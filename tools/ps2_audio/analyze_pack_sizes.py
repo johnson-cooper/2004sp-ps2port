@@ -53,9 +53,9 @@ def compact_event_size(event: tuple[int, ...]) -> int:
     if kind == OUT_SUSTAIN:
         return base + 1
     if kind == OUT_PITCH:
-        return base + 1 + 2 + 2
+        return base + 1 + 2
     if kind == OUT_MIX:
-        return base + 1 + 2 + 1 + 1
+        return base + 1 + 1 + 1
     return EVENT_REC_BYTES
 
 
