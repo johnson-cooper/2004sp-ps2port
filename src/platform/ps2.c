@@ -470,7 +470,13 @@ static void ps2_install_exception_handler(void) {
     // intended diagnostic screen (a fault inside the fault handler, with nowhere left to go). Back to
     // the previously-validated set only. Do not re-add Ov/Tr/RI/Bp without first auditing whether the
     // handler's OWN draw path can itself overflow, not just re-trying blindly.
-    int causes[] = {1, 2, 3, 4, 5, 6, 7}; // Mod, TLBL, TLBS, AdEL, AdES, IBE, DBE
+    /*
+     * Only hook AdEL/AdES. Do NOT replace the EE's normal TLB handlers here:
+     * real hardware can legitimately raise Mod/TLBL/TLBS for mappings that
+     * the kernel resolves. Turning those into this no-ERET diagnostic loop
+     * produces a false permanent "EE EXCEPTION" screen (cause=3/TLBS).
+     */
+    int causes[] = {4, 5}; // AdEL, AdES
     for (unsigned int i = 0; i < sizeof(causes) / sizeof(causes[0]); i++) {
         SetVCommonHandler(causes[i], (void *)ps2_exception_handler);
     }
