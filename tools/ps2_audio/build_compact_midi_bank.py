@@ -31,7 +31,7 @@ PREFERRED_PROGRAMS = (
     73,   # Flute
     80,   # Lead 1 (square)
     104,  # Sitar
-    114,  # Steel Drums (more stable compact wavetable than Tinkle Bell)
+    14,   # Tubular Bells (explicit runtime exception for classic RS tracks)
 )
 
 REFERENCE_NOTES = (60, 64, 67, 69, 72, 55, 48, 76)
@@ -50,7 +50,7 @@ SLOT_MAX_HARMONICS = (
     9,   # reed / pipe
     7,   # synth lead / pad
     6,   # synth effects / ethnic
-    5,   # percussive / sound effects
+    4,   # dedicated Tubular Bells: suppress high-note alias/ringing
 )
 
 
@@ -58,20 +58,39 @@ def _preset_candidates_for_slot(
     resolver: SoundFontResolver,
     slot: int,
 ) -> list[tuple[int, str]]:
-    """Return preferred preset first, then other bank-0 presets in the family."""
+    """Return preferred preset first, then bank-0 family fallbacks.
+
+    Slot 7 intentionally prefers GM 14 Tubular Bells even though its normal
+    fallback family remains 112..127. This lets the runtime dedicate one tiny
+    hardware timbre to a classic RuneScape bell sound without expanding the
+    eight-slot SPU2 footprint.
+    """
     preferred = PREFERRED_PROGRAMS[slot]
     lo = slot * 16
     hi = lo + 15
 
-    candidates = [
-        (program, name_zones[0])
-        for (bank, program), name_zones in resolver.presets.items()
-        if bank == 0 and lo <= program <= hi
-    ]
-    if not candidates:
-        raise ValueError(f"SoundFont has no bank-0 preset in GM family {lo}..{hi}")
+    candidates = []
 
-    candidates.sort(key=lambda item: (item[0] != preferred, item[0]))
+    preferred_preset = resolver.presets.get((0, preferred))
+    if preferred_preset is not None:
+        candidates.append((preferred, preferred_preset[0]))
+
+    candidates.extend(
+        sorted(
+            (program, name_zones[0])
+            for (bank, program), name_zones in resolver.presets.items()
+            if bank == 0
+            and lo <= program <= hi
+            and program != preferred
+        )
+    )
+
+    if not candidates:
+        raise ValueError(
+            f"SoundFont has neither preferred program {preferred} nor "
+            f"a bank-0 preset in GM family {lo}..{hi}"
+        )
+
     return candidates
 
 

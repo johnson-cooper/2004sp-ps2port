@@ -313,6 +313,27 @@ PS2_AUDIO_STATIC void ps2_midi_note_off(uint8_t channel, uint8_t key)
     }
 }
 
+PS2_AUDIO_STATIC uint32_t ps2_midi_sample_slot_for_program(
+    uint8_t program)
+{
+    /*
+     * The eight-slot bank is intentionally coarse, but a few General MIDI
+     * programs cannot safely share their broad 16-program family.
+     *
+     * Tubular Bells (14) need the dedicated bell timbre in slot 7. Reverse
+     * Cymbal (119) is a one-shot/noise effect; feeding it to a looped pitched
+     * wavetable creates the piercing sustained ring heard in Expanse.
+     */
+    if (program == 14) {
+        return 7u;
+    }
+    if (program == 119) {
+        return UINT32_MAX;
+    }
+
+    return ((uint32_t)program >> 4) & 7u;
+}
+
 PS2_AUDIO_STATIC void ps2_midi_note_on(
     uint8_t channel,
     uint8_t key,
@@ -369,19 +390,19 @@ PS2_AUDIO_STATIC void ps2_midi_note_on(
      * Leave headroom for polyphonic SPU2 summing. Driving every MIDI voice
      * to the hardware maximum clips noticeably during chords/busy passages.
      */
+    uint8_t program = ps2_music_state.channel_program[channel];
+    uint32_t max_volume = program == 14 ? 0x1000u : 0x1800u;
     uint32_t volume =
-        ((uint32_t)velocity * 0x1800u + 63u) / 127u;
+        ((uint32_t)velocity * max_volume + 63u) / 127u;
 
     Rs2MidiRpcPacket packet __attribute__((aligned(64)));
     memset(&packet, 0, RS2MIDI_RPC_HEADER_BYTES);
     uint32_t sample_slot = 0;
     if (ps2_music_state.bank_loaded) {
-        /*
-         * General MIDI has 16 groups of eight programs. Collapse adjacent
-         * groups into eight broad SPU2 timbres for this first native bank.
-         */
-        sample_slot =
-            ((uint32_t)ps2_music_state.channel_program[channel] >> 4) & 7u;
+        sample_slot = ps2_midi_sample_slot_for_program(program);
+        if (sample_slot == UINT32_MAX) {
+            return;
+        }
     }
 
     packet.words[0] = (uint32_t)chosen;
