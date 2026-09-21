@@ -105,7 +105,7 @@ static bool ps2_audio_ready;
  * already reserves this high-memory overlay for audio-only state/code; using
  * the same sections avoids perturbing hardware-sensitive networking globals.
  */
-#define PS2_SFX_CODE __attribute__((section(".ps2_audio_text"), noinline))
+#define PS2_SFX_CODE __attribute__((section(".ps2_audio_text"), noinline, used))
 #define PS2_SFX_RODATA __attribute__((section(".ps2_audio_rodata"), used, aligned(1)))
 #define PS2_SFX_STATE __attribute__((section(".ps2_audio_data"), used, aligned(64)))
 
