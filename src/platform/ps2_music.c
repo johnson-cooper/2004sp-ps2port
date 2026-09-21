@@ -1031,7 +1031,7 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
 
         if (expanse_sample_ok) {
             memset(&packet, 0, sizeof(packet));
-            packet.words[0] = 0x001e0000u;
+            packet.words[0] = 0x00100000u;
             packet.words[1] = 64u;
             memcpy(packet.sample, expanse_sample, sizeof(expanse_sample));
             (void)ps2_audio_rpc_status(
