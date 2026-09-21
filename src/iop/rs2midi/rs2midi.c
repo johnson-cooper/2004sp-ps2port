@@ -9,8 +9,11 @@
 #define RS2MIDI_RPC_NOTE_ON    2
 #define RS2MIDI_RPC_SET_PITCH  3
 #define RS2MIDI_RPC_KEY_OFF    4
-#define RS2MIDI_RPC_GET_STATE  5
-#define RS2MIDI_RPC_LOAD_SLOT  6
+#define RS2MIDI_RPC_GET_STATE    5
+#define RS2MIDI_RPC_LOAD_SLOT    6
+#define RS2MIDI_RPC_LOAD_ABS     7
+#define RS2MIDI_RPC_NOTE_ON_ADDR 8
+#define RS2MIDI_RPC_SET_MIX      9
 
 #define RS2MIDI_PONG 0x52533250u
 
@@ -21,10 +24,12 @@
  *
  * This is deliberately a tiny proof, not the final music allocator.
  */
-#define RS2MIDI_SPU_ADDR          0x001e0000u
+#define RS2MIDI_PACK_SPU_BASE      0x00100000u
+#define RS2MIDI_PACK_SPU_LIMIT     0x001e0000u
+#define RS2MIDI_SPU_ADDR           0x001e0000u
 #define RS2MIDI_SAMPLE_STRIDE      0x00000400u
 #define RS2MIDI_SAMPLE_SLOTS       8u
-#define RS2MIDI_MAX_SAMPLE_BYTES  800u
+#define RS2MIDI_MAX_SAMPLE_BYTES   800u
 #define RS2MIDI_RPC_HEADER_BYTES  64u
 #define RS2MIDI_RPC_BUFFER_BYTES  1024u
 #define RS2MIDI_DMA_CHANNEL       0
@@ -54,6 +59,27 @@ static int rs2midi_valid_sample_slot(u32 slot)
     return slot < RS2MIDI_SAMPLE_SLOTS;
 }
 
+static int rs2midi_valid_pack_range(u32 addr, u32 size)
+{
+    if (size == 0 || (addr & 0x0f) != 0 || (size & 0x0f) != 0) {
+        return 0;
+    }
+    if (addr < RS2MIDI_PACK_SPU_BASE || addr >= RS2MIDI_PACK_SPU_LIMIT) {
+        return 0;
+    }
+    if (size > RS2MIDI_PACK_SPU_LIMIT - addr) {
+        return 0;
+    }
+    return 1;
+}
+
+static int rs2midi_valid_pack_addr(u32 addr)
+{
+    return addr >= RS2MIDI_PACK_SPU_BASE &&
+           addr < RS2MIDI_PACK_SPU_LIMIT &&
+           (addr & 0x0f) == 0;
+}
+
 static int rs2midi_valid_voice(u32 voice)
 {
     return voice < 24;
@@ -76,6 +102,29 @@ static u16 rs2midi_clamp_volume(u32 volume)
         return 0x3fff;
     }
     return (u16)volume;
+}
+
+static void rs2midi_start_voice(
+    u32 voice,
+    u16 pitch,
+    u16 voll,
+    u16 volr,
+    u32 sample_addr)
+{
+    /*
+     * Keep this register sequence identical to the hardware-proven slot
+     * NOTE_ON path. Core 0 is rs2midi-owned; audsrv remains isolated on core 1.
+     */
+    sceSdSetParam(RS2MIDI_CORE | SD_PARAM_MVOLL, 0x3fff);
+    sceSdSetParam(RS2MIDI_CORE | SD_PARAM_MVOLR, 0x3fff);
+    sceSdSetParam(1 | SD_PARAM_AVOLL, 0x7fff);
+    sceSdSetParam(1 | SD_PARAM_AVOLR, 0x7fff);
+
+    sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLL, voll);
+    sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLR, volr);
+    sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_PITCH, pitch);
+    sceSdSetAddr(RS2MIDI_CORE | (voice << 1) | SD_VADDR_SSA, sample_addr);
+    sceSdSetSwitch(RS2MIDI_CORE | SD_SWITCH_KON, 1u << voice);
 }
 
 static void *rs2midi_rpc_handler(int function, void *data, int size)
@@ -137,6 +186,41 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
         break;
     }
 
+    case RS2MIDI_RPC_LOAD_ABS: {
+        u32 sample_addr = words[0];
+        u32 sample_size = words[1];
+        words[2] = (u32)-999;
+
+        if (sample_size > RS2MIDI_MAX_SAMPLE_BYTES ||
+            !rs2midi_valid_pack_range(sample_addr, sample_size) ||
+            size < (int)(RS2MIDI_RPC_HEADER_BYTES + sample_size)) {
+            status = RS2MIDI_ERR_ARGS;
+            break;
+        }
+
+        /*
+         * Accurate packs are uploaded before their first event is scheduled.
+         * Silence core 0 while replacing the dedicated high-SPU2 pack region.
+         */
+        sceSdSetSwitch(RS2MIDI_CORE | SD_SWITCH_KOFF, 0x00ffffffu);
+
+        int transferred = sceSdVoiceTrans(
+            RS2MIDI_DMA_CHANNEL,
+            SD_TRANS_WRITE | SD_TRANS_MODE_DMA,
+            payload,
+            (u32 *)sample_addr,
+            sample_size);
+        words[2] = (u32)transferred;
+
+        if (transferred < 0) {
+            status = RS2MIDI_ERR_DMA;
+            break;
+        }
+
+        sceSdVoiceTransStatus(RS2MIDI_DMA_CHANNEL, 1);
+        break;
+    }
+
     case RS2MIDI_RPC_NOTE_ON: {
         u32 voice = words[0];
         u32 sample_slot =
@@ -156,34 +240,46 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
         u16 volr = rs2midi_clamp_volume(words[3]);
 
         /*
-         * LIBSD cold-init leaves both core master volumes at zero. audsrv's
-         * frozen voice-only init enables only core 1, so enable core 0 here
-         * without touching audsrv's core-1 voices.
+         * Do NOT KOFF immediately before KON here. LIBSD key transitions are
+         * asynchronous; explicit KEY_OFF/LOAD already silence a reused voice.
          */
-        sceSdSetParam(RS2MIDI_CORE | SD_PARAM_MVOLL, 0x3fff);
-        sceSdSetParam(RS2MIDI_CORE | SD_PARAM_MVOLR, 0x3fff);
+        rs2midi_start_voice(
+            voice, pitch, voll, volr, rs2midi_sample_addr(sample_slot));
+        break;
+    }
 
-        /*
-         * Core 0 reaches the final SPU2 output through core 1's external
-         * input path. LIBSD cold-init normally leaves these at 0x7fff, but
-         * set them explicitly so the companion does not depend on a prior
-         * module preserving that routing state.
-         */
-        sceSdSetParam(1 | SD_PARAM_AVOLL, 0x7fff);
-        sceSdSetParam(1 | SD_PARAM_AVOLR, 0x7fff);
+    case RS2MIDI_RPC_NOTE_ON_ADDR: {
+        u32 voice = words[0];
+        u32 sample_addr = words[4];
 
-        /*
-         * Do NOT KOFF immediately before KON here. LIBSD's own reset path
-         * documents that key transitions are asynchronous; an immediate
-         * KOFF->KON can race on real hardware. LOAD/explicit KEY_OFF already
-         * silence the voice before a later note-on.
-         */
-        sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLL, voll);
-        sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLR, volr);
-        sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_PITCH, pitch);
-        sceSdSetAddr(RS2MIDI_CORE | (voice << 1) | SD_VADDR_SSA,
-                     rs2midi_sample_addr(sample_slot));
-        sceSdSetSwitch(RS2MIDI_CORE | SD_SWITCH_KON, 1u << voice);
+        if (!rs2midi_valid_voice(voice) ||
+            !rs2midi_valid_pack_addr(sample_addr)) {
+            status = RS2MIDI_ERR_ARGS;
+            break;
+        }
+
+        rs2midi_start_voice(
+            voice,
+            rs2midi_clamp_pitch(words[1]),
+            rs2midi_clamp_volume(words[2]),
+            rs2midi_clamp_volume(words[3]),
+            sample_addr);
+        break;
+    }
+
+    case RS2MIDI_RPC_SET_MIX: {
+        u32 voice = words[0];
+        if (!rs2midi_valid_voice(voice)) {
+            status = RS2MIDI_ERR_ARGS;
+            break;
+        }
+
+        sceSdSetParam(
+            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLL,
+            rs2midi_clamp_volume(words[1]));
+        sceSdSetParam(
+            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLR,
+            rs2midi_clamp_volume(words[2]));
         break;
     }
 
