@@ -86,6 +86,11 @@ def main() -> None:
         help="write a categorized per-song failure report here",
     )
     parser.add_argument(
+        "--compact-events",
+        action="store_true",
+        help="write lossless variable-length PS2M v2 events",
+    )
+    parser.add_argument(
         "--keep-going",
         action="store_true",
         help="continue after an individual pack fails",
@@ -152,7 +157,12 @@ def main() -> None:
         print("=" * 72)
 
         try:
-            build_pack(args.soundfont, midi, out)
+            build_pack(
+                args.soundfont,
+                midi,
+                out,
+                compact_events=args.compact_events,
+            )
             built += 1
             if source == "local":
                 built_local += 1
@@ -175,7 +185,12 @@ def main() -> None:
                     f"local MIDI decode failed; using {fallback} [content]"
                 )
                 try:
-                    build_pack(args.soundfont, fallback, out)
+                    build_pack(
+                        args.soundfont,
+                        fallback,
+                        out,
+                        compact_events=args.compact_events,
+                    )
                     built += 1
                     built_content += 1
                     continue
@@ -203,6 +218,7 @@ def main() -> None:
     print(f"  content: {built_content}")
     print(f"Missing: {missing}")
     print(f"Failed:  {failed}")
+    print(f"Format:  PS2M v{2 if args.compact_events else 1}")
     print(f"Output:  {args.output}")
 
     if failures:
