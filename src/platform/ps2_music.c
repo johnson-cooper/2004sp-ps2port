@@ -102,7 +102,12 @@ typedef struct Ps2MusicState {
     uint64_t jingle_deadline_ms;
     uint8_t *midi_data;
     int midi_size;
-    SifRpcClientData_t rpc;
+    /*
+     * PS2SDK's EE RPC clients are 64-byte aligned. Real hardware is much less
+     * forgiving than PCSX2 about SIF DMA/cache-line alignment, so preserve
+     * that requirement even though this client lives inside our overlay state.
+     */
+    SifRpcClientData_t rpc __attribute__((aligned(64)));
     Ps2MidiTrack tracks[PS2_MIDI_MAX_TRACKS];
     Ps2MidiVoice voices[PS2_MIDI_VOICE_COUNT];
     uint8_t channel_program[16];
