@@ -36,6 +36,19 @@ def index_midis(*directories: Path) -> dict[str, list[Path]]:
     return by_key
 
 
+def failure_category(exc: Exception) -> str:
+    message = str(exc)
+    if message.startswith("song sample set needs "):
+        return "SPU2 sample budget"
+    if message.startswith("more than 256 overlapping accurate-pack note layers"):
+        return "overlapping note-layer limit"
+    if message == "too many title-song sample variants":
+        return "sample-variant limit"
+    if message.startswith("SF2 sample ") and message.endswith(" exceeds smpl data"):
+        return "SoundFont sample bounds"
+    return type(exc).__name__
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -65,6 +78,12 @@ def main() -> None:
         "--output",
         type=Path,
         default=Path("build/bin/rom/ps2audio"),
+    )
+    parser.add_argument(
+        "--failure-report",
+        type=Path,
+        default=Path("build/ps2-audio-failures.txt"),
+        help="write a categorized per-song failure report here",
     )
     parser.add_argument(
         "--keep-going",
@@ -98,6 +117,7 @@ def main() -> None:
     built_content = 0
     missing = 0
     failed = 0
+    failures: list[tuple[int, str, str, Path, str, str]] = []
     args.output.mkdir(parents=True, exist_ok=True)
 
     for midi_id, name in read_mapping(args.mapping):
@@ -140,7 +160,14 @@ def main() -> None:
                 built_content += 1
         except Exception as exc:
             failed += 1
-            print(f"FAILED id={midi_id} name={name!r}: {exc}")
+            category = failure_category(exc)
+            failures.append(
+                (midi_id, name, source, midi, category, str(exc))
+            )
+            print(
+                f"FAILED id={midi_id} name={name!r} "
+                f"category={category!r}: {exc}"
+            )
             if not args.keep_going:
                 raise
 
@@ -152,6 +179,46 @@ def main() -> None:
     print(f"Missing: {missing}")
     print(f"Failed:  {failed}")
     print(f"Output:  {args.output}")
+
+    if failures:
+        counts: dict[str, int] = {}
+        for _, _, _, _, category, _ in failures:
+            counts[category] = counts.get(category, 0) + 1
+
+        print("Failure categories:")
+        for category, count in sorted(
+            counts.items(), key=lambda item: (-item[1], item[0])
+        ):
+            print(f"  {count:3d}  {category}")
+
+        report_lines = [
+            "2004sp PS2 rev254 audio pack failure report",
+            "",
+            f"Failed: {len(failures)}",
+            "",
+            "Failure categories:",
+        ]
+        for category, count in sorted(
+            counts.items(), key=lambda item: (-item[1], item[0])
+        ):
+            report_lines.append(f"  {count:3d}  {category}")
+
+        report_lines.extend(["", "Per-song failures:"])
+        for midi_id, name, source, midi, category, message in failures:
+            report_lines.append(
+                f"id={midi_id:3d} source={source:7s} "
+                f"category={category} name={name!r}"
+            )
+            report_lines.append(f"  midi={midi}")
+            report_lines.append(f"  error={message}")
+
+        args.failure_report.parent.mkdir(parents=True, exist_ok=True)
+        args.failure_report.write_text(
+            "\n".join(report_lines) + "\n",
+            encoding="utf-8",
+        )
+        print(f"Failure report: {args.failure_report}")
+
     print("=" * 72)
 
     if failed:
