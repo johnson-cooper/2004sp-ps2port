@@ -30,6 +30,7 @@
 #define RS2MIDI_RPC_GET_STATE  5
 #define RS2MIDI_RPC_LOAD_SLOT  6
 #define RS2MIDI_RPC_LOAD_ABS   7
+#define RS2MIDI_RPC_NOTE_ON_ADDR 8
 
 #define RS2MIDI_PONG 0x52533250u
 
@@ -962,14 +963,17 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
     if (bank_ok) {
         /*
          * Real-hardware A/B: upload the complete Expanse sample-0 ADPCM
-         * payload using only the already-proven 64-byte LOAD_ABS primitive.
+         * payload using only the already-proven 64-byte LOAD_ABS primitive,
+         * then play that exact SoundFont-derived sample once through the
+         * already-present NOTE_ON_ADDR RPC.
          *
-         * The 16-byte APCM metadata header is not SPU2 sample data. Stream the
-         * payload directly from the pack so EE heap usage stays flat. The last
-         * partial block is zero-padded to 64 bytes, avoiding a new DMA size.
-         * Still no NOTE_ON_ADDR or playback in this test.
+         * The 16-byte APCM metadata header is parsed for the sample's native
+         * SPU2 base pitch and is not uploaded as sample data. The final partial
+         * payload block remains zero-padded to the proven 64-byte DMA size.
          */
         char pack_path[320];
+        bool expanse_upload_ok = false;
+        uint32_t expanse_base_pitch = 0u;
         snprintf(pack_path, sizeof(pack_path),
                  ps2_pack_probe_path_fmt, ps2_cache_prefix());
 
@@ -1014,44 +1018,63 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
                             blob_offset >= data_offset &&
                             relative_offset <= data_size &&
                             blob_size <= data_size - relative_offset &&
-                            blob_offset <= 0x7fffffffu - 16u &&
+                            blob_offset <= 0x7fffffffu &&
                             fseek(pack_file,
-                                  (long)(blob_offset + 16u),
+                                  (long)blob_offset,
                                   SEEK_SET) == 0) {
-                            uint32_t remaining = blob_size - 16u;
-                            uint32_t sample_addr = 0x00100000u;
-                            uint8_t expanse_sample[64];
+                            uint8_t apcm_header[16];
 
-                            while (remaining != 0u) {
-                                uint32_t read_size =
-                                    remaining > 64u ? 64u : remaining;
+                            if (fread(apcm_header,
+                                      1,
+                                      sizeof(apcm_header),
+                                      pack_file) == sizeof(apcm_header) &&
+                                apcm_header[0] == 'A' &&
+                                apcm_header[1] == 'P' &&
+                                apcm_header[2] == 'C' &&
+                                apcm_header[3] == 'M') {
+                                expanse_base_pitch =
+                                    ps2_pack_le32(apcm_header + 8);
 
-                                memset(expanse_sample, 0,
-                                       sizeof(expanse_sample));
-                                if (fread(expanse_sample,
-                                          1,
-                                          read_size,
-                                          pack_file) != read_size) {
-                                    break;
+                                if (expanse_base_pitch >= 1u &&
+                                    expanse_base_pitch <= 0x3fffu) {
+                                    uint32_t remaining = blob_size - 16u;
+                                    uint32_t sample_addr = 0x00100000u;
+                                    uint8_t expanse_sample[64];
+
+                                    while (remaining != 0u) {
+                                        uint32_t read_size =
+                                            remaining > 64u ? 64u : remaining;
+
+                                        memset(expanse_sample, 0,
+                                               sizeof(expanse_sample));
+                                        if (fread(expanse_sample,
+                                                  1,
+                                                  read_size,
+                                                  pack_file) != read_size) {
+                                            break;
+                                        }
+
+                                        memset(&packet, 0, sizeof(packet));
+                                        packet.words[0] = sample_addr;
+                                        packet.words[1] = 64u;
+                                        memcpy(packet.sample,
+                                               expanse_sample,
+                                               sizeof(expanse_sample));
+
+                                        if (ps2_audio_rpc_status(
+                                                &ps2_music_state.rpc,
+                                                RS2MIDI_RPC_LOAD_ABS,
+                                                &packet,
+                                                RS2MIDI_RPC_HEADER_BYTES + 64u) < 0) {
+                                            break;
+                                        }
+
+                                        remaining -= read_size;
+                                        sample_addr += 64u;
+                                    }
+
+                                    expanse_upload_ok = remaining == 0u;
                                 }
-
-                                memset(&packet, 0, sizeof(packet));
-                                packet.words[0] = sample_addr;
-                                packet.words[1] = 64u;
-                                memcpy(packet.sample,
-                                       expanse_sample,
-                                       sizeof(expanse_sample));
-
-                                if (ps2_audio_rpc_status(
-                                        &ps2_music_state.rpc,
-                                        RS2MIDI_RPC_LOAD_ABS,
-                                        &packet,
-                                        RS2MIDI_RPC_HEADER_BYTES + 64u) < 0) {
-                                    break;
-                                }
-
-                                remaining -= read_size;
-                                sample_addr += 64u;
                             }
                         }
                     }
@@ -1059,6 +1082,25 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
             }
 
             fclose(pack_file);
+        }
+
+        if (expanse_upload_ok) {
+            /*
+             * Voice 23 keeps this one-shot probe away from the scheduler's
+             * usual low-numbered first allocations. 0x1000 is deliberately
+             * below the compact bank's 0x1800 per-voice ceiling.
+             */
+            memset(&packet, 0, sizeof(packet));
+            packet.words[0] = 23u;
+            packet.words[1] = expanse_base_pitch;
+            packet.words[2] = 0x1000u;
+            packet.words[3] = 0x1000u;
+            packet.words[4] = 0x00100000u;
+            (void)ps2_audio_rpc_status(
+                &ps2_music_state.rpc,
+                RS2MIDI_RPC_NOTE_ON_ADDR,
+                &packet,
+                5 * sizeof(uint32_t));
         }
 
         ps2_music_state.bank_loaded = 1;
