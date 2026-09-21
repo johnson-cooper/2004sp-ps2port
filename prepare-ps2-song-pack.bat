@@ -7,7 +7,11 @@ if "%~2"=="" goto :usage
 
 set "ID=%~1"
 set "NAME=%~2"
-set "SF2=rom\SCC1_Florestan.sf2"
+if "%~3"=="" (
+    set "SF2=rom\SCC1_Florestan.sf2"
+) else (
+    set "SF2=%~3"
+)
 set "MIDI=rom\cache\client\songs\%NAME%.mid"
 set "OUT=build\bin\rom\ps2audio\%ID%.ps2m"
 
@@ -52,7 +56,7 @@ exit /b 0
 
 :usage
 echo Usage:
-echo   prepare-ps2-song-pack.bat MIDI_ID SONG_FILENAME_WITHOUT_MID
+echo   prepare-ps2-song-pack.bat MIDI_ID SONG_FILENAME_WITHOUT_MID [SOUNDFONT.sf2]
 echo.
 echo First hardware target:
 echo   prepare-ps2-song-pack.bat 106 expanse
