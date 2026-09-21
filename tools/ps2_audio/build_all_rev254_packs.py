@@ -159,6 +159,31 @@ def main() -> None:
             else:
                 built_content += 1
         except Exception as exc:
+            # A few cache-extracted local MIDIs are damaged while the
+            # corresponding Content/254 source MIDI is clean. Preserve local
+            # precedence for normal conversion errors, but recover a decode
+            # failure from the exact-name Content fallback when available.
+            decode_failure = "could not decode Jagex-packed MIDI" in str(exc)
+            if (
+                source == "local"
+                and decode_failure
+                and len(content_matches) == 1
+            ):
+                fallback = content_matches[0]
+                print(
+                    f"RETRY id={midi_id} name={name!r}: "
+                    f"local MIDI decode failed; using {fallback} [content]"
+                )
+                try:
+                    build_pack(args.soundfont, fallback, out)
+                    built += 1
+                    built_content += 1
+                    continue
+                except Exception as fallback_exc:
+                    source = "content"
+                    midi = fallback
+                    exc = fallback_exc
+
             failed += 1
             category = failure_category(exc)
             failures.append(
