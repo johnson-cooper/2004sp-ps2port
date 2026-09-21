@@ -36,6 +36,7 @@ from sf2_to_ps2bank import (
 
 MAGIC = b"RSM1"
 VERSION = 1
+COMPACT_VERSION = 2
 HEADER = struct.Struct("<4sHHIIIIIIQ")
 SAMPLE_REC = struct.Struct("<II")
 EVENT_REC = struct.Struct("<IBBBBHHBbH")
@@ -46,6 +47,55 @@ OUT_NOTE_OFF = 2
 OUT_SUSTAIN = 3
 OUT_PITCH = 4
 OUT_MIX = 5
+
+
+def _append_uleb32(out: bytearray, value: int) -> None:
+    value = int(value)
+    if value < 0 or value > 0xFFFFFFFF:
+        raise ValueError(f"compact event delta out of range: {value}")
+    while value >= 0x80:
+        out.append((value & 0x7F) | 0x80)
+        value >>= 7
+    out.append(value)
+
+
+def _encode_compact_event(event) -> bytes:
+    (
+        delta, kind, channel, token, value,
+        sample_index, pitch, volume, pan, _aux,
+    ) = event
+
+    out = bytearray()
+    _append_uleb32(out, delta)
+    out.append(((kind & 0x0F) << 4) | (channel & 0x0F))
+
+    if kind == OUT_WAIT:
+        pass
+    elif kind == OUT_NOTE_ON:
+        out.append(token & 0xFF)
+        out += struct.pack("<H", sample_index & 0xFFFF)
+        out += struct.pack("<H", pitch & 0xFFFF)
+        out.append(volume & 0xFF)
+        out.append(pan & 0xFF)
+    elif kind == OUT_NOTE_OFF:
+        out.append(token & 0xFF)
+    elif kind == OUT_SUSTAIN:
+        out.append(value & 0xFF)
+    elif kind == OUT_PITCH:
+        # channel+token uniquely identify one logical SoundFont layer.
+        # sample_index is redundant for v2 updates.
+        out.append(token & 0xFF)
+        out += struct.pack("<H", pitch & 0xFFFF)
+    elif kind == OUT_MIX:
+        # Same token identity rule as OUT_PITCH.
+        out.append(token & 0xFF)
+        out.append(volume & 0xFF)
+        out.append(pan & 0xFF)
+    else:
+        raise ValueError(f"unsupported compact event kind: {kind}")
+
+    return bytes(out)
+
 
 GM_PROGRAM_NAMES = (
     "Acoustic Grand Piano", "Bright Acoustic Piano",
@@ -828,7 +878,12 @@ def _amp_level_before_release(
     return sustain
 
 
-def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
+def build_pack(
+    sf2_path: Path,
+    midi_path: Path,
+    output_path: Path,
+    compact_events: bool = False,
+):
     resolver = SoundFontResolver(sf2_path)
     midi_format, ppqn, timed, duration_us = events_with_time(midi_path)
     channels = [ChannelState(bank=128 if i == 9 else 0) for i in range(16)]
@@ -1620,14 +1675,26 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
 
     sample_table_offset = HEADER.size
     event_table_offset = sample_table_offset + len(sample_blobs) * SAMPLE_REC.size
-    data_offset = event_table_offset + len(packed_events) * EVENT_REC.size
+
+    compact_event_blob = None
+    if compact_events:
+        compact_event_blob = bytearray()
+        for event in packed_events:
+            compact_event_blob += _encode_compact_event(event)
+        event_data_size = len(compact_event_blob)
+        pack_version = COMPACT_VERSION
+    else:
+        event_data_size = len(packed_events) * EVENT_REC.size
+        pack_version = VERSION
+
+    data_offset = event_table_offset + event_data_size
     data_size = sum(len(blob) for blob in sample_blobs)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("wb") as out:
         out.write(HEADER.pack(
             MAGIC,
-            VERSION,
+            pack_version,
             HEADER.size,
             len(sample_blobs),
             len(packed_events),
@@ -1643,8 +1710,11 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
             out.write(SAMPLE_REC.pack(running, len(blob)))
             running += len(blob)
 
-        for event in packed_events:
-            out.write(EVENT_REC.pack(*event))
+        if compact_event_blob is not None:
+            out.write(compact_event_blob)
+        else:
+            for event in packed_events:
+                out.write(EVENT_REC.pack(*event))
 
         for blob in sample_blobs:
             out.write(blob)
@@ -1654,7 +1724,9 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
     print(f"MIDI format/PPQN: {midi_format}/{ppqn}")
     print(f"Duration:         {duration_us / 1_000_000.0:.3f} s")
     print(f"ADPCM samples:    {len(sample_blobs)}")
+    print(f"Pack version:      {pack_version}")
     print(f"Sequence events:  {len(packed_events)}")
+    print(f"Event bytes:       {event_data_size:,}")
     print(f"Envelope events:  {envelope_mix_events}")
     print(f"Perc token reuse: {percussion_token_recycles}")
     print(f"Pitch clamps:     {pitch_clamp_count}")
@@ -1696,8 +1768,18 @@ def main():
     parser.add_argument("soundfont", type=Path)
     parser.add_argument("midi", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--compact-events",
+        action="store_true",
+        help="write lossless variable-length PS2M v2 events",
+    )
     args = parser.parse_args()
-    build_pack(args.soundfont, args.midi, args.output)
+    build_pack(
+        args.soundfont,
+        args.midi,
+        args.output,
+        compact_events=args.compact_events,
+    )
 
 
 if __name__ == "__main__":
