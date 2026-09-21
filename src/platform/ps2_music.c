@@ -1075,7 +1075,7 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
 
     uint32_t raw_size = blob_size - 16u;
     if ((raw_size & 0x0fu) != 0 ||
-        raw_size == 0 ||
+        raw_size < 16u ||
         raw_size > PS2_PACK_SPU_LIMIT - PS2_PACK_SPU_BASE ||
         fseek(file, (long)(blob_offset + 16u), SEEK_SET) != 0) {
         rs2_log(ps2_pack_sample_bad_fmt,
@@ -1085,55 +1085,46 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
         return;
     }
 
+    /*
+     * Hardware A/B: upload exactly ONE 16-byte PS2 ADPCM frame.
+     *
+     * The previous full-sample probe connected successfully, then faulted a
+     * few seconds later while repeatedly reading/uploading sample chunks.
+     * Keep every other part of the proven header probe identical and reduce
+     * the new IOP interaction to one aligned minimum-size transfer.
+     */
     Rs2MidiRpcPacket packet __attribute__((aligned(64)));
-    uint32_t uploaded = 0;
-    uint32_t chunks = 0;
-    int32_t last_transfer = 0;
+    memset(&packet, 0, sizeof(packet));
+    if (fread(packet.sample, 1, 16u, file) != 16u) {
+        rs2_log(ps2_pack_sample_read_fmt, 0u, 16u);
+        fclose(file);
+        return;
+    }
+    fclose(file);
 
-    while (uploaded < raw_size) {
-        uint32_t chunk = raw_size - uploaded;
-        if (chunk > RS2MIDI_MAX_SAMPLE_BYTES) {
-            chunk = RS2MIDI_MAX_SAMPLE_BYTES;
-        }
+    packet.words[0] = PS2_PACK_SPU_BASE;
+    packet.words[1] = 16u;
+    int32_t status = ps2_audio_rpc_status(
+        &ps2_music_state.rpc,
+        RS2MIDI_RPC_LOAD_ABS,
+        &packet,
+        RS2MIDI_RPC_HEADER_BYTES + 16);
+    int32_t transfer = (int32_t)packet.words[2];
 
-        memset(&packet, 0, sizeof(packet));
-        if (fread(packet.sample, 1, chunk, file) != chunk) {
-            rs2_log(ps2_pack_sample_read_fmt,
-                    (unsigned int)uploaded,
-                    (unsigned int)chunk);
-            fclose(file);
-            return;
-        }
-
-        packet.words[0] = PS2_PACK_SPU_BASE + uploaded;
-        packet.words[1] = chunk;
-        int32_t status = ps2_audio_rpc_status(
-            &ps2_music_state.rpc,
-            RS2MIDI_RPC_LOAD_ABS,
-            &packet,
-            RS2MIDI_RPC_HEADER_BYTES + (int)chunk);
-        last_transfer = (int32_t)packet.words[2];
-
-        if (status < 0) {
-            rs2_log(ps2_pack_upload_fail_fmt,
-                    (unsigned int)uploaded,
-                    (unsigned int)chunk,
-                    (int)status,
-                    (int)last_transfer);
-            fclose(file);
-            return;
-        }
-
-        uploaded += chunk;
-        chunks++;
+    if (status < 0) {
+        rs2_log(ps2_pack_upload_fail_fmt,
+                0u,
+                16u,
+                (int)status,
+                (int)transfer);
+        return;
     }
 
-    fclose(file);
     rs2_log(ps2_pack_upload_ok_fmt,
-            (unsigned int)raw_size,
-            (unsigned int)chunks,
+            16u,
+            1u,
             (unsigned int)PS2_PACK_SPU_BASE,
-            (int)last_transfer);
+            (int)transfer);
 }
 
 void ps2_audio_update_late(void) PS2_AUDIO_CODE;
