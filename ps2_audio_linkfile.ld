@@ -76,6 +76,15 @@ SECTIONS {
         *(.rodata)
         *(.rodata.*)
         *(.gnu.linkonce.r*)
+
+        /*
+         * Hardware-good normal rodata ends exactly at 0x00200a60. New PS2-only
+         * strings must live in the high-memory runtime overlay instead of moving
+         * the orphan .MIPS.abiflags and, through alignment, .sdata/.bss.
+         */
+        ASSERT(. <= 0x00200a60,
+               "normal .rodata exceeded hardware-good PS2 layout budget")
+        . = 0x00200a60;
     }
 
     .rdata ALIGN(128): { *(.rdata) }
@@ -131,6 +140,11 @@ SECTIONS {
     .ps2_runtime_text ALIGN(64) : {
         KEEP(*(.ps2_runtime_text))
         KEEP(*(.ps2_runtime_text.*))
+    } :audio
+
+    .ps2_runtime_rodata ALIGN(64) : {
+        KEEP(*(.ps2_runtime_rodata))
+        KEEP(*(.ps2_runtime_rodata.*))
     } :audio
 
     .ps2_audio_rodata ALIGN(64) : {

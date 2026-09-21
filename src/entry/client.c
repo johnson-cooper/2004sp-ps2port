@@ -10486,6 +10486,49 @@ static void client_draw_ps2_safe_ui(Client *c) {
 #endif
 
 
+#ifdef __PS2__
+#define PS2_RUNTIME_CODE __attribute__((section(".ps2_runtime_text"), noinline))
+#define PS2_RUNTIME_RODATA __attribute__((section(".ps2_runtime_rodata"), used, aligned(1)))
+
+static const char ps2_settings_title[] PS2_RUNTIME_RODATA = "PlayStation 2 Controller Settings";
+static const char ps2_settings_left_deadzone[] PS2_RUNTIME_RODATA = "Left stick deadzone";
+static const char ps2_settings_cursor_speed[] PS2_RUNTIME_RODATA = "Cursor speed";
+static const char ps2_settings_right_deadzone[] PS2_RUNTIME_RODATA = "Right stick deadzone";
+static const char ps2_settings_audio_volume[] PS2_RUNTIME_RODATA = "Audio volume";
+static const char ps2_settings_render_radius[] PS2_RUNTIME_RODATA = "Render radius";
+static const char ps2_settings_afk_timer[] PS2_RUNTIME_RODATA = "AFK timer";
+static const char ps2_settings_reset_defaults[] PS2_RUNTIME_RODATA = "Reset defaults";
+static const char ps2_settings_fmt_int[] PS2_RUNTIME_RODATA = "%d";
+static const char ps2_settings_off[] PS2_RUNTIME_RODATA = "Off";
+static const char ps2_settings_fmt_percent[] PS2_RUNTIME_RODATA = "%d%%";
+static const char ps2_settings_fmt_tiles[] PS2_RUNTIME_RODATA = "%d tiles";
+static const char ps2_settings_forever[] PS2_RUNTIME_RODATA = "Forever";
+static const char ps2_settings_fmt_minutes[] PS2_RUNTIME_RODATA = "%dm";
+static const char ps2_settings_x[] PS2_RUNTIME_RODATA = "X";
+static const char ps2_settings_nav_help[] PS2_RUNTIME_RODATA = "D-Pad: Navigate / Adjust";
+static const char ps2_settings_close_help[] PS2_RUNTIME_RODATA = "L3 or Triangle: Close";
+#else
+#define PS2_RUNTIME_CODE
+#define ps2_settings_title "PlayStation 2 Controller Settings"
+#define ps2_settings_left_deadzone "Left stick deadzone"
+#define ps2_settings_cursor_speed "Cursor speed"
+#define ps2_settings_right_deadzone "Right stick deadzone"
+#define ps2_settings_audio_volume "Audio volume"
+#define ps2_settings_render_radius "Render radius"
+#define ps2_settings_afk_timer "AFK timer"
+#define ps2_settings_reset_defaults "Reset defaults"
+#define ps2_settings_fmt_int "%d"
+#define ps2_settings_off "Off"
+#define ps2_settings_fmt_percent "%d%%"
+#define ps2_settings_fmt_tiles "%d tiles"
+#define ps2_settings_forever "Forever"
+#define ps2_settings_fmt_minutes "%dm"
+#define ps2_settings_x "X"
+#define ps2_settings_nav_help "D-Pad: Navigate / Adjust"
+#define ps2_settings_close_help "L3 or Triangle: Close"
+#endif
+
+PS2_RUNTIME_CODE
 static void controller_settings_draw(Client *c) {
     pixmap_bind(c->area_viewport);
     _Pix3D.line_offset = c->area_viewport_offsets;
@@ -10497,43 +10540,43 @@ static void controller_settings_draw(Client *c) {
     pix2d_fill_rect(x, y, 0x20252d, w, h);
     pix2d_draw_rect(x, y, WHITE, w, h);
     pix2d_fill_rect(x + 1, y + 1, 0x303946, w - 2, 25);
-    drawStringTaggableCenter(c->font_bold12, "PlayStation 2 Controller Settings", x + w / 2, y + 18, WHITE, true);
+    drawStringTaggableCenter(c->font_bold12, ps2_settings_title, x + w / 2, y + 18, WHITE, true);
 
     const char *labels[7] = {
-        "Left stick deadzone",
-        "Cursor speed",
-        "Right stick deadzone",
-        "Audio volume",
-        "Render radius",
-        "AFK timer",
-        "Reset defaults"
+        ps2_settings_left_deadzone,
+        ps2_settings_cursor_speed,
+        ps2_settings_right_deadzone,
+        ps2_settings_audio_volume,
+        ps2_settings_render_radius,
+        ps2_settings_afk_timer,
+        ps2_settings_reset_defaults
     };
     char value[32];
     for (int row = 0; row < 7; row++) {
         int rowY = y + 50 + row * 30;
         int color = row == c->controller_settings_row ? YELLOW : WHITE;
         if (row == 0) {
-            snprintf(value, sizeof(value), "%d", c->controller_cursor_deadzone);
+            snprintf(value, sizeof(value), ps2_settings_fmt_int, c->controller_cursor_deadzone);
         } else if (row == 1) {
-            snprintf(value, sizeof(value), "%d", c->controller_cursor_speed);
+            snprintf(value, sizeof(value), ps2_settings_fmt_int, c->controller_cursor_speed);
         } else if (row == 2) {
-            snprintf(value, sizeof(value), "%d", c->controller_camera_deadzone);
+            snprintf(value, sizeof(value), ps2_settings_fmt_int, c->controller_camera_deadzone);
         } else if (row == 3) {
             if (c->controller_audio_volume <= 0) {
-                strcpy(value, "Off");
+                strcpy(value, ps2_settings_off);
             } else {
-                snprintf(value, sizeof(value), "%d%%", c->controller_audio_volume);
+                snprintf(value, sizeof(value), ps2_settings_fmt_percent, c->controller_audio_volume);
             }
         } else if (row == 4) {
-            snprintf(value, sizeof(value), "%d tiles", c->controller_render_radius);
+            snprintf(value, sizeof(value), ps2_settings_fmt_tiles, c->controller_render_radius);
         } else if (row == 5) {
             if (c->controller_afk_minutes <= 0) {
-                strcpy(value, "Forever");
+                strcpy(value, ps2_settings_forever);
             } else {
-                snprintf(value, sizeof(value), "%dm", c->controller_afk_minutes);
+                snprintf(value, sizeof(value), ps2_settings_fmt_minutes, c->controller_afk_minutes);
             }
         } else {
-            strcpy(value, "X");
+            strcpy(value, ps2_settings_x);
         }
         if (row == c->controller_settings_row) {
             pix2d_fill_rect(x + 12, rowY - 15, 0x394757, w - 24, 22);
@@ -10542,8 +10585,8 @@ static void controller_settings_draw(Client *c) {
         drawStringTaggable(c->font_bold12, x + w - 92, rowY, value, color, true);
     }
 
-    drawStringTaggableCenter(c->font_plain12, "D-Pad: Navigate / Adjust", x + w / 2, y + h - 34, 0xc0c0c0, true);
-    drawStringTaggableCenter(c->font_plain12, "L3 or Triangle: Close", x + w / 2, y + h - 17, 0xc0c0c0, true);
+    drawStringTaggableCenter(c->font_plain12, ps2_settings_nav_help, x + w / 2, y + h - 34, 0xc0c0c0, true);
+    drawStringTaggableCenter(c->font_plain12, ps2_settings_close_help, x + w / 2, y + h - 17, 0xc0c0c0, true);
     pixmap_draw(c->area_viewport, 4, 4);
 }
 
