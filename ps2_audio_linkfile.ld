@@ -23,6 +23,20 @@ SECTIONS {
         KEEP(*(.init))
         KEEP(*(.fini))
         QUAD(0)
+
+        /*
+         * Hardware-layout compatibility pad.
+         *
+         * Disabling the unsafe raw EE exception-handler registration allowed
+         * the compiler/linker to drop 408 bytes of now-unreferenced diagnostic
+         * code. That shifted every normal section after .text and moved .bss
+         * away from the hardware-proven 0x00200B00 address.
+         *
+         * Keep the handler disabled, but restore exactly those 408 bytes at
+         * the END of .text. No executable path reaches this padding; it only
+         * preserves the proven normal-client section placement.
+         */
+        . += 408;
     } :text
 
     PROVIDE(_etext = .);
