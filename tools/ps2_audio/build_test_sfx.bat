@@ -37,8 +37,7 @@ echo [1/2] Exporting rev254 synth to WAV...
     tools\ps2_audio\export_synth_wav.c ^
     src\sound\wave.c ^
     src\sound\tone.c ^
-    src\sound\envelope.c ^
-    -lm
+    src\sound\envelope.c
 if errorlevel 1 exit /b 1
 
 "%TOOL%" "%SYNTH%" "%WAV%" 1
