@@ -1034,7 +1034,7 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
     char path[320];
     snprintf(path, sizeof(path), ps2_pack_path_fmt, ps2_cache_prefix(), id);
 
-    FILE *file = fopen(path, ps2_sfx_read_mode);
+    FILE *file = fopen(path, "rb");
     if (!file) {
         return 0;
     }
@@ -1633,7 +1633,7 @@ PS2_AUDIO_STATIC bool ps2_sfx_load_anvil(void)
     char path[320];
     snprintf(path, sizeof(path), ps2_sfx_path_fmt, ps2_cache_prefix());
 
-    FILE *file = fopen(path, "rb");
+    FILE *file = fopen(path, ps2_sfx_read_mode);
     if (!file) {
         rs2_log(ps2_sfx_open_fail_fmt, path);
         ps2_sfx_state.failed = 1;
