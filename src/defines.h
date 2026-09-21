@@ -108,6 +108,11 @@
 // Hard cap for ordinary remote-player submissions; interaction-important players bypass it.
 // Five nearest ordinary players gives dense hubs a predictable upper bound on player raster cost.
 #define PS2_PLAYER_RENDER_BUDGET 5
+// NPC crowd LOD mirrors the proven player strategy: keep only the nearest ordinary NPCs in dense
+// scenes while preserving every NPC's network/update state. Combat/interaction-important NPCs
+// bypass both limits so Talk-to/combat feedback is never culled by the performance budget.
+#define PS2_NPC_RENDER_RADIUS 8
+#define PS2_NPC_RENDER_BUDGET 8
 // Edge-residency test: match static loc/model residency to the traversal-proven 80x80 terrain
 // bridge window. This should prevent buildings/fences from ending four tiles before terrain when
 // the player approaches a normal scene edge, at the cost of more resident static-world wrappers.

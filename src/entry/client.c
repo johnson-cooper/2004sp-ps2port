@@ -12178,9 +12178,62 @@ void pushProjectiles(Client *c) {
 }
 
 void pushNpcs(Client *c) {
+#ifdef __PS2__
+    // Dense NPC hubs are the same worst-case software-raster shape as player crowds. Build a
+    // nearest-first quota before submission so the hard cap never depends on server/NPC id order.
+    // This is render-only: updateNpcs()/getNpcPos() still retain and tick every visible server NPC.
+    int ps2NpcRingCount[PS2_NPC_RENDER_RADIUS + 1] = {0};
+    int ps2NpcRingRemaining[PS2_NPC_RENDER_RADIUS + 1] = {0};
+    int ps2LocalStx = c->local_player->pathing_entity.x >> 7;
+    int ps2LocalStz = c->local_player->pathing_entity.z >> 7;
+    int ps2LocalTarget = c->local_player->pathing_entity.targetId;
+
+    for (int ni = 0; ni < c->npc_count; ni++) {
+        int npcIndex = c->npc_ids[ni];
+        NpcEntity *candidate = c->npcs[npcIndex];
+        if (!candidate || !npcentity_is_visible(candidate)) {
+            continue;
+        }
+
+        int stx = candidate->pathing_entity.x >> 7;
+        int stz = candidate->pathing_entity.z >> 7;
+        if (stx < 0 || stx >= 104 || stz < 0 || stz >= 104) {
+            continue;
+        }
+
+        int dx = stx - ps2LocalStx;
+        int dz = stz - ps2LocalStz;
+        if (dx < 0) dx = -dx;
+        if (dz < 0) dz = -dz;
+        int distance = dx > dz ? dx : dz;
+
+        bool interactionImportant =
+            ps2LocalTarget == npcIndex ||
+            candidate->pathing_entity.targetId == LOCAL_PLAYER_INDEX + 32768 ||
+            candidate->pathing_entity.chatTimer > 0 ||
+            (candidate->pathing_entity.spotanimId != -1 &&
+             candidate->pathing_entity.spotanimFrame != -1);
+
+        if (!interactionImportant && distance <= PS2_NPC_RENDER_RADIUS) {
+            ps2NpcRingCount[distance]++;
+        }
+    }
+
+    int ps2BudgetLeft = PS2_NPC_RENDER_BUDGET;
+    for (int distance = 0; distance <= PS2_NPC_RENDER_RADIUS && ps2BudgetLeft > 0; distance++) {
+        int allowed = ps2NpcRingCount[distance];
+        if (allowed > ps2BudgetLeft) {
+            allowed = ps2BudgetLeft;
+        }
+        ps2NpcRingRemaining[distance] = allowed;
+        ps2BudgetLeft -= allowed;
+    }
+#endif
+
     for (int i = 0; i < c->npc_count; i++) {
-        NpcEntity *npc = c->npcs[c->npc_ids[i]];
-        int bitset = (c->npc_ids[i] << 14) + 0x20000000;
+        int npcIndex = c->npc_ids[i];
+        NpcEntity *npc = c->npcs[npcIndex];
+        int bitset = (npcIndex << 14) + 0x20000000;
 
         if (!npc || !npcentity_is_visible(npc)) {
             continue;
@@ -12192,6 +12245,29 @@ void pushNpcs(Client *c) {
         if (x < 0 || x >= 104 || z < 0 || z >= 104) {
             continue;
         }
+
+#ifdef __PS2__
+        int dx = x - ps2LocalStx;
+        int dz = z - ps2LocalStz;
+        if (dx < 0) dx = -dx;
+        if (dz < 0) dz = -dz;
+        int npcDistance = dx > dz ? dx : dz;
+
+        bool interactionImportant =
+            ps2LocalTarget == npcIndex ||
+            npc->pathing_entity.targetId == LOCAL_PLAYER_INDEX + 32768 ||
+            npc->pathing_entity.chatTimer > 0 ||
+            (npc->pathing_entity.spotanimId != -1 &&
+             npc->pathing_entity.spotanimFrame != -1);
+
+        if (!interactionImportant) {
+            if (npcDistance > PS2_NPC_RENDER_RADIUS ||
+                ps2NpcRingRemaining[npcDistance] <= 0) {
+                continue;
+            }
+            ps2NpcRingRemaining[npcDistance]--;
+        }
+#endif
 
         if (npc->pathing_entity.size == 1 && (npc->pathing_entity.x & 0x7f) == 64 && (npc->pathing_entity.z & 0x7f) == 64) {
             if (c->tileLastOccupiedCycle[x][z] == c->scene_cycle) {
