@@ -470,13 +470,7 @@ static void ps2_install_exception_handler(void) {
     // intended diagnostic screen (a fault inside the fault handler, with nowhere left to go). Back to
     // the previously-validated set only. Do not re-add Ov/Tr/RI/Bp without first auditing whether the
     // handler's OWN draw path can itself overflow, not just re-trying blindly.
-    /*
-     * Only hook AdEL/AdES. Do NOT replace the EE's normal TLB handlers here:
-     * real hardware can legitimately raise Mod/TLBL/TLBS for mappings that
-     * the kernel resolves. Turning those into this no-ERET diagnostic loop
-     * produces a false permanent "EE EXCEPTION" screen (cause=3/TLBS).
-     */
-    int causes[] = {4, 5}; // AdEL, AdES
+    int causes[] = {1, 2, 3, 4, 5, 6, 7}; // Mod, TLBL, TLBS, AdEL, AdES, IBE, DBE
     for (unsigned int i = 0; i < sizeof(causes) / sizeof(causes[0]); i++) {
         SetVCommonHandler(causes[i], (void *)ps2_exception_handler);
     }
@@ -495,17 +489,7 @@ bool platform_init(void) {
     // model_calculate_bounds_cylinder() too small for further checkpoint-based bisection to resolve -
     // if it's a genuine bad pointer access, this will catch it and print the real EPC/BadVAddr instead
     // of more guessing.
-    /*
-     * Do not install ps2_exception_handler here. SetVCommonHandler expects a
-     * raw exception-vector entry, not an ordinary C function. PS2SDK's
-     * eedebug path uses an assembly shim that preserves registers and switches
-     * to a dedicated exception stack before calling C. Directly entering our
-     * C handler can fault in its own prologue and replace the real Cause/EPC
-     * with the repeated cause=3 / epc=1 diagnostic we've been seeing.
-     *
-     * Keep the handler code compiled for now; this hardware A/B only removes
-     * its registration while the audio probe remains otherwise identical.
-     */
+    ps2_install_exception_handler();
     dmaKit_init(D_CTRL_RELE_OFF, D_CTRL_MFD_OFF, D_CTRL_STS_UNSPEC, D_CTRL_STD_OFF, D_CTRL_RCYC_8, 1 << DMA_CHANNEL_GIF);
     dmaKit_chan_init(DMA_CHANNEL_GIF);
 

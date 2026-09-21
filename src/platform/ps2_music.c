@@ -29,16 +29,12 @@
 #define RS2MIDI_RPC_KEY_OFF    4
 #define RS2MIDI_RPC_GET_STATE  5
 #define RS2MIDI_RPC_LOAD_SLOT  6
-#define RS2MIDI_RPC_LOAD_ABS   7
 
 #define RS2MIDI_PONG 0x52533250u
 
 #define RS2MIDI_RPC_HEADER_BYTES  64u
 #define RS2MIDI_MAX_SAMPLE_BYTES  800u
 #define RS2MIDI_MAX_IRX_BYTES     (128u * 1024u)
-#define PS2_PACK_SPU_BASE          0x001e0000u
-#define PS2_PACK_SPU_LIMIT         0x001e0400u
-#define PS2_PACK_PROBE_SLOT        0u
 
 #define PS2_MIDI_ARCHIVE           2
 #define PS2_MIDI_MAX_TRACKS        32
@@ -102,12 +98,7 @@ typedef struct Ps2MusicState {
     uint64_t jingle_deadline_ms;
     uint8_t *midi_data;
     int midi_size;
-    /*
-     * PS2SDK's EE RPC clients are 64-byte aligned. Real hardware is much less
-     * forgiving than PCSX2 about SIF DMA/cache-line alignment, so preserve
-     * that requirement even though this client lives inside our overlay state.
-     */
-    SifRpcClientData_t rpc __attribute__((aligned(64)));
+    SifRpcClientData_t rpc;
     Ps2MidiTrack tracks[PS2_MIDI_MAX_TRACKS];
     Ps2MidiVoice voices[PS2_MIDI_VOICE_COUNT];
     uint8_t channel_program[16];
@@ -189,16 +180,6 @@ static const char ps2_pack_probe_invalid_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M probe id=106 invalid header path=%s\n";
 static const char ps2_pack_probe_ok_fmt[] PS2_AUDIO_RODATA =
     "audio: PS2M probe id=106 header ok samples=%u events=%u data=%u\n";
-static const char ps2_pack_sample_bad_fmt[] PS2_AUDIO_RODATA =
-    "audio: PS2M probe id=106 sample0 invalid offset=%u size=%u\n";
-static const char ps2_pack_sample_read_fmt[] PS2_AUDIO_RODATA =
-    "audio: PS2M probe id=106 sample0 read failed offset=%u chunk=%u\n";
-static const char ps2_pack_upload_fail_fmt[] PS2_AUDIO_RODATA =
-    "audio: PS2M probe id=106 sample0 upload failed offset=%u chunk=%u status=%d xfer=%d\n";
-static const char ps2_pack_upload_ok_fmt[] PS2_AUDIO_RODATA =
-    "audio: PS2M probe id=106 sample0 upload ok raw=%u chunks=%u addr=0x%08x xfer=%d\n";
-static const char ps2_pack_upload_before_fmt[] PS2_AUDIO_RODATA =
-    "audio: PS2M probe id=106 before proven-slot RPC bytes=%u addr=0x%08x\n";
 
 PS2_AUDIO_STATIC uint16_t ps2_midi_be16(const uint8_t *p)
 {
@@ -1007,11 +988,52 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
 
 PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
 {
-    /*
-     * Intentionally empty for this A/B. The extra 64-byte LOAD_SLOT now runs
-     * inside ps2_audio_init_backend(), before ready=1. Keeping this function
-     * present avoids changing the surrounding late-update control flow.
-     */
+    char path[320];
+    snprintf(path, sizeof(path),
+             ps2_pack_probe_path_fmt, ps2_cache_prefix());
+
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        rs2_log(ps2_pack_probe_missing_fmt, path);
+        return;
+    }
+
+    uint8_t header[40];
+    size_t got = fread(header, 1, sizeof(header), file);
+    fclose(file);
+
+    if (got != sizeof(header) ||
+        header[0] != 'R' ||
+        header[1] != 'S' ||
+        header[2] != 'M' ||
+        header[3] != '1' ||
+        ps2_pack_le16(header + 4) != 1u ||
+        ps2_pack_le16(header + 6) != 40u) {
+        rs2_log(ps2_pack_probe_invalid_fmt, path);
+        return;
+    }
+
+    uint32_t sample_count = ps2_pack_le32(header + 8);
+    uint32_t event_count = ps2_pack_le32(header + 12);
+    uint32_t sample_table_offset = ps2_pack_le32(header + 16);
+    uint32_t event_table_offset = ps2_pack_le32(header + 20);
+    uint32_t data_offset = ps2_pack_le32(header + 24);
+    uint32_t data_size = ps2_pack_le32(header + 28);
+
+    if (sample_count == 0 ||
+        event_count == 0 ||
+        sample_table_offset < 40u ||
+        event_table_offset < sample_table_offset ||
+        data_offset < event_table_offset ||
+        data_size == 0) {
+        rs2_log(ps2_pack_probe_invalid_fmt, path);
+        return;
+    }
+
+    rs2_log(ps2_pack_probe_ok_fmt,
+            (unsigned int)sample_count,
+            (unsigned int)event_count,
+            (unsigned int)data_size);
 }
 
 void ps2_audio_update_late(void) PS2_AUDIO_CODE;
