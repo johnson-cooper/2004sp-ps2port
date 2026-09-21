@@ -65,6 +65,7 @@
 #define PS2_AUDIO_DAT_ENTRY_BYTES    16u
 #define PS2_AUDIO_DAT_VERSION        1u
 #define PS2_AUDIO_DAT_MAX_LOOPS      256u
+#define PS2_AUDIO_DAT_SILENT_OFFSET  UINT32_MAX
 
 #define PS2_PACK_OUT_WAIT           0
 #define PS2_PACK_OUT_NOTE_ON        1
@@ -182,6 +183,7 @@ typedef struct Ps2SfxRequest {
     uint8_t selected_loops;
     uint8_t resolved;
     uint8_t from_dat;
+    uint8_t silent;
     uint8_t used;
 } Ps2SfxRequest;
 
@@ -480,6 +482,21 @@ PS2_AUDIO_STATIC bool ps2_audio_dat_read_raw_entry(
 
     uint32_t entry_offset = ps2_pack_le32(entry);
     uint32_t entry_size = ps2_pack_le32(entry + 4);
+
+    /*
+     * Explicit silent SFX variant. This is different from an all-zero/missing
+     * index entry: the builder writes UINT32_MAX/0 when the original rev254
+     * generator legitimately produces zero samples for a requested loop count.
+     */
+    if (entry_offset == PS2_AUDIO_DAT_SILENT_OFFSET &&
+        entry_size == 0u) {
+        *offset = entry_offset;
+        *size = 0u;
+        *aux0 = ps2_pack_le32(entry + 8);
+        *aux1 = ps2_pack_le32(entry + 12);
+        return true;
+    }
+
     if (entry_size == 0u) {
         return false;
     }
@@ -1996,6 +2013,8 @@ PS2_AUDIO_STATIC bool ps2_sfx_resolve_request(Ps2SfxRequest *request)
             request->duration_ms = duration_ms;
             request->selected_loops = selected;
             request->from_dat = 1;
+            request->silent =
+                offset == PS2_AUDIO_DAT_SILENT_OFFSET && size == 0u;
             request->resolved = 1;
             request->due_ms =
                 request->request_ms +
@@ -2192,6 +2211,16 @@ PS2_AUDIO_STATIC void ps2_sfx_update(void)
     }
 
     Ps2SfxRequest *request = &ps2_sfx_state.queue[chosen];
+
+    /*
+     * Some rev254 loop-only sounds intentionally generate zero samples when
+     * requested with loops=0. Preserve that exact no-op instead of falling
+     * through to the loops=1 variant.
+     */
+    if (request->silent) {
+        ps2_sfx_pop_request((uint32_t)chosen);
+        return;
+    }
 
     /*
      * Match the legacy single-wave policy: a new effect only replaces the
