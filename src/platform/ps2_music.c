@@ -996,6 +996,28 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
         ps2_music_state.bank_loaded = 0;
     }
 
+    /*
+     * Real-hardware A/B: issue the same extra 64-byte LOAD_SLOT while the
+     * backend is still in its proven initialization window, before ready=1
+     * and before any server-requested MIDI starts.
+     *
+     * This deliberately uses the embedded, already-proven ADPCM bytes and
+     * the already-proven slot-0 address. If this survives hardware while the
+     * identical post-init call crashes, the failure is timing/state related
+     * rather than data, USB, RPC command, transfer size, or SPU2 address.
+     */
+    if (ps2_audio_test_adpcm_size >= 80u) {
+        memset(&packet, 0, sizeof(packet));
+        memcpy(packet.sample, ps2_audio_test_adpcm + 16, 64u);
+        packet.words[0] = PS2_PACK_PROBE_SLOT;
+        packet.words[1] = 64u;
+        (void)ps2_audio_rpc_status(
+            &ps2_music_state.rpc,
+            RS2MIDI_RPC_LOAD_SLOT,
+            &packet,
+            RS2MIDI_RPC_HEADER_BYTES + 64);
+    }
+
     rs2_log(ps2_midi_bank_ready_fmt,
             (unsigned int)PS2_MIDI_BANK_SAMPLE_COUNT,
             (unsigned int)PS2_MIDI_BANK_SAMPLE_BYTES,
@@ -1008,34 +1030,10 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
 PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
 {
     /*
-     * Real-hardware A/B: remove the .ps2m/USB path completely.
-     *
-     * The header-only pack probe was hardware-safe, but every probe that
-     * subsequently sought/read sample bytes and then issued another audio RPC
-     * died at the same point on a real PS2.  For this test, use 64 bytes from
-     * the already-embedded, already-proven ADPCM sample and perform only the
-     * same post-init LOAD_SLOT operation.
-     *
-     * No fopen/fseek/fread/fclose, no .ps2m access, no probe logging, and no
-     * playback.  Slot 0 / 0x001e0000 is the exact destination already proven
-     * during the normal bank initialization.
+     * Intentionally empty for this A/B. The extra 64-byte LOAD_SLOT now runs
+     * inside ps2_audio_init_backend(), before ready=1. Keeping this function
+     * present avoids changing the surrounding late-update control flow.
      */
-    if (ps2_audio_test_adpcm_size < 80u) {
-        return;
-    }
-
-    Rs2MidiRpcPacket packet __attribute__((aligned(64)));
-    memset(&packet, 0, sizeof(packet));
-    memcpy(packet.sample, ps2_audio_test_adpcm + 16, 64u);
-
-    packet.words[0] = PS2_PACK_PROBE_SLOT;
-    packet.words[1] = 64u;
-
-    (void)ps2_audio_rpc_status(
-        &ps2_music_state.rpc,
-        RS2MIDI_RPC_LOAD_SLOT,
-        &packet,
-        RS2MIDI_RPC_HEADER_BYTES + 64);
 }
 
 void ps2_audio_update_late(void) PS2_AUDIO_CODE;
