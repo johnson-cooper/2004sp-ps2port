@@ -544,7 +544,12 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
             else:
                 active.pop((channel, note), None)
 
-    spu_payload = sum(max(0, len(blob) - 16) for blob in sample_blobs)
+    # Runtime uploads in hardware-proven 64-byte LOAD_ABS blocks and gives
+    # each resident sample its own 64-byte-aligned SPU2 span.
+    spu_payload = sum(
+        (max(0, len(blob) - 16) + 63) & ~63
+        for blob in sample_blobs
+    )
     spu_budget = PACK_SPU_BYTES
     if spu_payload > spu_budget:
         raise ValueError(
