@@ -82,7 +82,7 @@ SECTIONS {
          * past this address, ld will reject the attempted backwards move instead
          * of shifting .MIPS.abiflags/.sdata/.bss.
          */
-        . = 0x00200a60;
+        . = 0x0000cbe0;
     }
 
     ASSERT(ADDR(.rodata) == 0x001f3e80,
