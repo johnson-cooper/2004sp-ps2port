@@ -14,6 +14,7 @@
 #define RS2MIDI_RPC_LOAD_ABS     7
 #define RS2MIDI_RPC_NOTE_ON_ADDR 8
 #define RS2MIDI_RPC_SET_MIX      9
+#define RS2MIDI_RPC_SFX_NOTE_ON  10
 
 #define RS2MIDI_PONG 0x52533250u
 
@@ -29,6 +30,10 @@
 #define RS2MIDI_SPU_ADDR           0x001e0000u
 #define RS2MIDI_SAMPLE_STRIDE      0x00000400u
 #define RS2MIDI_SAMPLE_SLOTS       8u
+#define RS2MIDI_SFX_SPU_BASE       0x001e2000u
+#define RS2MIDI_SFX_SPU_LIMIT      0x00200000u
+#define RS2MIDI_SFX_CORE           1
+#define RS2MIDI_SFX_VOICE          23u
 #define RS2MIDI_MAX_SAMPLE_BYTES   800u
 #define RS2MIDI_RPC_HEADER_BYTES  64u
 #define RS2MIDI_RPC_BUFFER_BYTES  1024u
@@ -90,6 +95,27 @@ static int rs2midi_valid_pack_addr(u32 addr)
            (addr & 0x0f) == 0;
 }
 
+static int rs2midi_valid_sfx_range(u32 addr, u32 size)
+{
+    if (size == 0 || (addr & 0x0f) != 0 || (size & 0x0f) != 0) {
+        return 0;
+    }
+    if (addr < RS2MIDI_SFX_SPU_BASE || addr >= RS2MIDI_SFX_SPU_LIMIT) {
+        return 0;
+    }
+    if (size > RS2MIDI_SFX_SPU_LIMIT - addr) {
+        return 0;
+    }
+    return 1;
+}
+
+static int rs2midi_valid_sfx_addr(u32 addr)
+{
+    return addr >= RS2MIDI_SFX_SPU_BASE &&
+           addr < RS2MIDI_SFX_SPU_LIMIT &&
+           (addr & 0x0f) == 0;
+}
+
 static int rs2midi_valid_voice(u32 voice)
 {
     return voice < 24;
@@ -114,7 +140,8 @@ static u16 rs2midi_clamp_volume(u32 volume)
     return (u16)volume;
 }
 
-static void rs2midi_start_voice(
+static void rs2midi_start_voice_on_core(
+    u32 core,
     u32 voice,
     u16 pitch,
     u16 voll,
@@ -125,16 +152,27 @@ static void rs2midi_start_voice(
      * Keep this register sequence identical to the hardware-proven slot
      * NOTE_ON path. Core 0 is rs2midi-owned; audsrv remains isolated on core 1.
      */
-    sceSdSetParam(RS2MIDI_CORE | SD_PARAM_MVOLL, 0x3fff);
-    sceSdSetParam(RS2MIDI_CORE | SD_PARAM_MVOLR, 0x3fff);
+    sceSdSetParam(core | SD_PARAM_MVOLL, 0x3fff);
+    sceSdSetParam(core | SD_PARAM_MVOLR, 0x3fff);
     sceSdSetParam(1 | SD_PARAM_AVOLL, 0x7fff);
     sceSdSetParam(1 | SD_PARAM_AVOLR, 0x7fff);
 
-    sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLL, voll);
-    sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLR, volr);
-    sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_PITCH, pitch);
-    sceSdSetAddr(RS2MIDI_CORE | (voice << 1) | SD_VADDR_SSA, sample_addr);
-    sceSdSetSwitch(RS2MIDI_CORE | SD_SWITCH_KON, 1u << voice);
+    sceSdSetParam(core | (voice << 1) | SD_VPARAM_VOLL, voll);
+    sceSdSetParam(core | (voice << 1) | SD_VPARAM_VOLR, volr);
+    sceSdSetParam(core | (voice << 1) | SD_VPARAM_PITCH, pitch);
+    sceSdSetAddr(core | (voice << 1) | SD_VADDR_SSA, sample_addr);
+    sceSdSetSwitch(core | SD_SWITCH_KON, 1u << voice);
+}
+
+static void rs2midi_start_voice(
+    u32 voice,
+    u16 pitch,
+    u16 voll,
+    u16 volr,
+    u32 sample_addr)
+{
+    rs2midi_start_voice_on_core(
+        RS2MIDI_CORE, voice, pitch, voll, volr, sample_addr);
 }
 
 static void *rs2midi_rpc_handler(int function, void *data, int size)
@@ -201,18 +239,30 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
         u32 sample_size = words[1];
         words[2] = (u32)-999;
 
+        int pack_range =
+            rs2midi_valid_pack_range(sample_addr, sample_size);
+        int sfx_range =
+            rs2midi_valid_sfx_range(sample_addr, sample_size);
+
         if (sample_size > RS2MIDI_MAX_SAMPLE_BYTES ||
-            !rs2midi_valid_pack_range(sample_addr, sample_size) ||
+            (!pack_range && !sfx_range) ||
             size < (int)(RS2MIDI_RPC_HEADER_BYTES + sample_size)) {
             status = RS2MIDI_ERR_ARGS;
             break;
         }
 
         /*
-         * Accurate packs are uploaded before their first event is scheduled.
-         * Silence core 0 while replacing the dedicated high-SPU2 pack region.
+         * Accurate music packs own core 0 and retain the proven all-voices-off
+         * upload rule. SFX live in a disjoint high-SPU2 region and use one
+         * dedicated core-1 voice, so loading an effect must not interrupt music.
          */
-        sceSdSetSwitch(RS2MIDI_CORE | SD_SWITCH_KOFF, 0x00ffffffu);
+        if (sfx_range) {
+            sceSdSetSwitch(
+                RS2MIDI_SFX_CORE | SD_SWITCH_KOFF,
+                1u << RS2MIDI_SFX_VOICE);
+        } else {
+            sceSdSetSwitch(RS2MIDI_CORE | SD_SWITCH_KOFF, 0x00ffffffu);
+        }
 
         int transferred = sceSdVoiceTrans(
             RS2MIDI_DMA_CHANNEL,
@@ -277,6 +327,33 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
         break;
     }
 
+    case RS2MIDI_RPC_SFX_NOTE_ON: {
+        u32 voice = words[0];
+        u32 sample_addr = words[4];
+
+        if (voice != RS2MIDI_SFX_VOICE ||
+            !rs2midi_valid_sfx_addr(sample_addr)) {
+            status = RS2MIDI_ERR_ARGS;
+            break;
+        }
+
+        /*
+         * SFX are isolated on core 1 so they can overlap the hardware-good
+         * core-0 music sequencer without stealing or silencing music voices.
+         */
+        sceSdSetSwitch(
+            RS2MIDI_SFX_CORE | SD_SWITCH_KOFF,
+            1u << voice);
+        rs2midi_start_voice_on_core(
+            RS2MIDI_SFX_CORE,
+            voice,
+            rs2midi_clamp_pitch(words[1]),
+            rs2midi_clamp_volume(words[2]),
+            rs2midi_clamp_volume(words[3]),
+            sample_addr);
+        break;
+    }
+
     case RS2MIDI_RPC_SET_MIX: {
         u32 voice = words[0];
         if (!rs2midi_valid_voice(voice)) {
@@ -285,10 +362,10 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
         }
 
         sceSdSetParam(
-            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLL,
+            core | (voice << 1) | SD_VPARAM_VOLL,
             rs2midi_clamp_volume(words[1]));
         sceSdSetParam(
-            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLR,
+            core | (voice << 1) | SD_VPARAM_VOLR,
             rs2midi_clamp_volume(words[2]));
         break;
     }
@@ -299,7 +376,7 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
             status = RS2MIDI_ERR_ARGS;
             break;
         }
-        sceSdSetParam(RS2MIDI_CORE | (voice << 1) | SD_VPARAM_PITCH,
+        sceSdSetParam(core | (voice << 1) | SD_VPARAM_PITCH,
                       rs2midi_clamp_pitch(words[1]));
         break;
     }
@@ -319,9 +396,9 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
          * NOTE_ON restores the intended mix when the voice is allocated again.
          */
         sceSdSetParam(
-            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLL, 0);
+            core | (voice << 1) | SD_VPARAM_VOLL, 0);
         sceSdSetParam(
-            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLR, 0);
+            core | (voice << 1) | SD_VPARAM_VOLR, 0);
         sceSdSetSwitch(RS2MIDI_CORE | SD_SWITCH_KOFF, 1u << voice);
         break;
     }
@@ -339,16 +416,16 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
          */
         words[1] = rs2midi_sample_loaded_mask != 0;
         words[2] = (u32)sceSdGetParam(
-            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_PITCH);
+            core | (voice << 1) | SD_VPARAM_PITCH);
         words[3] = (u32)sceSdGetParam(
-            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLL);
+            core | (voice << 1) | SD_VPARAM_VOLL);
         words[4] = (u32)sceSdGetParam(
-            RS2MIDI_CORE | (voice << 1) | SD_VPARAM_VOLR);
+            core | (voice << 1) | SD_VPARAM_VOLR);
         words[5] = sceSdGetAddr(
-            RS2MIDI_CORE | (voice << 1) | SD_VADDR_SSA);
+            core | (voice << 1) | SD_VADDR_SSA);
         words[6] = sceSdGetSwitch(RS2MIDI_CORE | SD_SWITCH_ENDX);
-        words[7] = (u32)sceSdGetParam(RS2MIDI_CORE | SD_PARAM_MVOLL);
-        words[8] = (u32)sceSdGetParam(RS2MIDI_CORE | SD_PARAM_MVOLR);
+        words[7] = (u32)sceSdGetParam(core | SD_PARAM_MVOLL);
+        words[8] = (u32)sceSdGetParam(core | SD_PARAM_MVOLR);
         words[9] = (u32)sceSdGetParam(1 | SD_PARAM_AVOLL);
         words[10] = (u32)sceSdGetParam(1 | SD_PARAM_AVOLR);
         break;
