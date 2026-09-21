@@ -88,6 +88,7 @@ typedef struct Ps2MusicState {
     uint8_t jingle_active;
     uint8_t pending_valid;
     uint8_t pending_loop;
+    uint8_t pack_probe_done;
     uint8_t track_count;
     uint8_t format;
     uint16_t division;
@@ -171,6 +172,14 @@ static const char ps2_midi_loop_fmt[] PS2_AUDIO_RODATA =
     "audio: rev254 MIDI id=%d loop\n";
 static const char ps2_midi_jingle_resume_fmt[] PS2_AUDIO_RODATA =
     "audio: rev254 MIDI jingle complete; resume id=%d\n";
+static const char ps2_pack_probe_path_fmt[] PS2_AUDIO_RODATA =
+    "%srom/ps2audio/106.ps2m";
+static const char ps2_pack_probe_missing_fmt[] PS2_AUDIO_RODATA =
+    "audio: PS2M probe id=106 missing path=%s\n";
+static const char ps2_pack_probe_invalid_fmt[] PS2_AUDIO_RODATA =
+    "audio: PS2M probe id=106 invalid header path=%s\n";
+static const char ps2_pack_probe_ok_fmt[] PS2_AUDIO_RODATA =
+    "audio: PS2M probe id=106 header ok samples=%u events=%u data=%u\n";
 
 PS2_AUDIO_STATIC uint16_t ps2_midi_be16(const uint8_t *p)
 {
@@ -183,6 +192,19 @@ PS2_AUDIO_STATIC uint32_t ps2_midi_be32(const uint8_t *p)
            ((uint32_t)p[1] << 16) |
            ((uint32_t)p[2] << 8) |
            (uint32_t)p[3];
+}
+
+PS2_AUDIO_STATIC uint16_t ps2_pack_le16(const uint8_t *p)
+{
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+PS2_AUDIO_STATIC uint32_t ps2_pack_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
 }
 
 PS2_AUDIO_STATIC bool ps2_midi_read_vlq(
@@ -964,6 +986,56 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
     return true;
 }
 
+PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
+{
+    char path[320];
+    snprintf(path, sizeof(path),
+             ps2_pack_probe_path_fmt, ps2_cache_prefix());
+
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        rs2_log(ps2_pack_probe_missing_fmt, path);
+        return;
+    }
+
+    uint8_t header[40];
+    size_t got = fread(header, 1, sizeof(header), file);
+    fclose(file);
+
+    if (got != sizeof(header) ||
+        header[0] != 'R' ||
+        header[1] != 'S' ||
+        header[2] != 'M' ||
+        header[3] != '1' ||
+        ps2_pack_le16(header + 4) != 1u ||
+        ps2_pack_le16(header + 6) != 40u) {
+        rs2_log(ps2_pack_probe_invalid_fmt, path);
+        return;
+    }
+
+    uint32_t sample_count = ps2_pack_le32(header + 8);
+    uint32_t event_count = ps2_pack_le32(header + 12);
+    uint32_t sample_table_offset = ps2_pack_le32(header + 16);
+    uint32_t event_table_offset = ps2_pack_le32(header + 20);
+    uint32_t data_offset = ps2_pack_le32(header + 24);
+    uint32_t data_size = ps2_pack_le32(header + 28);
+
+    if (sample_count == 0 ||
+        event_count == 0 ||
+        sample_table_offset < 40u ||
+        event_table_offset < sample_table_offset ||
+        data_offset < event_table_offset ||
+        data_size == 0) {
+        rs2_log(ps2_pack_probe_invalid_fmt, path);
+        return;
+    }
+
+    rs2_log(ps2_pack_probe_ok_fmt,
+            (unsigned int)sample_count,
+            (unsigned int)event_count,
+            (unsigned int)data_size);
+}
+
 void ps2_audio_update_late(void) PS2_AUDIO_CODE;
 void ps2_audio_update_late(void)
 {
@@ -979,6 +1051,7 @@ void ps2_audio_update_late(void)
         }
         ps2_music_state.jingle_active = 0;
         ps2_music_state.pending_valid = 0;
+        ps2_music_state.pack_probe_done = 0;
         ps2_music_state.desired_song_id = -1;
         if (!ps2_music_state.ready) {
             ps2_music_state.init_polls = 1;
@@ -1012,6 +1085,11 @@ void ps2_audio_update_late(void)
         if (!ps2_audio_init_backend()) {
             return;
         }
+    }
+
+    if (!ps2_music_state.pack_probe_done) {
+        ps2_music_state.pack_probe_done = 1;
+        ps2_probe_expanse_pack_header();
     }
 
     /*
