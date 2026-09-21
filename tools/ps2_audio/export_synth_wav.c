@@ -205,9 +205,15 @@ int main(int argc, char **argv)
 
     Packet *wav = wave_get_wave(&wave, loop_count);
     if (!wav || wav->pos <= 44) {
-        fprintf(stderr, "synth produced no audio\n");
+        /*
+         * This is valid for some rev254 loop-only effects when loopCount=0:
+         * the original generator removes the loop span and nothing remains.
+         * Use a distinct exit code so the DAT builder can encode intentional
+         * silence instead of treating it as corrupt Content.
+         */
+        fprintf(stderr, "synth produced intentional silence\n");
         free(synth_data);
-        return 1;
+        return 3;
     }
 
     FILE *out = fopen(argv[2], "wb");
