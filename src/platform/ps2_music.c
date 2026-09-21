@@ -2259,6 +2259,9 @@ void ps2_audio_update_late(void)
         ps2_music_state.pending_valid = 0;
         ps2_music_state.pack_probe_done = 0;
         ps2_music_state.desired_song_id = -1;
+        ps2_sfx_state.queue_head = 0;
+        ps2_sfx_state.queue_tail = 0;
+        ps2_sfx_state.queue_count = 0;
         if (!ps2_music_state.ready) {
             ps2_music_state.init_polls = 1;
         }
@@ -2292,6 +2295,12 @@ void ps2_audio_update_late(void)
             return;
         }
     }
+
+    /*
+     * SFX file lookup/upload never runs inside client_read(). Packet 25 only
+     * appends a tiny request record; USB and RPC work is drained here.
+     */
+    ps2_sfx_update();
 
     /*
      * MIDI_JINGLE carries its duration in milliseconds. While it is active,
