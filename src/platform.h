@@ -71,8 +71,6 @@ double jrand(void);
 // beside client.elf in any folder instead of being forced to the root of mass0:.
 void ps2_set_launch_path(const char *path);
 const char *ps2_cache_prefix(void);
-/* Native low-memory SFX proof path; currently only rev254 synth 468. */
-void ps2_sfx_request(int id, int loop, int delay);
 #endif
 
 bool platform_init(void);
