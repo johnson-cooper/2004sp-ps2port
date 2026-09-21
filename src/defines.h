@@ -106,7 +106,9 @@
 #define PS2_PLAYER_FULL_DETAIL_RADIUS 6
 #define PS2_PLAYER_RENDER_RADIUS 14
 // Hard cap for ordinary remote-player submissions; interaction-important players bypass it.
-#define PS2_PLAYER_RENDER_BUDGET 32
+// Real-PS2 crowd baseline: 12 keeps the nearest players visible while sharply reducing
+// animated-model transform/sort/raster cost in dense areas.
+#define PS2_PLAYER_RENDER_BUDGET 12
 // Edge-residency test: match static loc/model residency to the traversal-proven 80x80 terrain
 // bridge window. This should prevent buildings/fences from ending four tiles before terrain when
 // the player approaches a normal scene edge, at the cost of more resident static-world wrappers.
