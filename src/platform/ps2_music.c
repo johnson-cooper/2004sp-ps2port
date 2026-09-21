@@ -1000,7 +1000,6 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
 
     uint8_t header[40];
     size_t got = fread(header, 1, sizeof(header), file);
-    fclose(file);
 
     if (got != sizeof(header) ||
         header[0] != 'R' ||
@@ -1009,6 +1008,7 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
         header[3] != '1' ||
         ps2_pack_le16(header + 4) != 1u ||
         ps2_pack_le16(header + 6) != 40u) {
+        fclose(file);
         rs2_log(ps2_pack_probe_invalid_fmt, path);
         return;
     }
@@ -1025,10 +1025,44 @@ PS2_AUDIO_STATIC void ps2_probe_expanse_pack_header(void)
         sample_table_offset < 40u ||
         event_table_offset < sample_table_offset ||
         data_offset < event_table_offset ||
-        data_size == 0) {
+        data_size == 0 ||
+        sample_table_offset > 0x7fffffffu) {
+        fclose(file);
         rs2_log(ps2_pack_probe_invalid_fmt, path);
         return;
     }
+
+    /*
+     * Real-hardware A/B: extend the already-proven header-only probe with
+     * filesystem access only. Read sample record 0 and exactly 64 bytes from
+     * its ADPCM payload. Do not upload, play, or otherwise consume the bytes.
+     */
+    uint8_t sample_rec[8];
+    uint8_t sample_bytes[64];
+
+    if (fseek(file, (long)sample_table_offset, SEEK_SET) != 0 ||
+        fread(sample_rec, 1, sizeof(sample_rec), file) != sizeof(sample_rec)) {
+        fclose(file);
+        return;
+    }
+
+    uint32_t blob_offset = ps2_pack_le32(sample_rec);
+    uint32_t blob_size = ps2_pack_le32(sample_rec + 4);
+    uint32_t relative_offset =
+        blob_offset >= data_offset ? blob_offset - data_offset : data_size;
+
+    if (blob_size < 80u ||
+        blob_offset < data_offset ||
+        relative_offset > data_size ||
+        blob_size > data_size - relative_offset ||
+        blob_offset > 0x7fffffffu - 16u ||
+        fseek(file, (long)(blob_offset + 16u), SEEK_SET) != 0 ||
+        fread(sample_bytes, 1, sizeof(sample_bytes), file) != sizeof(sample_bytes)) {
+        fclose(file);
+        return;
+    }
+
+    fclose(file);
 
     rs2_log(ps2_pack_probe_ok_fmt,
             (unsigned int)sample_count,
