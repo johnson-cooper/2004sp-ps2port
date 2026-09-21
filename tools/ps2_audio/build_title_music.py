@@ -165,6 +165,12 @@ class ActiveLayer:
     sample_index: int
     region: Region
     velocity: int
+    token: int
+    channel: int
+    midi_note: int
+    note_on_us: int
+    release_start_us: int | None = None
+    release_end_us: int | None = None
     released: bool = False
 
 
@@ -474,16 +480,11 @@ class SoundFontResolver:
                 sample_type = self.sample_headers[sample_id][9] & 0x7FFF
                 sample_link = self.sample_headers[sample_id][8]
 
-                if sample_type == SAMPLE_TYPE_LEFT:
-                    regions += self._expand_sample(sample_id, values, -500)
-                    if sample_link < len(self.sample_headers):
-                        regions += self._expand_sample(sample_link, values, 500)
-                elif sample_type == SAMPLE_TYPE_RIGHT:
-                    regions += self._expand_sample(sample_id, values, 500)
-                    if sample_link < len(self.sample_headers):
-                        regions += self._expand_sample(sample_link, values, -500)
-                else:
-                    regions += self._expand_sample(sample_id, values, 0)
+                # TinySoundFont uses the sample selected by the instrument
+                # zone directly. It does not auto-expand sampleLink into a
+                # second voice. Doing that here produced two independently
+                # encoded/pitched voices and could sound like chorus/detune.
+                regions += self._expand_sample(sample_id, values, 0)
 
         unique = {}
         for region in regions:
@@ -590,7 +591,13 @@ def _tiny_amp_env(region: Region, note: int):
     }
 
 
-def _mix(region: Region, velocity: int, state: ChannelState) -> tuple[int, int]:
+def _mix_values(
+    region: Region,
+    velocity: int,
+    controller_volume: int,
+    controller_expression: int,
+    controller_pan: int,
+) -> tuple[int, int]:
     effective_velocity = (
         region.fixed_velocity
         if region.fixed_velocity is not None
@@ -599,15 +606,73 @@ def _mix(region: Region, velocity: int, state: ChannelState) -> tuple[int, int]:
     velocity_gain = math.sqrt(
         max(0.0, min(1.0, effective_velocity / 127.0))
     )
-    controller_gain = (state.volume / 127.0) * (state.expression / 127.0)
+    controller_gain = (
+        controller_volume / 127.0
+    ) * (
+        controller_expression / 127.0
+    )
     sf_gain = 10.0 ** (-max(0, region.attenuation) / 200.0)
-    volume = int(round(100.0 * velocity_gain * controller_gain * sf_gain))
+    volume = int(round(
+        100.0 * velocity_gain * controller_gain * sf_gain
+    ))
     volume = max(0, min(100, volume))
 
-    midi_pan = int(round((state.pan - 64) * (100.0 / 63.0)))
+    midi_pan = int(round(
+        (controller_pan - 64) * (100.0 / 63.0)
+    ))
     sf_pan = int(round(region.pan / 5.0))
     pan = max(-100, min(100, midi_pan + sf_pan))
     return volume, pan
+
+
+def _mix(region: Region, velocity: int, state: ChannelState) -> tuple[int, int]:
+    return _mix_values(
+        region,
+        velocity,
+        state.volume,
+        state.expression,
+        state.pan,
+    )
+
+
+def _amp_level_before_release(
+    region: Region,
+    note: int,
+    elapsed_seconds: float,
+) -> float:
+    env = _tiny_amp_env(region, note)
+    t = max(0.0, elapsed_seconds)
+
+    if t < env["delay"]:
+        return 0.0
+    t -= env["delay"]
+
+    if env["attack"] > 0.0:
+        if t < env["attack"]:
+            return max(0.0, min(1.0, t / env["attack"]))
+        t -= env["attack"]
+
+    if t < env["hold"]:
+        return 1.0
+    t -= env["hold"]
+
+    sustain = max(0.0, min(1.0, env["sustain_gain"]))
+    decay = env["decay"]
+    if decay <= 0.0:
+        return sustain
+
+    if sustain > 0.0:
+        decay_to_sustain = decay * math.log(sustain) / -9.226
+        decay_to_sustain = max(0.0, decay_to_sustain)
+    else:
+        decay_to_sustain = decay
+
+    if t < decay_to_sustain:
+        return max(0.0, min(
+            1.0,
+            math.exp(-9.226 * t / decay),
+        ))
+    return sustain
 
 
 def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
@@ -627,7 +692,72 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
     diagnostic_programs = {
         14: "Tubular Bells",
         56: "Trumpet",
+        60: "French Horn",
+        61: "Brass Section",
     }
+
+    all_layers: list[ActiveLayer] = []
+    mix_timeline = [
+        [(0, 127, 127, 64)]
+        for _ in range(16)
+    ]
+    token_busy_until = [0] * 256
+    token_cursor = 0
+    envelope_mix_events = 0
+
+    def record_mix_state(time_us: int, channel: int):
+        value = (
+            int(time_us),
+            channels[channel].volume,
+            channels[channel].expression,
+            channels[channel].pan,
+        )
+        timeline = mix_timeline[channel]
+        if timeline and timeline[-1][0] == value[0]:
+            timeline[-1] = value
+        else:
+            timeline.append(value)
+
+    def mix_state_at(channel: int, time_us: int):
+        timeline = mix_timeline[channel]
+        for when, volume, expression, pan in reversed(timeline):
+            if when <= time_us:
+                return volume, expression, pan
+        return 127, 127, 64
+
+    def allocate_token(time_us: int) -> int:
+        nonlocal token_cursor
+        for offset in range(256):
+            token = (token_cursor + offset) & 0xFF
+            if token_busy_until[token] <= time_us:
+                token_busy_until[token] = 1 << 62
+                token_cursor = (token + 1) & 0xFF
+                return token
+        raise ValueError(
+            f"more than 256 overlapping accurate-pack note layers "
+            f"at {time_us / 1_000_000.0:.3f}s"
+        )
+
+    def begin_release(
+        layer: ActiveLayer,
+        release_start_us: int,
+        immediate: bool = False,
+    ):
+        if layer.release_start_us is not None:
+            return
+        layer.release_start_us = int(release_start_us)
+        if immediate:
+            layer.release_end_us = int(release_start_us)
+        else:
+            env = _tiny_amp_env(layer.region, layer.midi_note)
+            release_seconds = env["release"]
+            if release_seconds <= 0.0:
+                release_seconds = 0.01
+            layer.release_end_us = int(
+                release_start_us
+                + round(release_seconds * 1_000_000.0)
+            )
+        token_busy_until[layer.token] = layer.release_end_us
 
     def diagnose_region(
         time_us: int,
@@ -817,16 +947,7 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
         ))
 
     def update_channel_mix(time_us, channel):
-        state = channels[channel]
-        for (ch, note), layers in list(active.items()):
-            if ch != channel:
-                continue
-            for layer in layers:
-                volume, pan = _mix(layer.region, layer.velocity, state)
-                add_event(
-                    time_us, OUT_MIX, ch, note, 0,
-                    layer.sample_index, 0, volume, pan,
-                )
+        record_mix_state(time_us, channel)
 
     def update_channel_pitch(time_us, channel):
         state = channels[channel]
@@ -835,7 +956,7 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
                 continue
             for layer in layers:
                 add_event(
-                    time_us, OUT_PITCH, ch, note, 0,
+                    time_us, OUT_PITCH, ch, layer.token, 0,
                     layer.sample_index,
                     pitch_for(
                         time_us, ch, layer.region, note, state
@@ -866,11 +987,14 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
             elif control == 64:
                 was = state.sustain
                 state.sustain = value >= 64
-                if state.sustain != was:
-                    add_event(time_us, OUT_SUSTAIN, channel, 0, 1 if state.sustain else 0)
                 if was and not state.sustain:
                     for key in [k for k in active if k[0] == channel]:
-                        kept = [layer for layer in active[key] if not layer.released]
+                        kept = []
+                        for layer in active[key]:
+                            if layer.released:
+                                begin_release(layer, time_us)
+                            else:
+                                kept.append(layer)
                         if kept:
                             active[key] = kept
                         else:
@@ -884,15 +1008,29 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
                 update_channel_pitch(time_us, channel)
             elif control in (120, 123):
                 for key in [k for k in active if k[0] == channel]:
-                    add_event(time_us, OUT_NOTE_OFF, channel, key[1])
+                    for layer in active[key]:
+                        begin_release(layer, time_us, immediate=True)
                     del active[key]
             elif control == 121:
+                was_sustain = state.sustain
                 state.volume = 127
                 state.expression = 127
                 state.pan = 64
                 state.pitch_bend = 8192
                 state.bend_range = 2
                 state.sustain = False
+                if was_sustain:
+                    for key in [k for k in active if k[0] == channel]:
+                        kept = []
+                        for layer in active[key]:
+                            if layer.released:
+                                begin_release(layer, time_us)
+                            else:
+                                kept.append(layer)
+                        if kept:
+                            active[key] = kept
+                        else:
+                            del active[key]
                 update_channel_mix(time_us, channel)
                 update_channel_pitch(time_us, channel)
             continue
@@ -920,25 +1058,233 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
                 )
                 sample_index = ensure_sample(region)
                 volume, pan = _mix(region, velocity, state)
+                initial_gain = _amp_level_before_release(
+                    region, note, 0.0
+                )
+                volume = max(
+                    0,
+                    min(100, int(round(volume * initial_gain))),
+                )
                 pitch = pitch_for(
                     time_us, channel, region, note, state
                 )
+                token = allocate_token(time_us)
                 add_event(
-                    time_us, OUT_NOTE_ON, channel, note, velocity,
+                    time_us, OUT_NOTE_ON, channel, token, velocity,
                     sample_index, pitch, volume, pan,
                 )
-                layers.append(ActiveLayer(sample_index, region, velocity))
+                layer = ActiveLayer(
+                    sample_index=sample_index,
+                    region=region,
+                    velocity=velocity,
+                    token=token,
+                    channel=channel,
+                    midi_note=note,
+                    note_on_us=int(time_us),
+                )
+                layers.append(layer)
+                all_layers.append(layer)
             continue
 
         if event_type == EV_NOTE_OFF:
             note = a
-            add_event(time_us, OUT_NOTE_OFF, channel, note)
             layers = active.get((channel, note), [])
             if state.sustain:
                 for layer in layers:
                     layer.released = True
             else:
+                for layer in layers:
+                    begin_release(layer, time_us)
                 active.pop((channel, note), None)
+
+    # Any voice left active at end-of-song is stopped at the MIDI boundary
+    # so looping area music does not lengthen on every pass.
+    for layers in list(active.values()):
+        for layer in layers:
+            if layer.release_start_us is None:
+                begin_release(layer, duration_us, immediate=True)
+    active.clear()
+
+    def envelope_gain_at(layer: ActiveLayer, time_us: int) -> float:
+        elapsed = max(
+            0.0,
+            (time_us - layer.note_on_us) / 1_000_000.0,
+        )
+        held_gain = _amp_level_before_release(
+            layer.region,
+            layer.midi_note,
+            elapsed,
+        )
+        if (
+            layer.release_start_us is None
+            or time_us <= layer.release_start_us
+        ):
+            return held_gain
+
+        release_elapsed = (
+            time_us - layer.release_start_us
+        ) / 1_000_000.0
+        env = _tiny_amp_env(layer.region, layer.midi_note)
+        release_seconds = env["release"]
+        if release_seconds <= 0.0:
+            release_seconds = 0.01
+        start_elapsed = max(
+            0.0,
+            (layer.release_start_us - layer.note_on_us)
+            / 1_000_000.0,
+        )
+        start_gain = _amp_level_before_release(
+            layer.region,
+            layer.midi_note,
+            start_elapsed,
+        )
+        if release_elapsed >= release_seconds:
+            return 0.0
+        return max(
+            0.0,
+            min(
+                1.0,
+                start_gain
+                * math.exp(
+                    -9.226 * release_elapsed / release_seconds
+                ),
+            ),
+        )
+
+    def add_segment_points(
+        points: set[int],
+        start_us: int,
+        end_us: int,
+        steps: int,
+    ):
+        if end_us <= start_us or steps <= 0:
+            return
+        span = end_us - start_us
+        for step in range(1, steps + 1):
+            points.add(start_us + (span * step) // steps)
+
+    # Bake TinySoundFont-style amplitude envelopes into existing OUT_MIX
+    # events. This avoids any new PS2 runtime/IRX protocol while preserving
+    # per-note attack, decay, sustain and release behavior.
+    for layer in all_layers:
+        release_start = (
+            layer.release_start_us
+            if layer.release_start_us is not None
+            else duration_us
+        )
+        release_end = (
+            layer.release_end_us
+            if layer.release_end_us is not None
+            else release_start
+        )
+        env = _tiny_amp_env(layer.region, layer.midi_note)
+
+        delay_end = layer.note_on_us + int(
+            round(env["delay"] * 1_000_000.0)
+        )
+        attack_end = delay_end + int(
+            round(env["attack"] * 1_000_000.0)
+        )
+        hold_end = attack_end + int(
+            round(env["hold"] * 1_000_000.0)
+        )
+
+        sustain = max(
+            0.0,
+            min(1.0, env["sustain_gain"]),
+        )
+        if env["decay"] > 0.0:
+            if sustain > 0.0:
+                decay_seconds = (
+                    env["decay"]
+                    * math.log(sustain)
+                    / -9.226
+                )
+                decay_seconds = max(0.0, decay_seconds)
+            else:
+                decay_seconds = env["decay"]
+        else:
+            decay_seconds = 0.0
+        decay_end = hold_end + int(
+            round(decay_seconds * 1_000_000.0)
+        )
+
+        points: set[int] = set()
+        if delay_end > layer.note_on_us:
+            points.add(min(delay_end, release_start))
+        add_segment_points(
+            points,
+            max(layer.note_on_us, delay_end),
+            min(attack_end, release_start),
+            8,
+        )
+        if hold_end > attack_end:
+            points.add(min(hold_end, release_start))
+        add_segment_points(
+            points,
+            max(layer.note_on_us, hold_end),
+            min(decay_end, release_start),
+            24,
+        )
+
+        # Controller changes must preserve the current envelope level.
+        for when, _vol, _expr, _pan in mix_timeline[layer.channel]:
+            if layer.note_on_us < when < release_end:
+                points.add(when)
+
+        if release_start > layer.note_on_us:
+            points.add(release_start)
+        add_segment_points(
+            points,
+            release_start,
+            release_end,
+            16,
+        )
+
+        last_mix = None
+        for when in sorted(points):
+            if when <= layer.note_on_us or when > release_end:
+                continue
+            ctrl_volume, ctrl_expression, ctrl_pan = mix_state_at(
+                layer.channel, when
+            )
+            base_volume, pan = _mix_values(
+                layer.region,
+                layer.velocity,
+                ctrl_volume,
+                ctrl_expression,
+                ctrl_pan,
+            )
+            gain = envelope_gain_at(layer, when)
+            volume = max(
+                0,
+                min(100, int(round(base_volume * gain))),
+            )
+            mix = (volume, pan)
+            if mix == last_mix:
+                continue
+            add_event(
+                when,
+                OUT_MIX,
+                layer.channel,
+                layer.token,
+                0,
+                layer.sample_index,
+                0,
+                volume,
+                pan,
+            )
+            envelope_mix_events += 1
+            last_mix = mix
+
+        # OUT_MIX at the release end is inserted first, then KOFF, so the
+        # final transition cannot leave a constant loop audible.
+        add_event(
+            release_end,
+            OUT_NOTE_OFF,
+            layer.channel,
+            layer.token,
+        )
 
     # Runtime uploads in hardware-proven 64-byte LOAD_ABS blocks and gives
     # each resident sample its own 64-byte-aligned SPU2 span.
@@ -1005,6 +1351,7 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
     print(f"Duration:         {duration_us / 1_000_000.0:.3f} s")
     print(f"ADPCM samples:    {len(sample_blobs)}")
     print(f"Sequence events:  {len(packed_events)}")
+    print(f"Envelope events:  {envelope_mix_events}")
     print(f"Pitch clamps:     {pitch_clamp_count}")
     if pitch_diff_by_program:
         print("TinySoundFont pitch deltas by bank/program:")
