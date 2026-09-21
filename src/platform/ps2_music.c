@@ -249,6 +249,7 @@ static const char ps2_pack_fallback_fmt[] PS2_AUDIO_RODATA =
 
 static const char ps2_sfx_path_fmt[] PS2_AUDIO_RODATA =
     "%srom/ps2sfx/468.ps2a";
+static const char ps2_sfx_read_mode[] PS2_AUDIO_RODATA = "rb";
 static const char ps2_sfx_open_fail_fmt[] PS2_AUDIO_RODATA =
     "audio: SFX 468 open failed path=%s\n";
 static const char ps2_sfx_bad_fmt[] PS2_AUDIO_RODATA =
@@ -1033,7 +1034,7 @@ PS2_AUDIO_STATIC int ps2_pack_start_id(int id, bool loop)
     char path[320];
     snprintf(path, sizeof(path), ps2_pack_path_fmt, ps2_cache_prefix(), id);
 
-    FILE *file = fopen(path, "rb");
+    FILE *file = fopen(path, ps2_sfx_read_mode);
     if (!file) {
         return 0;
     }
