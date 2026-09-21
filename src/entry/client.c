@@ -7412,12 +7412,21 @@ bool client_read(Client *c) {
         int id = g2(c->in);
         int loop = g1(c->in);
         int delay = g2(c->in);
+#ifdef __PS2__
+        /*
+         * PS2 lowmem does not unpack sounds.dat, so consume the same server
+         * packet through the isolated high-memory audio overlay instead.
+         * This replaces (rather than adds to) the legacy wave-queue body.
+         */
+        ps2_sfx_request(id, loop, delay);
+#else
         if (c->wave_enabled && !_Client.lowmem && c->wave_count < 50) {
             c->wave_ids[c->wave_count] = id;
             c->wave_loops[c->wave_count] = loop;
             c->wave_delay[c->wave_count] = delay + _Wave.delays[id];
             c->wave_count++;
         }
+#endif
         c->packet_type = -1;
         return true;
     }
