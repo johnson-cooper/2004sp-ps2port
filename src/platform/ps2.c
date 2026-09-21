@@ -1259,19 +1259,9 @@ void platform_set_wave_volume(int wavevol) {
     (void)wavevol;
 }
 
-static void ps2_sfx_play_wave_late(int8_t *src, int length) PS2_SFX_CODE;
-static void ps2_sfx_play_wave_late(int8_t *src, int length) {
-    (void)src;
-    (void)length;
-
-    /*
-     * Proof scope: only the real rev254 anvil_4 effect (synth id 468).
-     * client.c sets last_wave_id immediately before calling this platform hook.
-     * Nothing is loaded or touched during boot/login/network initialization.
-     */
-    if (!ps2_audio_ready ||
-        !ps2_crash_client ||
-        ps2_crash_client->last_wave_id != 468) {
+static void ps2_sfx_play_anvil_late(void) PS2_SFX_CODE;
+static void ps2_sfx_play_anvil_late(void) {
+    if (!ps2_audio_ready) {
         return;
     }
 
@@ -1308,8 +1298,9 @@ static void ps2_sfx_play_wave_late(int8_t *src, int length) {
         }
 
         uint32_t size = (uint32_t)size_long;
+        uint32_t padded_size = (size + 63u) & ~63u;
         unsigned char *buffer =
-            (unsigned char *)memalign(64, (size_t)((size + 63u) & ~63u));
+            (unsigned char *)memalign(64, (size_t)padded_size);
         if (!buffer) {
             rs2_log(ps2_sfx_alloc_fail_fmt, (unsigned int)size);
             fclose(file);
@@ -1317,7 +1308,7 @@ static void ps2_sfx_play_wave_late(int8_t *src, int length) {
             return;
         }
 
-        memset(buffer, 0, (size_t)((size + 63u) & ~63u));
+        memset(buffer, 0, (size_t)padded_size);
         size_t got = fread(buffer, 1, size, file);
         fclose(file);
 
@@ -1363,6 +1354,34 @@ static void ps2_sfx_play_wave_late(int8_t *src, int length) {
         rs2_log(ps2_sfx_play_fmt, channel);
     } else {
         rs2_log(ps2_sfx_play_fail_fmt, channel);
+    }
+}
+
+static void ps2_sfx_play_wave_late(int8_t *src, int length) PS2_SFX_CODE;
+static void ps2_sfx_play_wave_late(int8_t *src, int length) {
+    (void)src;
+    (void)length;
+
+    /*
+     * High-memory-mode compatibility path: client.c sets last_wave_id
+     * immediately before calling platform_play_wave().
+     */
+    if (!ps2_crash_client ||
+        ps2_crash_client->last_wave_id != 468) {
+        return;
+    }
+    ps2_sfx_play_anvil_late();
+}
+
+/*
+ * Low-memory PS2 path. Packet 25 already gives us the rev254 synth id, loop
+ * count and delay, so the proof does not need sounds.dat or runtime synthesis.
+ * Keep scope intentionally exact: anvil_4 is sent as (468, 1, 0).
+ */
+void ps2_sfx_request(int id, int loop, int delay) PS2_SFX_CODE;
+void ps2_sfx_request(int id, int loop, int delay) {
+    if (id == 468 && loop == 1 && delay == 0) {
+        ps2_sfx_play_anvil_late();
     }
 }
 
