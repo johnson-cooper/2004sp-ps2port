@@ -47,6 +47,50 @@ OUT_SUSTAIN = 3
 OUT_PITCH = 4
 OUT_MIX = 5
 
+GM_PROGRAM_NAMES = (
+    "Acoustic Grand Piano", "Bright Acoustic Piano",
+    "Electric Grand Piano", "Honky-tonk Piano",
+    "Electric Piano 1", "Electric Piano 2", "Harpsichord", "Clavinet",
+    "Celesta", "Glockenspiel", "Music Box", "Vibraphone",
+    "Marimba", "Xylophone", "Tubular Bells", "Dulcimer",
+    "Drawbar Organ", "Percussive Organ", "Rock Organ", "Church Organ",
+    "Reed Organ", "Accordion", "Harmonica", "Tango Accordion",
+    "Acoustic Guitar (nylon)", "Acoustic Guitar (steel)",
+    "Electric Guitar (jazz)", "Electric Guitar (clean)",
+    "Electric Guitar (muted)", "Overdriven Guitar",
+    "Distortion Guitar", "Guitar Harmonics",
+    "Acoustic Bass", "Electric Bass (finger)",
+    "Electric Bass (pick)", "Fretless Bass",
+    "Slap Bass 1", "Slap Bass 2", "Synth Bass 1", "Synth Bass 2",
+    "Violin", "Viola", "Cello", "Contrabass",
+    "Tremolo Strings", "Pizzicato Strings", "Orchestral Harp", "Timpani",
+    "String Ensemble 1", "String Ensemble 2", "SynthStrings 1",
+    "SynthStrings 2", "Choir Aahs", "Voice Oohs", "Synth Voice",
+    "Orchestra Hit",
+    "Trumpet", "Trombone", "Tuba", "Muted Trumpet",
+    "French Horn", "Brass Section", "SynthBrass 1", "SynthBrass 2",
+    "Soprano Sax", "Alto Sax", "Tenor Sax", "Baritone Sax",
+    "Oboe", "English Horn", "Bassoon", "Clarinet",
+    "Piccolo", "Flute", "Recorder", "Pan Flute",
+    "Blown Bottle", "Shakuhachi", "Whistle", "Ocarina",
+    "Lead 1 (square)", "Lead 2 (sawtooth)", "Lead 3 (calliope)",
+    "Lead 4 (chiff)", "Lead 5 (charang)", "Lead 6 (voice)",
+    "Lead 7 (fifths)", "Lead 8 (bass + lead)",
+    "Pad 1 (new age)", "Pad 2 (warm)", "Pad 3 (polysynth)",
+    "Pad 4 (choir)", "Pad 5 (bowed)", "Pad 6 (metallic)",
+    "Pad 7 (halo)", "Pad 8 (sweep)",
+    "FX 1 (rain)", "FX 2 (soundtrack)", "FX 3 (crystal)",
+    "FX 4 (atmosphere)", "FX 5 (brightness)", "FX 6 (goblins)",
+    "FX 7 (echoes)", "FX 8 (sci-fi)",
+    "Sitar", "Banjo", "Shamisen", "Koto",
+    "Kalimba", "Bag Pipe", "Fiddle", "Shanai",
+    "Tinkle Bell", "Agogo", "Steel Drums", "Woodblock",
+    "Taiko Drum", "Melodic Tom", "Synth Drum", "Reverse Cymbal",
+    "Guitar Fret Noise", "Breath Noise", "Seashore", "Bird Tweet",
+    "Telephone Ring", "Helicopter", "Applause", "Gunshot",
+)
+
+
 # Runtime rs2midi reserves 0x100000..0x1dffff for accurate per-song packs.
 # The compact fallback bank starts at 0x1e0000, while frozen audsrv remains
 # below the pack region.
@@ -829,6 +873,78 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
             f"release={env['release']:.4f}s"
         )
 
+    def trace_window_note(
+        time_us: int,
+        channel: int,
+        region: Region,
+        note: int,
+        velocity: int,
+        state: ChannelState,
+    ):
+        if not (20_000_000 <= time_us <= 30_000_000):
+            return
+
+        bank = 128 if channel == 9 else state.bank
+        if channel == 9:
+            program_name = "Percussion"
+        elif 0 <= state.program < len(GM_PROGRAM_NAMES):
+            program_name = GM_PROGRAM_NAMES[state.program]
+        else:
+            program_name = f"Program {state.program}"
+
+        loop_mode = {
+            0: "none",
+            1: "continuous",
+            3: "sustain",
+        }.get(region.sample_modes & 3, "reserved")
+
+        exact_loop = 0
+        ps2_loop = 0
+        period_error_pct = 0.0
+        equivalent_cents = 0.0
+        if (
+            (region.sample_modes & 1)
+            and region.loop_end > region.loop_start
+        ):
+            exact_loop = region.loop_end - region.loop_start
+            ps2_start_frame = region.loop_start // 28
+            ps2_end_frame = max(
+                ps2_start_frame,
+                (region.loop_end - 1) // 28,
+            )
+            ps2_loop = (
+                ps2_end_frame - ps2_start_frame + 1
+            ) * 28
+            if exact_loop > 0 and ps2_loop > 0:
+                period_error_pct = (
+                    ps2_loop / exact_loop - 1.0
+                ) * 100.0
+                equivalent_cents = 1200.0 * math.log2(
+                    exact_loop / ps2_loop
+                )
+
+        pitch, raw_pitch, _native, _effective, _bend, cents = (
+            _pitch_details(region, note, state)
+        )
+
+        print(
+            "WINDOW NOTE: "
+            f"time={time_us / 1_000_000.0:.3f}s "
+            f"ch={channel} bank={bank} "
+            f"program={state.program} name={program_name!r} "
+            f"note={note} velocity={velocity} "
+            f"sample={region.sample_id} "
+            f"sample_name={region.sample_name!r} "
+            f"root={region.root_key} rate={region.sample_rate} "
+            f"loop_mode={loop_mode} "
+            f"sf2_loop_samples={exact_loop} "
+            f"ps2_loop_samples={ps2_loop} "
+            f"period_error={period_error_pct:+.3f}% "
+            f"loop_pitch_error={equivalent_cents:+.3f}c "
+            f"pitch=0x{pitch:04X} raw=0x{raw_pitch:X} "
+            f"pitch_cents={cents:+.3f}"
+        )
+
     def pitch_for(
         time_us: int,
         channel: int,
@@ -1057,6 +1173,14 @@ def build_pack(sf2_path: Path, midi_path: Path, output_path: Path):
             for region in regions:
                 diagnose_region(
                     time_us, channel, region, note, state
+                )
+                trace_window_note(
+                    time_us,
+                    channel,
+                    region,
+                    note,
+                    velocity,
+                    state,
                 )
                 sample_index = ensure_sample(region)
                 volume, pan = _mix(region, velocity, state)
