@@ -23,6 +23,21 @@
 #include <gsKit.h>
 #include <audsrv.h>
 
+// ps2.yaml aliases this SDK symbol to the modern full-canvas compositor. The direct viewport
+// overlay needs the raw primitive, while the final screenTexture still needs the modern wrapper.
+#ifdef gsKit_prim_sprite_texture_3d
+#undef gsKit_prim_sprite_texture_3d
+#endif
+extern void gsKit_prim_sprite_texture_3d(GSGLOBAL *gsGlobal, const GSTEXTURE *Texture,
+                                         float x1, float y1, int iz1, float u1, float v1,
+                                         float x2, float y2, int iz2, float u2, float v2,
+                                         u64 color);
+extern void ps2_modern_gsKit_prim_sprite_texture_3d(
+    GSGLOBAL *gsGlobal, const GSTEXTURE *texture,
+    float x1, float y1, int iz1, float u1, float v1,
+    float x2, float y2, int iz2, float u2, float v2,
+    u64 color);
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -880,14 +895,14 @@ void platform_update_surface(void) {
     gsKit_clear(gsGlobal, GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x00, 0x00));
 #if PS2_GS_RASTER_TEST
     bool gs_scene = ps2_gs_raster_has_pending();
+    float view_x = 0.0f;
+    float view_y = 0.0f;
+    float view_w = 0.0f;
+    float view_h = 0.0f;
     if (gs_scene) {
         // Match whichever final presentation path is active. The modern controller UI maps the
         // legacy 512x334 viewport to 640x418 at (0,0); title/loading/non-game screens keep the
         // older uniformly-scaled full-canvas mapping.
-        float view_x;
-        float view_y;
-        float view_w;
-        float view_h;
         if (ps2_crash_client && ps2_crash_client->ingame && ps2_crash_client->shell) {
             view_x = 0.0f;
             view_y = 0.0f;
@@ -901,9 +916,13 @@ void platform_update_surface(void) {
             view_w = (float)PS2_VIEWPORT_LOGICAL_WIDTH * scale_x;
             view_h = (float)PS2_VIEWPORT_LOGICAL_HEIGHT * scale_y;
         }
-        // Draw the ordered 3D stream first. platform_blit_surface() keys the software sky pixels
-        // transparent, so the uploaded CPU canvas that follows acts only as the 2D/UI overlay.
+
+        // The 3D world never returns to EE pixels. Flush it directly to the GS framebuffer, then
+        // place only the sparse CPU 2D overlay over it.
         ps2_gs_raster_flush(gsGlobal, view_x, view_y, view_w, view_h);
+#if PS2_GS_DIRECT_VIEWPORT_TEST
+        ps2_gs_raster_draw_viewport_overlay(gsGlobal, view_x, view_y, view_w, view_h);
+#endif
     }
 #else
     bool gs_scene = false;
@@ -943,7 +962,7 @@ void platform_update_surface(void) {
         gsGlobal->PrimAlphaEnable = GS_SETTING_ON;
     }
 #endif
-    gsKit_prim_sprite_texture_3d(gsGlobal, &screenTexture,
+    ps2_modern_gsKit_prim_sprite_texture_3d(gsGlobal, &screenTexture,
                                   SCREEN_DST_X, SCREEN_DST_Y, 0, 0, 0,
                                   SCREEN_DST_X + SCREEN_DST_WIDTH, SCREEN_DST_Y + SCREEN_DST_HEIGHT, 0, SCREEN_LOGICAL_WIDTH, SCREEN_LOGICAL_HEIGHT,
                                   GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00));
@@ -966,6 +985,27 @@ void platform_update_surface(void) {
 // conversion for the GS experiment, so isolate the whole function instead of growing normal .text.
 __attribute__((section(".ps2_runtime_text"), noinline))
 void platform_blit_surface(Surface *surface, int x, int y) {
+#if PS2_GS_RASTER_TEST && PS2_GS_DIRECT_VIEWPORT_TEST
+    if (ps2_gs_raster_has_pending() &&
+        x == PS2_VIEWPORT_SCREEN_X && y == PS2_VIEWPORT_SCREEN_Y &&
+        surface->w == PS2_VIEWPORT_LOGICAL_WIDTH &&
+        surface->h == PS2_VIEWPORT_LOGICAL_HEIGHT) {
+        // The world is already in the GS command stream. Capture only the sparse 2D overlay and
+        // deliberately leave the main screenTexture viewport transparent. This removes the old
+        // 512x334 viewport copy and the completed-world RGB->CT16 conversion/upload path.
+        ps2_gs_raster_capture_viewport_overlay(
+            (const uint32_t *)surface->pixels, surface->w, surface->h);
+
+        uint16_t *screen = (uint16_t *)screenTexture.Mem;
+        for (int row = 0; row < PS2_VIEWPORT_LOGICAL_HEIGHT; row++) {
+            memset(&screen[(PS2_VIEWPORT_SCREEN_Y + row) * screenTexture.Width +
+                           PS2_VIEWPORT_SCREEN_X],
+                   0, PS2_VIEWPORT_LOGICAL_WIDTH * sizeof(uint16_t));
+        }
+        return;
+    }
+#endif
+
     // pix24.c packs pixels as (R<<16)|(G<<8)|B. GS_PSM_CT16 is the standard PS2 GS 16-bit format:
     // 5 bits each of R/G/B plus a 1-bit alpha/mask, packed (LSB to MSB) as R,G,B,A - i.e. value =
     // (1<<15) | (B5<<10) | (G5<<5) | R5, same R/G/B channel order as CT32, just fewer bits/channel

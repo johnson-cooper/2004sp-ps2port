@@ -4,6 +4,16 @@
 #include <gsKit.h>
 #include <gsInline.h>
 
+// ps2.yaml remaps the final full-canvas sprite call to the modern-UI compositor. This file also
+// needs the real gsKit sprite primitive for the dedicated viewport-overlay texture.
+#ifdef gsKit_prim_sprite_texture_3d
+#undef gsKit_prim_sprite_texture_3d
+#endif
+extern void gsKit_prim_sprite_texture_3d(GSGLOBAL *gsGlobal, const GSTEXTURE *Texture,
+                                         float x1, float y1, int iz1, float u1, float v1,
+                                         float x2, float y2, int iz2, float u2, float v2,
+                                         u64 color);
+
 #include <malloc.h>
 #include <math.h>
 #include <stdint.h>
@@ -44,6 +54,11 @@ typedef struct {
     uint16_t *texture_upload;
     GSPRIMSTQPOINT *texture_batch;
     GSPRIMPOINT *untextured_batch;
+#if PS2_GS_DIRECT_VIEWPORT_TEST
+    GSTEXTURE *viewport_overlay_texture;
+    uint16_t *viewport_overlay_upload;
+    bool viewport_overlay_dirty;
+#endif
     uint64_t texture_allocated_mask;
     uint64_t texture_uploaded_mask;
     int count;
@@ -51,7 +66,7 @@ typedef struct {
 } Ps2GsRasterState;
 
 static Ps2GsRasterState ps2_gs_state PS2_GS_RUNTIME_DATA = {
-    PS2_GS_STATE_MAGIC, NULL, NULL, NULL, NULL, NULL, 0, 0, 0, 0
+    .magic = PS2_GS_STATE_MAGIC
 };
 
 extern Pix3D _Pix3D;
@@ -78,6 +93,11 @@ static void ps2_gs_reset_state(void) {
     ps2_gs_state.texture_upload=NULL;
     ps2_gs_state.texture_batch=NULL;
     ps2_gs_state.untextured_batch=NULL;
+#if PS2_GS_DIRECT_VIEWPORT_TEST
+    ps2_gs_state.viewport_overlay_texture=NULL;
+    ps2_gs_state.viewport_overlay_upload=NULL;
+    ps2_gs_state.viewport_overlay_dirty=false;
+#endif
     ps2_gs_state.texture_allocated_mask=0;
     ps2_gs_state.texture_uploaded_mask=0;
     ps2_gs_state.count=0;
@@ -327,6 +347,122 @@ static void ps2_gs_set_alpha_mode(GSGLOBAL *gs,u64 mode) {
     if(gs->PrimAlpha!=mode||gs->PABE!=0)gsKit_set_primalpha(gs,mode,0);
 }
 
+#if PS2_GS_DIRECT_VIEWPORT_TEST
+PS2_GS_RUNTIME_CODE
+static bool ps2_gs_ensure_viewport_overlay(void) {
+    if (ps2_gs_state.magic != PS2_GS_STATE_MAGIC) ps2_gs_reset_state();
+
+    if (!ps2_gs_state.viewport_overlay_texture) {
+        ps2_gs_state.viewport_overlay_texture = calloc(1, sizeof(GSTEXTURE));
+        if (!ps2_gs_state.viewport_overlay_texture) return false;
+        ps2_gs_state.viewport_overlay_texture->Width = PS2_VIEWPORT_LOGICAL_WIDTH;
+        ps2_gs_state.viewport_overlay_texture->Height = PS2_VIEWPORT_LOGICAL_HEIGHT;
+        ps2_gs_state.viewport_overlay_texture->PSM = GS_PSM_CT16;
+        ps2_gs_state.viewport_overlay_texture->Filter = GS_FILTER_NEAREST;
+        ps2_gs_state.viewport_overlay_texture->Delayed = 0;
+        ps2_gs_state.viewport_overlay_texture->Vram = GSKIT_ALLOC_ERROR;
+    }
+
+    if (!ps2_gs_state.viewport_overlay_upload) {
+        size_t bytes = gsKit_texture_size(
+            PS2_VIEWPORT_LOGICAL_WIDTH, PS2_VIEWPORT_LOGICAL_HEIGHT, GS_PSM_CT16);
+        ps2_gs_state.viewport_overlay_upload = memalign(128, bytes);
+        if (!ps2_gs_state.viewport_overlay_upload) return false;
+        ps2_gs_state.viewport_overlay_texture->Mem =
+            (u32 *)ps2_gs_state.viewport_overlay_upload;
+    }
+
+    return true;
+}
+
+PS2_GS_RUNTIME_CODE
+bool ps2_gs_raster_capture_viewport_overlay(const uint32_t *pixels, int width, int height) {
+    if (!pixels || width != PS2_VIEWPORT_LOGICAL_WIDTH ||
+        height != PS2_VIEWPORT_LOGICAL_HEIGHT ||
+        !ps2_gs_ensure_viewport_overlay()) {
+        return false;
+    }
+
+    uint16_t *dst = ps2_gs_state.viewport_overlay_upload;
+    const int count = width * height;
+    memset(dst, 0, (size_t)count * sizeof(uint16_t));
+
+    // The GS already owns every 3D triangle. The CPU surface is now only a sparse overlay:
+    // hitmarks, overhead text, hints, performance text, menus/cursor, etc. The 0xffffffff key is
+    // produced with one fast memset before those overlays are drawn, so keyed pixels need no
+    // RGB->CT16 math or write here.
+    for (int i = 0; i < count; i++) {
+        uint32_t rgb = pixels[i];
+        if (rgb == PS2_VIEWPORT_OVERLAY_KEY) continue;
+
+        uint32_t r5 = ((rgb >> 16) & 0xff) >> 3;
+        uint32_t g5 = ((rgb >> 8) & 0xff) >> 3;
+        uint32_t b5 = (rgb & 0xff) >> 3;
+        dst[i] = (uint16_t)(0x8000 | (b5 << 10) | (g5 << 5) | r5);
+    }
+
+    ps2_gs_state.viewport_overlay_dirty = true;
+    return true;
+}
+
+PS2_GS_RUNTIME_CODE
+void ps2_gs_raster_draw_viewport_overlay(void *gs_global,
+                                         float view_x, float view_y,
+                                         float view_w, float view_h) {
+    if (!gs_global || !ps2_gs_state.viewport_overlay_dirty ||
+        !ps2_gs_state.viewport_overlay_texture ||
+        !ps2_gs_state.viewport_overlay_upload) {
+        return;
+    }
+
+    GSGLOBAL *gs = (GSGLOBAL *)gs_global;
+    GSTEXTURE *overlay = ps2_gs_state.viewport_overlay_texture;
+    if (overlay->Vram == GSKIT_ALLOC_ERROR) {
+        overlay->Vram = gsKit_vram_alloc(
+            gs, gsKit_texture_size(overlay->Width, overlay->Height, overlay->PSM),
+            GSKIT_ALLOC_USERBUFFER);
+        if (overlay->Vram == GSKIT_ALLOC_ERROR) return;
+    }
+
+    int saved_alpha_enable = gs->PrimAlphaEnable;
+    u64 saved_alpha_mode = gs->PrimAlpha;
+    u8 saved_pabe = gs->PABE;
+    u8 saved_ate = gs->Test->ATE;
+    u8 saved_atst = gs->Test->ATST;
+    u8 saved_aref = gs->Test->AREF;
+    u8 saved_afail = gs->Test->AFAIL;
+
+    gsKit_texture_upload(gs, overlay);
+
+    // CT16 A1=0 is the sparse-overlay key. Reject it and source-replace every A1=1 pixel so the
+    // overlay never blends/darkens the already-rendered GS world.
+    gs->Test->ATE = GS_SETTING_ON;
+    gs->Test->ATST = 6; // GREATER
+    gs->Test->AREF = 0;
+    gs->Test->AFAIL = 0; // KEEP
+    gsKit_set_test(gs, 0);
+    gsKit_set_primalpha(gs, GS_SETREG_ALPHA(0, 2, 2, 2, 0x80), 0);
+    gs->PrimAlphaEnable = GS_SETTING_ON;
+
+    gsKit_prim_sprite_texture_3d(
+        gs, overlay,
+        view_x, view_y, 0, 0.0f, 0.0f,
+        view_x + view_w, view_y + view_h, 0,
+        (float)PS2_VIEWPORT_LOGICAL_WIDTH, (float)PS2_VIEWPORT_LOGICAL_HEIGHT,
+        GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0));
+
+    gs->PrimAlphaEnable = saved_alpha_enable;
+    gs->Test->ATE = saved_ate;
+    gs->Test->ATST = saved_atst;
+    gs->Test->AREF = saved_aref;
+    gs->Test->AFAIL = saved_afail;
+    gsKit_set_test(gs, 0);
+    gsKit_set_primalpha(gs, saved_alpha_mode, saved_pabe);
+
+    ps2_gs_state.viewport_overlay_dirty = false;
+}
+#endif
+
 PS2_GS_RUNTIME_CODE
 void ps2_gs_raster_flush(void *gs_global,float view_x,float view_y,float view_w,float view_h) {
     if(!gs_global||!ps2_gs_raster_has_pending()||view_w<=0.0f||view_h<=0.0f)return;
@@ -549,6 +685,10 @@ void ps2_gs_raster_shutdown(void) {
     free(ps2_gs_state.texture_upload);
     free(ps2_gs_state.texture_batch);
     free(ps2_gs_state.untextured_batch);
+#if PS2_GS_DIRECT_VIEWPORT_TEST
+    free(ps2_gs_state.viewport_overlay_texture);
+    free(ps2_gs_state.viewport_overlay_upload);
+#endif
     ps2_gs_reset_state();
 }
 

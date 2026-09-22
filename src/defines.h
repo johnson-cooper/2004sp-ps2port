@@ -147,6 +147,10 @@
 // faces use the same RGB at all three vertices, so this is visually identical while avoiding the
 // per-triangle primitive/GIF setup. Runs stop on textured faces or opaque/translucent changes.
 #define PS2_GS_UNTEXTURED_BATCH_TEST 1
+// Direct-GS viewport presentation: the CPU viewport becomes a sparse overlay-only surface. The
+// world stays on the GS; no 512x334 CPU viewport copy and no completed 3D RGB->CT16 conversion.
+#define PS2_GS_DIRECT_VIEWPORT_TEST 1
+#define PS2_VIEWPORT_OVERLAY_KEY 0xffffffffU
 #define PS2_VIEWPORT_SCREEN_X 4
 #define PS2_VIEWPORT_SCREEN_Y 4
 #define PS2_VIEWPORT_LOGICAL_WIDTH 512

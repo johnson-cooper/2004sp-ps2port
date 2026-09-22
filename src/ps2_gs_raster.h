@@ -17,6 +17,10 @@ bool ps2_gs_raster_queue_textured(
     int texture_id, int fallback_rgb, int alpha);
 void ps2_gs_raster_invalidate_texture(int texture_id);
 bool ps2_gs_raster_has_pending(void);
+#if PS2_GS_DIRECT_VIEWPORT_TEST
+bool ps2_gs_raster_capture_viewport_overlay(const uint32_t *pixels, int width, int height);
+void ps2_gs_raster_draw_viewport_overlay(void *gs_global, float view_x, float view_y, float view_w, float view_h);
+#endif
 void ps2_gs_raster_flush(void *gs_global, float view_x, float view_y, float view_w, float view_h);
 void ps2_gs_raster_discard(void);
 void ps2_gs_raster_shutdown(void);

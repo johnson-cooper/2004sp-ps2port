@@ -11748,9 +11748,9 @@ static void ps2_draw_local_player(Client *c, int loopCycle) {
                player->pathing_entity.z - _World3D.eyeZ, LOCAL_PLAYER_INDEX << 14);
 }
 
-// The 3D renderer uses a deliberately smaller target while the UI continues to
-// use the readable 512x334 surface.  Nearest-neighbour expansion keeps fixed UI
-// coordinates and input paths untouched without assuming an integer scale factor.
+#if !PS2_GS_DIRECT_VIEWPORT_TEST
+// Legacy software-present path retained as a compile-time rollback. The direct-GS path leaves the
+// world on the GS and therefore never copies this 512x334 CPU viewport.
 static void ps2_upscale_viewport_3d(Client *c) {
     const int *src = c->area_viewport_3d->pixels;
     int *dst = c->area_viewport->pixels;
@@ -11762,6 +11762,7 @@ static void ps2_upscale_viewport_3d(Client *c) {
         }
     }
 }
+#endif
 
 // The normal performance strings are rendered at the deliberately low 3D
 // resolution and are too small to diagnose a hardware freeze from a TV.  Copy
@@ -11777,7 +11778,11 @@ static void ps2_draw_large_status(Client *c, const char *status) {
     pix2d_fill_rect(source_x, source_y, BLACK, source_w, source_h);
     drawString(c->font_bold12, source_x + 2, source_y + 13, status, YELLOW);
 
+#if PS2_GS_DIRECT_VIEWPORT_TEST
+    int *pixels = c->area_viewport_3d->pixels;
+#else
     int *pixels = c->area_viewport->pixels;
+#endif
     for (int y = 0; y < source_h; y++) {
         const int *src = pixels + (source_y + y) * 512 + source_x;
         int *dst0 = pixels + (dest_y + y * 2) * 512 + dest_x;
@@ -11931,10 +11936,14 @@ void client_draw_scene(Client *c) {
     _Model.mouse_y = c->shell->mouse_y - 4;
 #endif
 #ifdef __PS2__
-    // Use the viewport clear as a zero-memory sky: terrain/models simply paint over this,
-    // so pixels beyond the world geometry show light blue instead of the old black void.
-    // This replaces (rather than follows) pix2d_clear(), keeping the clear to one framebuffer pass.
+#if PS2_GS_DIRECT_VIEWPORT_TEST
+    // The GS now draws the sky and every 3D face. The CPU viewport is an overlay-only scratch
+    // surface, so clear it with a byte-replicable key instead of painting 171,008 sky RGB pixels.
+    memset(_Pix2D.pixels, 0xff,
+           (size_t)PS2_3D_RENDER_WIDTH * PS2_3D_RENDER_HEIGHT * sizeof(int));
+#else
     pix2d_fill_rect(0, 0, PS2_VIEWPORT_SKY_RGB, PS2_3D_RENDER_WIDTH, PS2_3D_RENDER_HEIGHT);
+#endif
 #else
     pix2d_clear();
 #endif
@@ -11970,14 +11979,21 @@ void client_draw_scene(Client *c) {
     draw3DEntityElements(c);
 
 #ifdef __PS2__
+#if PS2_GS_DIRECT_VIEWPORT_TEST
+    // area_viewport_3d already contains only keyed CPU overlays; do not copy it into area_viewport.
+    _Pix3D.line_offset = c->area_viewport_3d_offsets;
+    _Pix3D.center_x = PS2_3D_RENDER_WIDTH / 2;
+    _Pix3D.center_y = PS2_3D_RENDER_HEIGHT / 2;
+#else
     ps2_upscale_viewport_3d(c);
     pixmap_bind(c->area_viewport);
     _Pix3D.line_offset = c->area_viewport_offsets;
     _Pix3D.center_x = 256;
     _Pix3D.center_y = 167;
+#endif
     if (_Custom.show_performance) {
-    ps2_draw_large_world_time(c, world_ms);
-}
+        ps2_draw_large_world_time(c, world_ms);
+    }
 #endif
 
     static uint64_t pixmap_now;
@@ -11994,7 +12010,15 @@ void client_draw_scene(Client *c) {
         drawStringRight(c->font_plain11, 507, 213, buf, YELLOW, true);
     }
     pixmap_last = rs2_now();
+#ifdef __PS2__
+#if PS2_GS_DIRECT_VIEWPORT_TEST
+    pixmap_draw(c->area_viewport_3d, PS2_VIEWPORT_SCREEN_X, PS2_VIEWPORT_SCREEN_Y);
+#else
     pixmap_draw(c->area_viewport, 4, 4);
+#endif
+#else
+    pixmap_draw(c->area_viewport, 4, 4);
+#endif
     pixmap_now = rs2_now();
 
     c->cameraX = cameraX;
