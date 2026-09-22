@@ -29,6 +29,14 @@ extern TileOverlayData _TileOverlay;
 extern Custom _Custom;
 #endif
 
+// Low-memory still controls the 64x64 assets and the rest of the 32 MiB policy. With GS texturing
+// enabled, only bypass the old World3D shortcut that replaced textured terrain with average colour.
+#if defined(__PS2__) && PS2_GS_RASTER_TEST && PS2_GS_TEXTURE_TEST
+#define WORLD3D_LOW_MEMORY_TEXTURE_APPROX 0
+#else
+#define WORLD3D_LOW_MEMORY_TEXTURE_APPROX (_World3D.lowMemory)
+#endif
+
 const int WALL_DECORATION_INSET_X[] = {53, -53, -53, 53};
 const int WALL_DECORATION_INSET_Z[] = {-53, -53, 53, 53};
 const int WALL_DECORATION_OUTSET_X[] = {-45, 45, 45, -45};
@@ -2152,7 +2160,7 @@ void world3d_draw_tileunderlay(World3D *world3d, TileUnderlay *underlay, int lev
             if (underlay->northeastColor != 12345678) {
                 gouraudTriangle(py1, px3, pz0, pz1, py3, px1, underlay->northeastColor, underlay->northwestColor, underlay->southeastColor);
             }
-        } else if (_World3D.lowMemory) {
+        } else if (WORLD3D_LOW_MEMORY_TEXTURE_APPROX) {
             int averageColor = TEXTURE_HSL[underlay->textureId];
             gouraudTriangle(py1, px3, pz0, pz1, py3, px1, mul_lightness(averageColor, underlay->northeastColor), mul_lightness(averageColor, underlay->northwestColor), mul_lightness(averageColor, underlay->southeastColor));
         } else if (underlay->flat) {
@@ -2176,7 +2184,7 @@ void world3d_draw_tileunderlay(World3D *world3d, TileUnderlay *underlay, int lev
     if (!_Custom.use_opengl11) {
 #endif
     if (underlay->textureId != -1) {
-        if (!_World3D.lowMemory) {
+        if (!WORLD3D_LOW_MEMORY_TEXTURE_APPROX) {
             textureTriangle(px0, pz0, px3, py0, px1, py3, underlay->southwestColor, underlay->southeastColor, underlay->northwestColor, x0, y0, z0, x1, x3, y1, y3, z1, z3, underlay->textureId);
             return;
         }
@@ -2315,7 +2323,7 @@ void world3d_draw_tileoverlay(int tileX, int tileZ, TileOverlay *overlay, int si
                 if (overlay->triangleColorA[v] != 12345678) {
                     gouraudTriangle(x0, x1, x2, y0, y1, y2, overlay->triangleColorA[v], overlay->triangleColorB[v], overlay->triangleColorC[v]);
                 }
-            } else if (_World3D.lowMemory) {
+            } else if (WORLD3D_LOW_MEMORY_TEXTURE_APPROX) {
                 int textureColor = TEXTURE_HSL[overlay->triangleTextureIds[v]];
                 gouraudTriangle(x0, x1, x2, y0, y1, y2, mul_lightness(textureColor, overlay->triangleColorA[v]), mul_lightness(textureColor, overlay->triangleColorB[v]), mul_lightness(textureColor, overlay->triangleColorC[v]));
             } else if (overlay->flat) {

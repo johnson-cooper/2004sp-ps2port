@@ -180,6 +180,9 @@ void pix3d_push_texture(int id) {
         _Pix3D.texelPool[_Pix3D.poolSize++] = _Pix3D.activeTexels[id];
         _Pix3D.activeTexels[id] = NULL;
     }
+#if defined(__PS2__) && PS2_GS_RASTER_TEST && PS2_GS_TEXTURE_TEST
+    ps2_gs_raster_invalidate_texture(id);
+#endif
 }
 
 #ifndef GL11
@@ -1796,23 +1799,9 @@ void textureTriangle(int xA, int xB, int xC, int yA, int yB, int yC, int shadeA,
         rs2_error("textureTriangle: texture id %d out of range (max %d)\n", texture, _Pix3D.textureCount - 1);
         return;
     }
-#if defined(__PS2__) && PS2_GS_RASTER_TEST
-    if (_Pix2D.width == PS2_3D_RENDER_WIDTH && _Pix2D.height == PS2_3D_RENDER_HEIGHT) {
-        // First GS proof keeps face ordering entirely on the hardware path without taking on
-        // perspective texture mapping at the same time. Preserve the face with the texture's
-        // already-computed representative colour; real STQ texturing is the next isolated step.
-        int average = pix3d_get_average_texture_rgb(texture);
-        if (ps2_gs_raster_queue_flat(xA, yA, xB, yB, xC, yC, average, _Pix3D.alpha)) {
-            return;
-        }
-    }
-#endif
-    int *texels = pix3d_get_texels(texture);
-    if (!texels) {
-        return;
-    }
-    _Pix3D.opaque = !_Pix3D.textureHasTransparency[texture];
 
+    // Original RuneScape projective texture planes. The GS path evaluates the same U/V/W planes
+    // at the three screen vertices and submits them as normalized S/T/Q homogeneous coordinates.
     int verticalX = originX - txB;
     int verticalY = originY - tyB;
     int verticalZ = originZ - tzB;
@@ -1832,6 +1821,33 @@ void textureTriangle(int xA, int xB, int xC, int yA, int yB, int yC, int shadeA,
     int w = ((verticalY * horizontalX) - (verticalX * horizontalY)) << 14;
     int wStride = ((verticalZ * horizontalY) - (verticalY * horizontalZ)) << 8;
     int wStepVertical = ((verticalX * horizontalZ) - (verticalZ * horizontalX)) << 5;
+
+#if defined(__PS2__) && PS2_GS_RASTER_TEST
+    if (_Pix2D.width == PS2_3D_RENDER_WIDTH && _Pix2D.height == PS2_3D_RENDER_HEIGHT) {
+        int average = pix3d_get_average_texture_rgb(texture);
+#if PS2_GS_TEXTURE_TEST
+        if (ps2_gs_raster_queue_textured(
+                xA, yA, xB, yB, xC, yC,
+                shadeA, shadeB, shadeC,
+                u, uStride, uStepVertical,
+                v, vStride, vStepVertical,
+                w, wStride, wStepVertical,
+                _Pix3D.center_x, _Pix3D.center_y,
+                texture, average, _Pix3D.alpha)) {
+            return;
+        }
+#endif
+        // Exact hardware-proven 70fb420 behavior remains the fallback.
+        if (ps2_gs_raster_queue_flat(xA, yA, xB, yB, xC, yC, average, _Pix3D.alpha)) {
+            return;
+        }
+    }
+#endif
+    int *texels = pix3d_get_texels(texture);
+    if (!texels) {
+        return;
+    }
+    _Pix3D.opaque = !_Pix3D.textureHasTransparency[texture];
 
     int dxAB = xB - xA;
     int dyAB = yB - yA;

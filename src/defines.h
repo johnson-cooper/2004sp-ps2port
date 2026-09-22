@@ -134,11 +134,12 @@
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
 #define PS2_3D_RENDER_HEIGHT 334
-// Experimental real-hardware GS raster backend. World3D/model transform, clipping and ordering stay
-// on the EE; Pix3D triangle rasterisation is queued and replayed by the GS. Textured faces use their
-// existing average texture colour for this first proof so every 3D face stays in one ordered GS
-// stream. If hardware timing wins, replace only that approximation with a real GS STQ texture path.
+// Real-hardware GS raster backend. World3D/model transform, clipping and ordering stay on the EE;
+// Pix3D triangle rasterisation is queued and replayed by the GS. 70fb420 is the hardware-proven
+// flat/Gouraud + average-texture baseline. Keep real texture sampling behind its own switch so one
+// define returns to that exact rendering strategy without disturbing the proven compositor.
 #define PS2_GS_RASTER_TEST 1
+#define PS2_GS_TEXTURE_TEST 1
 #define PS2_VIEWPORT_SCREEN_X 4
 #define PS2_VIEWPORT_SCREEN_Y 4
 #define PS2_VIEWPORT_LOGICAL_WIDTH 512
