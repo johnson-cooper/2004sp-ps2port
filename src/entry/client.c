@@ -11934,7 +11934,7 @@ void client_draw_scene(Client *c) {
     // Use the viewport clear as a zero-memory sky: terrain/models simply paint over this,
     // so pixels beyond the world geometry show light blue instead of the old black void.
     // This replaces (rather than follows) pix2d_clear(), keeping the clear to one framebuffer pass.
-    pix2d_fill_rect(0, 0, 0x87ceeb, PS2_3D_RENDER_WIDTH, PS2_3D_RENDER_HEIGHT);
+    pix2d_fill_rect(0, 0, PS2_VIEWPORT_SKY_RGB, PS2_3D_RENDER_WIDTH, PS2_3D_RENDER_HEIGHT);
 #else
     pix2d_clear();
 #endif

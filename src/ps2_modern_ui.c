@@ -20,7 +20,7 @@
 // Modern PS2 UI: keep the proven 2004 software UI alive off-screen and reorganize
 // only final GS presentation/input mapping. World3D, Component coordinates and the
 // underlying chat/keyboard implementations remain untouched.
-#define PS2_UI_VIEW_H 418
+#define PS2_UI_VIEW_H PS2_MODERN_UI_VIEW_HEIGHT
 #define PS2_UI_DOCK_Y PS2_UI_VIEW_H
 #define PS2_UI_DOCK_H (SCREEN_FB_HEIGHT - PS2_UI_DOCK_Y)
 

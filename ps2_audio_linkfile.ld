@@ -150,6 +150,16 @@ SECTIONS {
         KEEP(*(.ps2_runtime_rodata.*))
     } :audio
 
+    /*
+     * Initialized renderer experiment state belongs in the isolated runtime overlay too. Keeping
+     * even its tiny pointer/counter block out of normal .data/.bss preserves the hardware-proven
+     * networking-sensitive client layout. The actual triangle queue is allocated lazily post-login.
+     */
+    .ps2_runtime_data ALIGN(64) : {
+        KEEP(*(.ps2_runtime_data))
+        KEEP(*(.ps2_runtime_data.*))
+    } :audio
+
     .ps2_audio_rodata ALIGN(64) : {
         KEEP(*(.ps2_audio_rodata))
         KEEP(*(.ps2_audio_rodata.*))

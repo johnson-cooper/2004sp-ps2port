@@ -35,6 +35,7 @@
 #include "../pix2d.h"
 #include "../pixfont.h"
 #include "../pixmap.h"
+#include "../ps2_gs_raster.h"
 #include "../thirdparty/bzip.h"
 #include "ps2_music.h"
 
@@ -849,6 +850,9 @@ void platform_new(GameShell *shell) {
 }
 
 void platform_free(void) {
+#if PS2_GS_RASTER_TEST
+    ps2_gs_raster_shutdown();
+#endif
     if (ps2_audio_ready) {
         ps2_music_shutdown();
         audsrv_quit();
@@ -859,6 +863,9 @@ void platform_free(void) {
 }
 
 void platform_clear_surface(void) {
+#if PS2_GS_RASTER_TEST
+    ps2_gs_raster_discard();
+#endif
     if (screenTexture.Mem) {
         memset(screenTexture.Mem, 0, gsKit_texture_size(screenTexture.Width, screenTexture.Height, screenTexture.PSM));
     }
@@ -868,6 +875,36 @@ void platform_update_surface(void) {
     // Each of the two double-buffered surfaces still needs its own margin cleared before it's
     // first displayed, not just whichever was active at startup, hence the per-frame clear.
     gsKit_clear(gsGlobal, GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x00, 0x00));
+#if PS2_GS_RASTER_TEST
+    bool gs_scene = ps2_gs_raster_has_pending();
+    if (gs_scene) {
+        // Match whichever final presentation path is active. The modern controller UI maps the
+        // legacy 512x334 viewport to 640x418 at (0,0); title/loading/non-game screens keep the
+        // older uniformly-scaled full-canvas mapping.
+        float view_x;
+        float view_y;
+        float view_w;
+        float view_h;
+        if (ps2_crash_client && ps2_crash_client->ingame && ps2_crash_client->shell) {
+            view_x = 0.0f;
+            view_y = 0.0f;
+            view_w = (float)SCREEN_FB_WIDTH;
+            view_h = (float)PS2_MODERN_UI_VIEW_HEIGHT;
+        } else {
+            float scale_x = (float)SCREEN_DST_WIDTH / (float)SCREEN_LOGICAL_WIDTH;
+            float scale_y = (float)SCREEN_DST_HEIGHT / (float)SCREEN_LOGICAL_HEIGHT;
+            view_x = (float)SCREEN_DST_X + (float)PS2_VIEWPORT_SCREEN_X * scale_x;
+            view_y = (float)SCREEN_DST_Y + (float)PS2_VIEWPORT_SCREEN_Y * scale_y;
+            view_w = (float)PS2_VIEWPORT_LOGICAL_WIDTH * scale_x;
+            view_h = (float)PS2_VIEWPORT_LOGICAL_HEIGHT * scale_y;
+        }
+        // Draw the ordered 3D stream first. platform_blit_surface() keys the software sky pixels
+        // transparent, so the uploaded CPU canvas that follows acts only as the 2D/UI overlay.
+        ps2_gs_raster_flush(gsGlobal, view_x, view_y, view_w, view_h);
+    }
+#else
+    bool gs_scene = false;
+#endif
     gsKit_texture_upload(gsGlobal, &screenTexture);
     // Source rect is the half-resolution logical canvas, NOT screenTexture.Width/Height (which
     // includes alignment padding columns that would
@@ -875,10 +912,25 @@ void platform_update_surface(void) {
     // edge). Destination rect (SCREEN_DST_*, see above) is a uniformly-scaled, letterboxed
     // sub-rectangle of gsGlobal->Width/Height (640x480), not the full thing - aspect-correct
     // instead of stretched.
+#if PS2_GS_RASTER_TEST
+    int saved_alpha_enable = gsGlobal->PrimAlphaEnable;
+    if (gs_scene) {
+        // CT16's top bit becomes 0 for keyed sky pixels and 1 for CPU/UI pixels. Source-alpha
+        // blending therefore lets the GS world show through the viewport while menus, text,
+        // hitmarks, chat, sidebar and the rest of the software UI remain on top.
+        gsKit_set_primalpha(gsGlobal, GS_BLEND_BACK2FRONT, 0);
+        gsGlobal->PrimAlphaEnable = GS_SETTING_ON;
+    }
+#endif
     gsKit_prim_sprite_texture_3d(gsGlobal, &screenTexture,
                                   SCREEN_DST_X, SCREEN_DST_Y, 0, 0, 0,
                                   SCREEN_DST_X + SCREEN_DST_WIDTH, SCREEN_DST_Y + SCREEN_DST_HEIGHT, 0, SCREEN_LOGICAL_WIDTH, SCREEN_LOGICAL_HEIGHT,
                                   GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00));
+#if PS2_GS_RASTER_TEST
+    if (gs_scene) {
+        gsGlobal->PrimAlphaEnable = saved_alpha_enable;
+    }
+#endif
     gsKit_queue_exec(gsGlobal);
     gsKit_sync_flip(gsGlobal);
 }
@@ -892,6 +944,12 @@ void platform_blit_surface(Surface *surface, int x, int y) {
     uint32_t *src = (uint32_t *)surface->pixels;
     // x/y are full game-canvas coordinates.  Resample panels directly into the 3/4 composite;
     // this is only the final UI copy, while the GS performs the scale to television output.
+#if PS2_GS_RASTER_TEST
+    bool gs_key_viewport = ps2_gs_raster_has_pending() &&
+                           x == PS2_VIEWPORT_SCREEN_X && y == PS2_VIEWPORT_SCREEN_Y &&
+                           surface->w == PS2_VIEWPORT_LOGICAL_WIDTH &&
+                           surface->h == PS2_VIEWPORT_LOGICAL_HEIGHT;
+#endif
     int first_y = MAX(0, (y * SCREEN_LOGICAL_HEIGHT + SCREEN_HEIGHT - 1) / SCREEN_HEIGHT);
     int end_y = MIN(SCREEN_LOGICAL_HEIGHT, ((y + surface->h) * SCREEN_LOGICAL_HEIGHT + SCREEN_HEIGHT - 1) / SCREEN_HEIGHT);
     int first_x = MAX(0, (x * SCREEN_LOGICAL_WIDTH + SCREEN_WIDTH - 1) / SCREEN_WIDTH);
@@ -910,7 +968,14 @@ void platform_blit_surface(Surface *surface, int x, int y) {
             uint32_t r5 = ((argb >> 16) & 0xFF) >> 3;
             uint32_t g5 = ((argb >> 8) & 0xFF) >> 3;
             uint32_t b5 = (argb & 0xFF) >> 3;
+#if PS2_GS_RASTER_TEST
+            uint16_t a1 = (gs_key_viewport && (argb & 0x00ffffffU) == PS2_VIEWPORT_SKY_RGB)
+                              ? 0
+                              : (1 << 15);
+            dst_row[screen_x] = (uint16_t)(a1 | (b5 << 10) | (g5 << 5) | r5);
+#else
             dst_row[screen_x] = (uint16_t)((1 << 15) | (b5 << 10) | (g5 << 5) | r5);
+#endif
         }
     }
 }

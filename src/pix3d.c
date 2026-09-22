@@ -8,6 +8,9 @@
 #include "pix8.h"
 #include "platform.h"
 #include "gl11.h"
+#ifdef __PS2__
+#include "ps2_gs_raster.h"
+#endif
 
 Pix3D _Pix3D = {.lowMemory = true, .jagged = true};
 extern Pix2D _Pix2D;
@@ -490,6 +493,12 @@ static void gouraudRaster(int x0, int x1, int color0, int color1, int *dst, int 
 }
 
 void gouraudTriangle(int xA, int xB, int xC, int yA, int yB, int yC, int colorA, int colorB, int colorC) {
+#if defined(__PS2__) && PS2_GS_RASTER_TEST
+    if (_Pix2D.width == PS2_3D_RENDER_WIDTH && _Pix2D.height == PS2_3D_RENDER_HEIGHT &&
+        ps2_gs_raster_queue_gouraud(xA, yA, xB, yB, xC, yC, colorA, colorB, colorC, _Pix3D.alpha)) {
+        return;
+    }
+#endif
     int dxAB = xB - xA;
     int dyAB = yB - yA;
     int dxAC = xC - xA;
@@ -986,6 +995,12 @@ static void flatRaster(int x0, int x1, int *dst, int offset, int rgb) {
 }
 
 void flatTriangle(int xA, int xB, int xC, int yA, int yB, int yC, int color) {
+#if defined(__PS2__) && PS2_GS_RASTER_TEST
+    if (_Pix2D.width == PS2_3D_RENDER_WIDTH && _Pix2D.height == PS2_3D_RENDER_HEIGHT &&
+        ps2_gs_raster_queue_flat(xA, yA, xB, yB, xC, yC, color, _Pix3D.alpha)) {
+        return;
+    }
+#endif
     int dxAB = xB - xA;
     int dyAB = yB - yA;
     int dxAC = xC - xA;
@@ -1781,6 +1796,17 @@ void textureTriangle(int xA, int xB, int xC, int yA, int yB, int yC, int shadeA,
         rs2_error("textureTriangle: texture id %d out of range (max %d)\n", texture, _Pix3D.textureCount - 1);
         return;
     }
+#if defined(__PS2__) && PS2_GS_RASTER_TEST
+    if (_Pix2D.width == PS2_3D_RENDER_WIDTH && _Pix2D.height == PS2_3D_RENDER_HEIGHT) {
+        // First GS proof keeps face ordering entirely on the hardware path without taking on
+        // perspective texture mapping at the same time. Preserve the face with the texture's
+        // already-computed representative colour; real STQ texturing is the next isolated step.
+        int average = pix3d_get_average_texture_rgb(texture);
+        if (ps2_gs_raster_queue_flat(xA, yA, xB, yB, xC, yC, average, _Pix3D.alpha)) {
+            return;
+        }
+    }
+#endif
     int *texels = pix3d_get_texels(texture);
     if (!texels) {
         return;
