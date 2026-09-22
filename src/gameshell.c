@@ -55,6 +55,17 @@ static void perf_reset_if_due(void) {
     _Perf = (PerfAccum){0};
     _Perf.window_start = now;
 }
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static bool ps2_should_render_frame(Client *c) {
+    if (!c->controller_render_25fps) {
+        c->controller_render_phase = false;
+        return true;
+    }
+
+    c->controller_render_phase = !c->controller_render_phase;
+    return c->controller_render_phase;
+}
 #endif
 
 extern InputTracking _InputTracking;
@@ -184,8 +195,7 @@ void gameshell_run(Client *c) {
             c->shell->fps = ratio * 1000 / (c->shell->deltime * 256);
         }
 #ifdef __PS2__
-        static int ps2_render_counter = 0;
-        bool ps2_render_frame = (++ps2_render_counter % PS2_RENDER_DIVISOR) == 0;
+        bool ps2_render_frame = ps2_should_render_frame(c);
         if (ps2_render_frame) {
             client_draw(c);
             // client_draw() deliberately draws the controller cursor last. Do not re-blit the
