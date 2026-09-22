@@ -1794,6 +1794,12 @@ static void textureRaster(int xA, int xB, int *dst, int offset, int *texels, int
     }
 }
 
+#ifdef __PS2__
+// The GS texture experiment expands this already-large legacy raster entry point. Keep the entire
+// PS2 copy in the existing high-memory runtime section so the hardware-proven normal .text/.ctors
+// boundary remains unchanged. Non-PS2 builds keep their normal placement.
+__attribute__((section(".ps2_runtime_text"), noinline))
+#endif
 void textureTriangle(int xA, int xB, int xC, int yA, int yB, int yC, int shadeA, int shadeB, int shadeC, int originX, int originY, int originZ, int txB, int txC, int tyB, int tyC, int tzB, int tzC, int texture) {
     if (texture < 0 || texture >= _Pix3D.textureCount) {
         rs2_error("textureTriangle: texture id %d out of range (max %d)\n", texture, _Pix3D.textureCount - 1);
