@@ -2,6 +2,7 @@
 
 #undef client
 #include <gsKit.h>
+#include <gsInline.h>
 
 #include <malloc.h>
 #include <math.h>
@@ -113,7 +114,8 @@ static bool ps2_gs_push(int x1,int y1,int x2,int y2,int x3,int y3,
     tri->x2=ps2_gs_coord(x2);tri->y2=ps2_gs_coord(y2);
     tri->x3=ps2_gs_coord(x3);tri->y3=ps2_gs_coord(y3);
     tri->kind=(uint8_t)kind;
-    if(alpha<0)alpha=0;if(alpha>255)alpha=255;
+    if (alpha < 0) alpha = 0;
+    if (alpha > 255) alpha = 255;
     tri->alpha=(uint8_t)alpha;
     tri->texture_id=0xff;
     tri->color1=c1&0x00ffffffU;tri->color2=c2&0x00ffffffU;tri->color3=c3&0x00ffffffU;
@@ -143,7 +145,9 @@ static int32_t ps2_gs_plane_at(int base,int stride,int step_y,int x,int y,int cx
 
 PS2_GS_RUNTIME_CODE
 static uint8_t ps2_gs_clamp_shade(int shade) {
-    if(shade<0)return 0;if(shade>127)return 127;return (uint8_t)shade;
+    if (shade < 0) return 0;
+    if (shade > 127) return 127;
+    return (uint8_t)shade;
 }
 
 PS2_GS_RUNTIME_CODE
@@ -184,9 +188,14 @@ bool ps2_gs_raster_queue_textured(
     if(qn){s1=-s1;t1=-t1;q1=-q1;s2=-s2;t2=-t2;q2=-q2;s3=-s3;t3=-t3;q3=-q3;}
 
     float m=fabsf(s1);
-    if(fabsf(t1)>m)m=fabsf(t1);if(fabsf(q1)>m)m=fabsf(q1);
-    if(fabsf(s2)>m)m=fabsf(s2);if(fabsf(t2)>m)m=fabsf(t2);if(fabsf(q2)>m)m=fabsf(q2);
-    if(fabsf(s3)>m)m=fabsf(s3);if(fabsf(t3)>m)m=fabsf(t3);if(fabsf(q3)>m)m=fabsf(q3);
+    if (fabsf(t1) > m) m = fabsf(t1);
+    if (fabsf(q1) > m) m = fabsf(q1);
+    if (fabsf(s2) > m) m = fabsf(s2);
+    if (fabsf(t2) > m) m = fabsf(t2);
+    if (fabsf(q2) > m) m = fabsf(q2);
+    if (fabsf(s3) > m) m = fabsf(s3);
+    if (fabsf(t3) > m) m = fabsf(t3);
+    if (fabsf(q3) > m) m = fabsf(q3);
     if(m<1.0f)return false;
     float scale=1.0f/m;
 
@@ -221,7 +230,8 @@ PS2_GS_RUNTIME_CODE
 static uint8_t ps2_gs_alpha_value(uint8_t rs_alpha) {
     int opacity=256-(int)rs_alpha;
     int a=(opacity*0x80+127)>>8;
-    if(a<0)a=0;if(a>0x80)a=0x80;
+    if (a < 0) a = 0;
+    if (a > 0x80) a = 0x80;
     return (uint8_t)a;
 }
 
@@ -287,7 +297,10 @@ void ps2_gs_raster_flush(void *gs_global,float view_x,float view_y,float view_w,
     const float vx1=view_x+view_w,vy1=view_y+view_h;
 
     int cx0=(int)view_x,cy0=(int)view_y,cx1=(int)vx1-1,cy1=(int)vy1-1;
-    if(cx0<0)cx0=0;if(cy0<0)cy0=0;if(cx1>=gs->Width)cx1=gs->Width-1;if(cy1>=gs->Height)cy1=gs->Height-1;
+    if (cx0 < 0) cx0 = 0;
+    if (cy0 < 0) cy0 = 0;
+    if (cx1 >= gs->Width) cx1 = gs->Width - 1;
+    if (cy1 >= gs->Height) cy1 = gs->Height - 1;
 
     int saved_alpha_enable=gs->PrimAlphaEnable;
     u64 saved_alpha_mode=gs->PrimAlpha;
