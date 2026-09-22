@@ -23,6 +23,8 @@
 #define PS2_GS_TEXTURE_SIZE 64
 #define PS2_GS_TEXTURE_BATCH_TRIANGLES 32
 #define PS2_GS_TEXTURE_BATCH_VERTICES (PS2_GS_TEXTURE_BATCH_TRIANGLES * 3)
+#define PS2_GS_UNTEXTURED_BATCH_TRIANGLES 32
+#define PS2_GS_UNTEXTURED_BATCH_VERTICES (PS2_GS_UNTEXTURED_BATCH_TRIANGLES * 3)
 #define PS2_GS_TRI_FLAT 0
 #define PS2_GS_TRI_GOURAUD 1
 #define PS2_GS_TRI_TEXTURED 2
@@ -41,6 +43,7 @@ typedef struct {
     GSTEXTURE *textures;
     uint16_t *texture_upload;
     GSPRIMSTQPOINT *texture_batch;
+    GSPRIMPOINT *untextured_batch;
     uint64_t texture_allocated_mask;
     uint64_t texture_uploaded_mask;
     int count;
@@ -48,7 +51,7 @@ typedef struct {
 } Ps2GsRasterState;
 
 static Ps2GsRasterState ps2_gs_state PS2_GS_RUNTIME_DATA = {
-    PS2_GS_STATE_MAGIC, NULL, NULL, NULL, NULL, 0, 0, 0, 0
+    PS2_GS_STATE_MAGIC, NULL, NULL, NULL, NULL, NULL, 0, 0, 0, 0
 };
 
 extern Pix3D _Pix3D;
@@ -74,6 +77,7 @@ static void ps2_gs_reset_state(void) {
     ps2_gs_state.textures=NULL;
     ps2_gs_state.texture_upload=NULL;
     ps2_gs_state.texture_batch=NULL;
+    ps2_gs_state.untextured_batch=NULL;
     ps2_gs_state.texture_allocated_mask=0;
     ps2_gs_state.texture_uploaded_mask=0;
     ps2_gs_state.count=0;
@@ -112,6 +116,21 @@ static bool ps2_gs_ensure_texture_batch(void) {
         ps2_gs_state.texture_batch = memalign(
             16, sizeof(GSPRIMSTQPOINT) * PS2_GS_TEXTURE_BATCH_VERTICES);
         if (!ps2_gs_state.texture_batch) return false;
+    }
+    return true;
+#else
+    return false;
+#endif
+}
+
+PS2_GS_RUNTIME_CODE
+static bool ps2_gs_ensure_untextured_batch(void) {
+#if PS2_GS_UNTEXTURED_BATCH_TEST
+    if (ps2_gs_state.magic != PS2_GS_STATE_MAGIC) ps2_gs_reset_state();
+    if (!ps2_gs_state.untextured_batch) {
+        ps2_gs_state.untextured_batch = memalign(
+            16, sizeof(GSPRIMPOINT) * PS2_GS_UNTEXTURED_BATCH_VERTICES);
+        if (!ps2_gs_state.untextured_batch) return false;
     }
     return true;
 #else
@@ -431,6 +450,65 @@ void ps2_gs_raster_flush(void *gs_global,float view_x,float view_y,float view_w,
             tri->kind = PS2_GS_TRI_FLAT;
         }
 
+#if PS2_GS_UNTEXTURED_BATCH_TEST
+        if ((tri->kind == PS2_GS_TRI_FLAT || tri->kind == PS2_GS_TRI_GOURAUD) &&
+            ps2_gs_ensure_untextured_batch()) {
+            const bool translucent = tri->alpha != 0;
+            int vertices = 0;
+            int j = i;
+
+            if (translucent) {
+                ps2_gs_set_alpha_mode(gs, GS_BLEND_BACK2FRONT);
+                gs->PrimAlphaEnable = GS_SETTING_ON;
+            } else {
+                gs->PrimAlphaEnable = GS_SETTING_OFF;
+            }
+
+            // Flat and Gouraud faces can share the same Gouraud list packet. Flat faces simply
+            // repeat their RGB at all three vertices. Stop at the first textured face or alpha-mode
+            // transition so the original painter ordering remains exactly intact.
+            while (j < ps2_gs_state.count &&
+                   vertices < PS2_GS_UNTEXTURED_BATCH_VERTICES) {
+                Ps2GsTriangle *candidate = &ps2_gs_state.triangles[j];
+                if ((candidate->kind != PS2_GS_TRI_FLAT &&
+                     candidate->kind != PS2_GS_TRI_GOURAUD) ||
+                    (candidate->alpha != 0) != translucent) {
+                    break;
+                }
+
+                uint32_t c1 = candidate->color1;
+                uint32_t c2 = candidate->kind == PS2_GS_TRI_FLAT ? c1 : candidate->color2;
+                uint32_t c3 = candidate->kind == PS2_GS_TRI_FLAT ? c1 : candidate->color3;
+
+                float bx1 = view_x + (float)candidate->x1 * sx;
+                float by1 = view_y + (float)candidate->y1 * sy;
+                float bx2 = view_x + (float)candidate->x2 * sx;
+                float by2 = view_y + (float)candidate->y2 * sy;
+                float bx3 = view_x + (float)candidate->x3 * sx;
+                float by3 = view_y + (float)candidate->y3 * sy;
+
+                GSPRIMPOINT *out = &ps2_gs_state.untextured_batch[vertices];
+                out[0].rgbaq = rgbaq_to_RGBAQ(ps2_gs_color(c1, candidate->alpha));
+                out[0].xyz2 = vertex_to_XYZ2(gs, bx1, by1, 2);
+                out[1].rgbaq = rgbaq_to_RGBAQ(ps2_gs_color(c2, candidate->alpha));
+                out[1].xyz2 = vertex_to_XYZ2(gs, bx2, by2, 2);
+                out[2].rgbaq = rgbaq_to_RGBAQ(ps2_gs_color(c3, candidate->alpha));
+                out[2].xyz2 = vertex_to_XYZ2(gs, bx3, by3, 2);
+
+                vertices += 3;
+                j++;
+            }
+
+            if (vertices > 0) {
+                gsKit_prim_list_triangle_gouraud_3d(
+                    gs, vertices, ps2_gs_state.untextured_batch);
+                i = j;
+                continue;
+            }
+        }
+#endif
+
+        // Allocation failure or batching disabled: preserve the already-proven one-face path.
         if (tri->alpha) {
             ps2_gs_set_alpha_mode(gs, GS_BLEND_BACK2FRONT);
             gs->PrimAlphaEnable = GS_SETTING_ON;
@@ -470,6 +548,7 @@ void ps2_gs_raster_shutdown(void) {
     free(ps2_gs_state.textures);
     free(ps2_gs_state.texture_upload);
     free(ps2_gs_state.texture_batch);
+    free(ps2_gs_state.untextured_batch);
     ps2_gs_reset_state();
 }
 

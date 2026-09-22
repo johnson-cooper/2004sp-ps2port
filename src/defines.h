@@ -143,6 +143,10 @@
 // Hardware A/B switch for reducing gsKit/GIF setup overhead without changing face order.
 // Only consecutive compatible textured triangles are combined; no texture sorting/reordering.
 #define PS2_GS_TEXTURE_BATCH_TEST 1
+// Batch consecutive flat/Gouraud faces through gsKit's Gouraud triangle-list primitive. Flat
+// faces use the same RGB at all three vertices, so this is visually identical while avoiding the
+// per-triangle primitive/GIF setup. Runs stop on textured faces or opaque/translucent changes.
+#define PS2_GS_UNTEXTURED_BATCH_TEST 1
 #define PS2_VIEWPORT_SCREEN_X 4
 #define PS2_VIEWPORT_SCREEN_Y 4
 #define PS2_VIEWPORT_LOGICAL_WIDTH 512
