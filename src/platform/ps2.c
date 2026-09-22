@@ -993,16 +993,18 @@ void platform_blit_surface(Surface *surface, int x, int y) {
         // The world is already in the GS command stream. Capture only the sparse 2D overlay and
         // deliberately leave the main screenTexture viewport transparent. This removes the old
         // 512x334 viewport copy and the completed-world RGB->CT16 conversion/upload path.
-        ps2_gs_raster_capture_viewport_overlay(
-            (const uint32_t *)surface->pixels, surface->w, surface->h);
-
-        uint16_t *screen = (uint16_t *)screenTexture.Mem;
-        for (int row = 0; row < PS2_VIEWPORT_LOGICAL_HEIGHT; row++) {
-            memset(&screen[(PS2_VIEWPORT_SCREEN_Y + row) * screenTexture.Width +
-                           PS2_VIEWPORT_SCREEN_X],
-                   0, PS2_VIEWPORT_LOGICAL_WIDTH * sizeof(uint16_t));
+        if (ps2_gs_raster_capture_viewport_overlay(
+                (const uint32_t *)surface->pixels, surface->w, surface->h)) {
+            uint16_t *screen = (uint16_t *)screenTexture.Mem;
+            for (int row = 0; row < PS2_VIEWPORT_LOGICAL_HEIGHT; row++) {
+                memset(&screen[(PS2_VIEWPORT_SCREEN_Y + row) * screenTexture.Width +
+                               PS2_VIEWPORT_SCREEN_X],
+                       0, PS2_VIEWPORT_LOGICAL_WIDTH * sizeof(uint16_t));
+            }
+            return;
         }
-        return;
+        // Allocation failure is non-fatal: fall through to the already-proven full viewport
+        // conversion/key path rather than losing hitmarks/text/cursor overlays.
     }
 #endif
 

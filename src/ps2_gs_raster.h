@@ -3,6 +3,7 @@
 #ifdef __PS2__
 
 #include <stdbool.h>
+#include <stdint.h>
 
 bool ps2_gs_raster_queue_flat(int x1, int y1, int x2, int y2, int x3, int y3, int rgb, int alpha);
 bool ps2_gs_raster_queue_gouraud(int x1, int y1, int x2, int y2, int x3, int y3,

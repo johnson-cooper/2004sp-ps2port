@@ -674,7 +674,13 @@ void ps2_gs_raster_flush(void *gs_global,float view_x,float view_y,float view_w,
 
 PS2_GS_RUNTIME_CODE
 void ps2_gs_raster_discard(void) {
-    if(ps2_gs_state.magic==PS2_GS_STATE_MAGIC){ps2_gs_state.count=0;ps2_gs_state.overflow=0;}
+    if (ps2_gs_state.magic == PS2_GS_STATE_MAGIC) {
+        ps2_gs_state.count = 0;
+        ps2_gs_state.overflow = 0;
+#if PS2_GS_DIRECT_VIEWPORT_TEST
+        ps2_gs_state.viewport_overlay_dirty = false;
+#endif
+    }
 }
 
 PS2_GS_RUNTIME_CODE
