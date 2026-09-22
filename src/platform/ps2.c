@@ -871,6 +871,9 @@ void platform_clear_surface(void) {
     }
 }
 
+// Keep this substantially-expanded experimental presenter out of normal .text. The branch's
+// hardware workflow has already proven normal section placement sensitive on real PS2 hardware.
+__attribute__((section(".ps2_runtime_text"), noinline))
 void platform_update_surface(void) {
     // Each of the two double-buffered surfaces still needs its own margin cleared before it's
     // first displayed, not just whichever was active at startup, hence the per-frame clear.
@@ -935,6 +938,9 @@ void platform_update_surface(void) {
     gsKit_sync_flip(gsGlobal);
 }
 
+// Same layout rule as platform_update_surface(): this path now owns the CT16 alpha-key overlay
+// conversion for the GS experiment, so isolate the whole function instead of growing normal .text.
+__attribute__((section(".ps2_runtime_text"), noinline))
 void platform_blit_surface(Surface *surface, int x, int y) {
     // pix24.c packs pixels as (R<<16)|(G<<8)|B. GS_PSM_CT16 is the standard PS2 GS 16-bit format:
     // 5 bits each of R/G/B plus a 1-bit alpha/mask, packed (LSB to MSB) as R,G,B,A - i.e. value =
