@@ -140,6 +140,9 @@
 // define returns to that exact rendering strategy without disturbing the proven compositor.
 #define PS2_GS_RASTER_TEST 1
 #define PS2_GS_TEXTURE_TEST 1
+// Hardware A/B switch for reducing gsKit/GIF setup overhead without changing face order.
+// Only consecutive compatible textured triangles are combined; no texture sorting/reordering.
+#define PS2_GS_TEXTURE_BATCH_TEST 1
 #define PS2_VIEWPORT_SCREEN_X 4
 #define PS2_VIEWPORT_SCREEN_Y 4
 #define PS2_VIEWPORT_LOGICAL_WIDTH 512

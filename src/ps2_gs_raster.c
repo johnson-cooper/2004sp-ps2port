@@ -21,6 +21,8 @@
 #define PS2_GS_STATE_MAGIC 0x47535231u
 #define PS2_GS_TEXTURE_COUNT 50
 #define PS2_GS_TEXTURE_SIZE 64
+#define PS2_GS_TEXTURE_BATCH_TRIANGLES 32
+#define PS2_GS_TEXTURE_BATCH_VERTICES (PS2_GS_TEXTURE_BATCH_TRIANGLES * 3)
 #define PS2_GS_TRI_FLAT 0
 #define PS2_GS_TRI_GOURAUD 1
 #define PS2_GS_TRI_TEXTURED 2
@@ -38,6 +40,7 @@ typedef struct {
     Ps2GsTriangle *triangles;
     GSTEXTURE *textures;
     uint16_t *texture_upload;
+    GSPRIMSTQPOINT *texture_batch;
     uint64_t texture_allocated_mask;
     uint64_t texture_uploaded_mask;
     int count;
@@ -45,7 +48,7 @@ typedef struct {
 } Ps2GsRasterState;
 
 static Ps2GsRasterState ps2_gs_state PS2_GS_RUNTIME_DATA = {
-    PS2_GS_STATE_MAGIC, NULL, NULL, NULL, 0, 0, 0, 0
+    PS2_GS_STATE_MAGIC, NULL, NULL, NULL, NULL, 0, 0, 0, 0
 };
 
 extern Pix3D _Pix3D;
@@ -70,6 +73,7 @@ static void ps2_gs_reset_state(void) {
     ps2_gs_state.triangles=NULL;
     ps2_gs_state.textures=NULL;
     ps2_gs_state.texture_upload=NULL;
+    ps2_gs_state.texture_batch=NULL;
     ps2_gs_state.texture_allocated_mask=0;
     ps2_gs_state.texture_uploaded_mask=0;
     ps2_gs_state.count=0;
@@ -98,6 +102,21 @@ static bool ps2_gs_ensure_texture_cache(void) {
         if(!ps2_gs_state.texture_upload)return false;
     }
     return true;
+}
+
+PS2_GS_RUNTIME_CODE
+static bool ps2_gs_ensure_texture_batch(void) {
+#if PS2_GS_TEXTURE_BATCH_TEST
+    if (ps2_gs_state.magic != PS2_GS_STATE_MAGIC) ps2_gs_reset_state();
+    if (!ps2_gs_state.texture_batch) {
+        ps2_gs_state.texture_batch = memalign(
+            16, sizeof(GSPRIMSTQPOINT) * PS2_GS_TEXTURE_BATCH_VERTICES);
+        if (!ps2_gs_state.texture_batch) return false;
+    }
+    return true;
+#else
+    return false;
+#endif
 }
 
 PS2_GS_RUNTIME_CODE
@@ -315,38 +334,122 @@ void ps2_gs_raster_flush(void *gs_global,float view_x,float view_y,float view_w,
     gsKit_prim_sprite(gs,view_x,view_y,vx1,vy1,1,
         GS_SETREG_RGBAQ((PS2_VIEWPORT_SKY_RGB>>16)&0xff,(PS2_VIEWPORT_SKY_RGB>>8)&0xff,PS2_VIEWPORT_SKY_RGB&0xff,0x80,0));
 
-    for(int i=0;i<ps2_gs_state.count;i++) {
-        Ps2GsTriangle *tri=&ps2_gs_state.triangles[i];
-        float x1=view_x+(float)tri->x1*sx,y1=view_y+(float)tri->y1*sy;
-        float x2=view_x+(float)tri->x2*sx,y2=view_y+(float)tri->y2*sy;
-        float x3=view_x+(float)tri->x3*sx,y3=view_y+(float)tri->y3*sy;
+    for (int i = 0; i < ps2_gs_state.count;) {
+        Ps2GsTriangle *tri = &ps2_gs_state.triangles[i];
+        float x1 = view_x + (float)tri->x1 * sx;
+        float y1 = view_y + (float)tri->y1 * sy;
+        float x2 = view_x + (float)tri->x2 * sx;
+        float y2 = view_y + (float)tri->y2 * sy;
+        float x3 = view_x + (float)tri->x3 * sx;
+        float y3 = view_y + (float)tri->y3 * sy;
 
-        if(tri->kind==PS2_GS_TRI_TEXTURED) {
-            GSTEXTURE *tex=ps2_gs_prepare_texture(gs,tri->texture_id);
-            if(tex) {
-                if(tri->alpha)ps2_gs_set_alpha_mode(gs,GS_BLEND_BACK2FRONT);
-                else ps2_gs_set_alpha_mode(gs,GS_SETREG_ALPHA(0,2,2,2,0x80));
-                gs->PrimAlphaEnable=GS_SETTING_ON;
-                uint8_t a=ps2_gs_alpha_value(tri->alpha);
-                uint8_t l1=ps2_gs_texture_light(tri->shade1),l2=ps2_gs_texture_light(tri->shade2),l3=ps2_gs_texture_light(tri->shade3);
+        if (tri->kind == PS2_GS_TRI_TEXTURED) {
+            GSTEXTURE *tex = ps2_gs_prepare_texture(gs, tri->texture_id);
+            if (tex) {
+#if PS2_GS_TEXTURE_BATCH_TEST
+                if (ps2_gs_ensure_texture_batch()) {
+                    const uint8_t texture_id = tri->texture_id;
+                    const bool translucent = tri->alpha != 0;
+                    int vertices = 0;
+                    int j = i;
+
+                    if (translucent) ps2_gs_set_alpha_mode(gs, GS_BLEND_BACK2FRONT);
+                    else ps2_gs_set_alpha_mode(gs, GS_SETREG_ALPHA(0, 2, 2, 2, 0x80));
+                    // TCC must stay enabled so CT16 A1 reaches the alpha test.
+                    gs->PrimAlphaEnable = GS_SETTING_ON;
+
+                    // Batch only a contiguous run. The first incompatible face terminates the
+                    // packet, preserving RuneScape's original painter/priority sequence exactly.
+                    while (j < ps2_gs_state.count &&
+                           vertices < PS2_GS_TEXTURE_BATCH_VERTICES) {
+                        Ps2GsTriangle *candidate = &ps2_gs_state.triangles[j];
+                        if (candidate->kind != PS2_GS_TRI_TEXTURED ||
+                            candidate->texture_id != texture_id ||
+                            (candidate->alpha != 0) != translucent) {
+                            break;
+                        }
+
+                        uint8_t a = ps2_gs_alpha_value(candidate->alpha);
+                        uint8_t l1 = ps2_gs_texture_light(candidate->shade1);
+                        uint8_t l2 = ps2_gs_texture_light(candidate->shade2);
+                        uint8_t l3 = ps2_gs_texture_light(candidate->shade3);
+
+                        float bx1 = view_x + (float)candidate->x1 * sx;
+                        float by1 = view_y + (float)candidate->y1 * sy;
+                        float bx2 = view_x + (float)candidate->x2 * sx;
+                        float by2 = view_y + (float)candidate->y2 * sy;
+                        float bx3 = view_x + (float)candidate->x3 * sx;
+                        float by3 = view_y + (float)candidate->y3 * sy;
+
+                        GSPRIMSTQPOINT *out = &ps2_gs_state.texture_batch[vertices];
+                        out[0].rgbaq = color_to_RGBAQ(l1, l1, l1, a, candidate->q1);
+                        out[0].stq = vertex_to_STQ(candidate->s1, candidate->t1);
+                        out[0].xyz2 = vertex_to_XYZ2(gs, bx1, by1, 2);
+                        out[1].rgbaq = color_to_RGBAQ(l2, l2, l2, a, candidate->q2);
+                        out[1].stq = vertex_to_STQ(candidate->s2, candidate->t2);
+                        out[1].xyz2 = vertex_to_XYZ2(gs, bx2, by2, 2);
+                        out[2].rgbaq = color_to_RGBAQ(l3, l3, l3, a, candidate->q3);
+                        out[2].stq = vertex_to_STQ(candidate->s3, candidate->t3);
+                        out[2].xyz2 = vertex_to_XYZ2(gs, bx3, by3, 2);
+
+                        vertices += 3;
+                        j++;
+                    }
+
+                    if (vertices > 0) {
+                        gsKit_prim_list_triangle_goraud_texture_stq_3d(
+                            gs, tex, vertices, ps2_gs_state.texture_batch);
+                        i = j;
+                        continue;
+                    }
+                }
+#endif
+                // Allocation failure or batching disabled: retain the hardware-proven one-triangle
+                // path exactly so this optimization cannot make a drawable face disappear.
+                if (tri->alpha) ps2_gs_set_alpha_mode(gs, GS_BLEND_BACK2FRONT);
+                else ps2_gs_set_alpha_mode(gs, GS_SETREG_ALPHA(0, 2, 2, 2, 0x80));
+                gs->PrimAlphaEnable = GS_SETTING_ON;
+
+                uint8_t a = ps2_gs_alpha_value(tri->alpha);
+                uint8_t l1 = ps2_gs_texture_light(tri->shade1);
+                uint8_t l2 = ps2_gs_texture_light(tri->shade2);
+                uint8_t l3 = ps2_gs_texture_light(tri->shade3);
                 GSPRIMSTQPOINT verts[3];
-                verts[0].rgbaq=color_to_RGBAQ(l1,l1,l1,a,tri->q1);verts[0].stq=vertex_to_STQ(tri->s1,tri->t1);verts[0].xyz2=vertex_to_XYZ2(gs,x1,y1,2);
-                verts[1].rgbaq=color_to_RGBAQ(l2,l2,l2,a,tri->q2);verts[1].stq=vertex_to_STQ(tri->s2,tri->t2);verts[1].xyz2=vertex_to_XYZ2(gs,x2,y2,2);
-                verts[2].rgbaq=color_to_RGBAQ(l3,l3,l3,a,tri->q3);verts[2].stq=vertex_to_STQ(tri->s3,tri->t3);verts[2].xyz2=vertex_to_XYZ2(gs,x3,y3,2);
-                gsKit_prim_list_triangle_goraud_texture_stq_3d(gs,tex,3,verts);
+                verts[0].rgbaq = color_to_RGBAQ(l1, l1, l1, a, tri->q1);
+                verts[0].stq = vertex_to_STQ(tri->s1, tri->t1);
+                verts[0].xyz2 = vertex_to_XYZ2(gs, x1, y1, 2);
+                verts[1].rgbaq = color_to_RGBAQ(l2, l2, l2, a, tri->q2);
+                verts[1].stq = vertex_to_STQ(tri->s2, tri->t2);
+                verts[1].xyz2 = vertex_to_XYZ2(gs, x2, y2, 2);
+                verts[2].rgbaq = color_to_RGBAQ(l3, l3, l3, a, tri->q3);
+                verts[2].stq = vertex_to_STQ(tri->s3, tri->t3);
+                verts[2].xyz2 = vertex_to_XYZ2(gs, x3, y3, 2);
+                gsKit_prim_list_triangle_goraud_texture_stq_3d(gs, tex, 3, verts);
+                i++;
                 continue;
             }
-            tri->kind=PS2_GS_TRI_FLAT;
+            tri->kind = PS2_GS_TRI_FLAT;
         }
 
-        if(tri->alpha){ps2_gs_set_alpha_mode(gs,GS_BLEND_BACK2FRONT);gs->PrimAlphaEnable=GS_SETTING_ON;}
-        else gs->PrimAlphaEnable=GS_SETTING_OFF;
+        if (tri->alpha) {
+            ps2_gs_set_alpha_mode(gs, GS_BLEND_BACK2FRONT);
+            gs->PrimAlphaEnable = GS_SETTING_ON;
+        } else {
+            gs->PrimAlphaEnable = GS_SETTING_OFF;
+        }
 
-        if(tri->kind==PS2_GS_TRI_GOURAUD)
-            gsKit_prim_triangle_gouraud_3d(gs,x1,y1,2,x2,y2,2,x3,y3,2,
-                ps2_gs_color(tri->color1,tri->alpha),ps2_gs_color(tri->color2,tri->alpha),ps2_gs_color(tri->color3,tri->alpha));
-        else
-            gsKit_prim_triangle_3d(gs,x1,y1,2,x2,y2,2,x3,y3,2,ps2_gs_color(tri->color1,tri->alpha));
+        if (tri->kind == PS2_GS_TRI_GOURAUD) {
+            gsKit_prim_triangle_gouraud_3d(
+                gs, x1, y1, 2, x2, y2, 2, x3, y3, 2,
+                ps2_gs_color(tri->color1, tri->alpha),
+                ps2_gs_color(tri->color2, tri->alpha),
+                ps2_gs_color(tri->color3, tri->alpha));
+        } else {
+            gsKit_prim_triangle_3d(
+                gs, x1, y1, 2, x2, y2, 2, x3, y3, 2,
+                ps2_gs_color(tri->color1, tri->alpha));
+        }
+        i++;
     }
 
     gs->PrimAlphaEnable=saved_alpha_enable;
@@ -363,7 +466,10 @@ void ps2_gs_raster_discard(void) {
 PS2_GS_RUNTIME_CODE
 void ps2_gs_raster_shutdown(void) {
     if(ps2_gs_state.magic!=PS2_GS_STATE_MAGIC)return;
-    free(ps2_gs_state.triangles);free(ps2_gs_state.textures);free(ps2_gs_state.texture_upload);
+    free(ps2_gs_state.triangles);
+    free(ps2_gs_state.textures);
+    free(ps2_gs_state.texture_upload);
+    free(ps2_gs_state.texture_batch);
     ps2_gs_reset_state();
 }
 
