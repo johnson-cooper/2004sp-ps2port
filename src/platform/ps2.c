@@ -917,11 +917,29 @@ void platform_update_surface(void) {
     // instead of stretched.
 #if PS2_GS_RASTER_TEST
     int saved_alpha_enable = gsGlobal->PrimAlphaEnable;
+    u64 saved_alpha_mode = gsGlobal->PrimAlpha;
+    u8 saved_pabe = gsGlobal->PABE;
+    u8 saved_ate = gsGlobal->Test->ATE;
+    u8 saved_atst = gsGlobal->Test->ATST;
+    u8 saved_aref = gsGlobal->Test->AREF;
+    u8 saved_afail = gsGlobal->Test->AFAIL;
     if (gs_scene) {
-        // CT16's top bit becomes 0 for keyed sky pixels and 1 for CPU/UI pixels. Source-alpha
-        // blending therefore lets the GS world show through the viewport while menus, text,
-        // hitmarks, chat, sidebar and the rest of the software UI remain on top.
-        gsKit_set_primalpha(gsGlobal, GS_BLEND_BACK2FRONT, 0);
+        // The first GS build tried to reveal the hardware scene with ordinary source-alpha
+        // blending. On real hardware that left the uploaded CPU viewport able to cover the scene.
+        // Use the GS alpha test as an exact 1-bit colour-key instead: CT16 bit15 expands through
+        // TEXA to alpha 0x00/0x80, so reject alpha==0 sky texels and let every alpha>0 UI texel
+        // replace the destination. This makes the keyed viewport deterministic and avoids relying
+        // on framebuffer-alpha/blend behavior in a CT24 render target.
+        gsGlobal->Test->ATE = GS_SETTING_ON;
+        gsGlobal->Test->ATST = 6; // GREATER
+        gsGlobal->Test->AREF = 0;
+        gsGlobal->Test->AFAIL = 0; // KEEP
+        gsKit_set_test(gsGlobal, 0);
+
+        // gsKit ties TEX0.TCC and PRIM.ABE to the same PrimAlphaEnable flag. We need TCC on so the
+        // CT16 A1 bit reaches the alpha test, but do not actually want to blend opaque UI over the
+        // GS world. (Cs - 0) * FIX(0x80) / 0x80 + 0 == Cs: exact source replacement.
+        gsKit_set_primalpha(gsGlobal, GS_SETREG_ALPHA(0, 2, 2, 2, 0x80), 0);
         gsGlobal->PrimAlphaEnable = GS_SETTING_ON;
     }
 #endif
@@ -932,6 +950,12 @@ void platform_update_surface(void) {
 #if PS2_GS_RASTER_TEST
     if (gs_scene) {
         gsGlobal->PrimAlphaEnable = saved_alpha_enable;
+        gsGlobal->Test->ATE = saved_ate;
+        gsGlobal->Test->ATST = saved_atst;
+        gsGlobal->Test->AREF = saved_aref;
+        gsGlobal->Test->AFAIL = saved_afail;
+        gsKit_set_test(gsGlobal, 0);
+        gsKit_set_primalpha(gsGlobal, saved_alpha_mode, saved_pabe);
     }
 #endif
     gsKit_queue_exec(gsGlobal);
