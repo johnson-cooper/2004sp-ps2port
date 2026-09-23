@@ -43,7 +43,9 @@ const int WALL_DECORATION_OUTSET_X[] = {-45, 45, 45, -45};
 const int WALL_DECORATION_OUTSET_Z[] = {45, 45, -45, -45};
 
 #ifdef __PS2__
-// Map loc bitsets set 0x40000000; inactive/non-actionable locs also carry the sign bit.
+#define WORLD3D_PUBLIC_LOC_INFO(info) (((info) & 0xff) & ~PS2_LOC_GAMEPLAY_IMPORTANT_FLAG)
+// Map loc bitsets set 0x40000000. LocType.active cannot by itself identify gameplay-important
+// scenery on rev254, so PS2 scene construction also tags real interaction options in info bit 5.
 // Keep active/actionable locs at the full scene radius, and only shorten the draw distance of
 // inactive scenery. This is intentionally render-only: scene residency, collision, pathing and
 // interaction state are left untouched.
@@ -63,7 +65,7 @@ static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
 }
 
 static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
-    if ((bitset & 0x40000000) == 0 || bitset >= 0) {
+    if ((bitset & 0x40000000) == 0 || (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0) {
         return true;
     }
 
@@ -102,10 +104,10 @@ static inline int ps2_obj_stack_detail(const GroundObject *objs) {
 
 static int ps2_inactive_loc_draw_count = 0;
 
-static inline bool ps2_claim_inactive_loc_budget(int bitset, int sceneX, int sceneZ) {
-    // Only inactive/non-actionable map locs consume this budget. Active/actionable map locs and
-    // dynamic entities keep their normal render path.
-    if ((bitset & 0x40000000) == 0 || bitset >= 0) {
+static inline bool ps2_claim_inactive_loc_budget(int bitset, int8_t info, int sceneX, int sceneZ) {
+    // Only examine-only/decorative map locs consume this budget. Map locs with a real interaction
+    // option and dynamic entities keep their normal render path.
+    if ((bitset & 0x40000000) == 0 || (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0) {
         return true;
     }
 
@@ -936,15 +938,31 @@ int world3d_get_info(World3D *world3d, int level, int x, int z, int bitset) {
     if (!tile) {
         return -1;
     } else if (tile->wall && tile->wall->bitset == bitset) {
+#ifdef __PS2__
+        return WORLD3D_PUBLIC_LOC_INFO(tile->wall->info);
+#else
         return tile->wall->info & 0xff;
+#endif
     } else if (tile->decor && tile->decor->bitset == bitset) {
+#ifdef __PS2__
+        return WORLD3D_PUBLIC_LOC_INFO(tile->decor->info);
+#else
         return tile->decor->info & 0xff;
+#endif
     } else if (tile->groundDecor && tile->groundDecor->bitset == bitset) {
+#ifdef __PS2__
+        return WORLD3D_PUBLIC_LOC_INFO(tile->groundDecor->info);
+#else
         return tile->groundDecor->info & 0xff;
+#endif
     } else {
         for (int i = 0; i < tile->locCount; i++) {
             if (tile->locs[i]->bitset == bitset) {
+#ifdef __PS2__
+                return WORLD3D_PUBLIC_LOC_INFO(tile->locs[i]->info);
+#else
                 return tile->locs[i]->info & 0xff;
+#endif
             }
         }
 
@@ -1828,7 +1846,7 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
 
 #ifdef __PS2__
                 if (ps2_should_draw_loc_detail(farthest->bitset, farthest->info, farthest->x, farthest->z) &&
-                    ps2_claim_inactive_loc_budget(farthest->bitset, farthest->x, farthest->z)) {
+                    ps2_claim_inactive_loc_budget(farthest->bitset, farthest->info, farthest->x, farthest->z)) {
 #endif
                     Model *model = farthest->model;
                     bool _free = false;

@@ -102,6 +102,10 @@
 #define PS2_ROOF_RENDER_RADIUS 8
 #define PS2_WALL_DECOR_RENDER_RADIUS 8
 #define PS2_GROUND_DECOR_RENDER_RADIUS 6
+// Bit 5 is unused by the scene info encoding (shape uses 0..4, rotation uses 6..7).
+// On PS2 only, tag locs that have a real interaction option so render LOD can distinguish
+// gameplay-relevant objects from examine-only scenery even when LocType.active is true.
+#define PS2_LOC_GAMEPLAY_IMPORTANT_FLAG 0x20
 // Ground-item pile LOD: full three-model pile only very near; top model only farther out.
 #define PS2_OBJ_FULL_DETAIL_RADIUS 3
 #define PS2_OBJ_RENDER_RADIUS 12

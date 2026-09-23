@@ -143,6 +143,21 @@ void world_add_loc(int level, int x, int z, World3D *scene, int (*levelHeightmap
     }
 
     int8_t info = (int8_t)((rotation << 6) + shape);
+#ifdef __PS2__
+    // LocType.active is not a reliable gameplay-importance signal: rev254 automatically marks
+    // ordinary shape-10 centrepieces active even when they have no usable options. That causes
+    // crates, barrels, boxes and similar scenery to bypass the PS2 dense-loc budget completely.
+    // Preserve the original bitset/picking semantics, but tag only locs with a real menu option as
+    // render-important. Examine is implicit and does not appear in loc->op.
+    if (loc->op) {
+        for (int op = 0; op < 5; op++) {
+            if (loc->op[op]) {
+                info |= PS2_LOC_GAMEPLAY_IMPORTANT_FLAG;
+                break;
+            }
+        }
+    }
+#endif
     Model *model1;
     int width;
     int offset;
