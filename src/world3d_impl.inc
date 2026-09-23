@@ -65,8 +65,7 @@ static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
 }
 
 static int ps2_inactive_loc_draw_count = 0;
-static int ps2_decorative_centrepiece_visible_count = 0;
-static bool ps2_decorative_centrepiece_dense = false;
+static int ps2_decorative_centrepiece_draw_count = 0;
 
 static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
     if ((bitset & 0x40000000) == 0 || (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0) {
@@ -75,11 +74,16 @@ static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int scene
 
     int radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
     int shape = info & 0x1f;
-    if (ps2_decorative_centrepiece_dense &&
-        (shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL)) {
-        // Only dense visible scenes get the aggressive clutter radius. In normal areas these
-        // examine-only centerpieces use the same general scenery radius as before.
-        radius = PS2_DECORATIVE_CENTREPIECE_DENSE_RADIUS;
+    if (shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL) {
+        // Count the exact decorative centerpiece submissions that reach the real draw path.
+        // Sparse scenes keep their normal radius. Once this frame has already encountered the
+        // configured allowance, only excess crates/barrels/boxes/furniture use the aggressive
+        // dense-scene radius. This avoids all of the prepass/owner-tile/bridge mismatches.
+        ps2_decorative_centrepiece_draw_count++;
+        if (ps2_decorative_centrepiece_draw_count >
+            PS2_DECORATIVE_CENTREPIECE_DENSE_THRESHOLD) {
+            radius = PS2_DECORATIVE_CENTREPIECE_DENSE_RADIUS;
+        }
     } else if (shape == GROUNDDECOR) {
         radius = PS2_GROUND_DECOR_RENDER_RADIUS;
     } else if (shape >= WALLDECOR_STRAIGHT_NOOFFSET && shape <= WALLDECOR_DIAGONAL_BOTH) {
@@ -109,15 +113,6 @@ static inline int ps2_obj_stack_detail(const GroundObject *objs) {
         return 0;
     }
     return distance <= PS2_OBJ_FULL_DETAIL_RADIUS ? 2 : 1;
-}
-
-static inline bool ps2_is_decorative_centrepiece(int bitset, int8_t info) {
-    if ((bitset & 0x40000000) == 0 || (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0) {
-        return false;
-    }
-
-    int shape = info & 0x1f;
-    return shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL;
 }
 
 static inline bool ps2_claim_inactive_loc_budget(int bitset, int8_t info, int sceneX, int sceneZ) {
@@ -1293,8 +1288,7 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     // These are per-frame budgets. Resetting them here prevents a dense area from permanently
     // consuming the scenery allowance after the player moves somewhere lighter.
     ps2_inactive_loc_draw_count = 0;
-    ps2_decorative_centrepiece_visible_count = 0;
-    ps2_decorative_centrepiece_dense = false;
+    ps2_decorative_centrepiece_draw_count = 0;
 
     // Preserve the fixed 104x104 coordinate space, but submit only the nearby
     // 17x17 terrain window. This removes about 89% of the original 51x51
@@ -1350,90 +1344,6 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
         }
     }
 
-#ifdef __PS2__
-    // Count examine-only centerpieces once per scene placement across the active PS2 draw window.
-    // Do not require the owner's tile->visible flag here: a loc can still be submitted through the
-    // scene traversal when its owning tile is outside the visibility wedge (or when bridge/span
-    // traversal reaches it), which caused dense Port Sarim clutter to escape the old detector.
-    // This local-window count is intentionally conservative: if enough expensive decorative locs
-    // are close enough to become render candidates, enable the proven dense-scene culling policy.
-    int detailAnchorX;
-    int detailAnchorZ;
-    ps2_loc_detail_anchor(&detailAnchorX, &detailAnchorZ);
-
-    for (int level = world3d->minLevel; level < world3d->maxLevel; level++) {
-        Ground ***tiles = world3d->levelTiles[level];
-        for (int x = _World3D.minDrawTileX; x < _World3D.maxDrawTileX; x++) {
-            for (int z = _World3D.minDrawTileZ; z < _World3D.maxDrawTileZ; z++) {
-                Ground *tile = tiles[x][z];
-                if (!tile) {
-                    continue;
-                }
-
-                for (int i = 0; i < tile->locCount; i++) {
-                    Location *loc = tile->locs[i];
-                    if (!loc || loc->minSceneTileX != x || loc->minSceneTileZ != z) {
-                        continue;
-                    }
-
-                    if (!ps2_is_decorative_centrepiece(loc->bitset, loc->info)) {
-                        continue;
-                    }
-
-                    int dx = (loc->x >> 7) - detailAnchorX;
-                    int dz = (loc->z >> 7) - detailAnchorZ;
-                    if (dx < 0) dx = -dx;
-                    if (dz < 0) dz = -dz;
-                    if (dx > PS2_INACTIVE_LOC_RENDER_RADIUS || dz > PS2_INACTIVE_LOC_RENDER_RADIUS) {
-                        continue;
-                    }
-
-                    ps2_decorative_centrepiece_visible_count++;
-                    if (ps2_decorative_centrepiece_visible_count >
-                        PS2_DECORATIVE_CENTREPIECE_DENSE_THRESHOLD) {
-                        ps2_decorative_centrepiece_dense = true;
-                        goto ps2_dense_loc_count_done;
-                    }
-                }
-
-                // Dock/floor scenes can place their static locs on the bridge Ground rather than
-                // tile->locs. world3d_draw_tile() renders bridge->locs through a separate path, so
-                // include them in the density detector or Port Sarim can render the clutter while
-                // the adaptive threshold incorrectly thinks the scene is sparse.
-                Ground *bridge = tile->bridge;
-                if (bridge) {
-                    for (int i = 0; i < bridge->locCount; i++) {
-                        Location *loc = bridge->locs[i];
-                        if (!loc || loc->minSceneTileX != bridge->x || loc->minSceneTileZ != bridge->z) {
-                            continue;
-                        }
-
-                        if (!ps2_is_decorative_centrepiece(loc->bitset, loc->info)) {
-                            continue;
-                        }
-
-                        int dx = (loc->x >> 7) - detailAnchorX;
-                        int dz = (loc->z >> 7) - detailAnchorZ;
-                        if (dx < 0) dx = -dx;
-                        if (dz < 0) dz = -dz;
-                        if (dx > PS2_INACTIVE_LOC_RENDER_RADIUS || dz > PS2_INACTIVE_LOC_RENDER_RADIUS) {
-                            continue;
-                        }
-
-                        ps2_decorative_centrepiece_visible_count++;
-                        if (ps2_decorative_centrepiece_visible_count >
-                            PS2_DECORATIVE_CENTREPIECE_DENSE_THRESHOLD) {
-                            ps2_decorative_centrepiece_dense = true;
-                            goto ps2_dense_loc_count_done;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-ps2_dense_loc_count_done:;
-#endif
 
     for (int level = world3d->minLevel; level < world3d->maxLevel; level++) {
         Ground ***tiles = world3d->levelTiles[level];
