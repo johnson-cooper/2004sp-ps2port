@@ -105,7 +105,7 @@
 // Examine-only shape-10/11 centerpieces are the dense crate/barrel/box/furniture class.
 // Sparse scenes render normally. In dense scenes keep the nearest N visible decorative locs so
 // nearby scenery replaces farther clutter as the player moves instead of exhausting a draw counter.
-#define PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET 20
+#define PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET 10
 // Bit 5 is unused by the scene info encoding (shape uses 0..4, rotation uses 6..7).
 // On PS2 only, tag locs that have a real interaction option so render LOD can distinguish
 // gameplay-relevant objects from examine-only scenery even when LocType.active is true.
