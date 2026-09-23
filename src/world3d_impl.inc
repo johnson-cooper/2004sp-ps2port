@@ -71,7 +71,12 @@ static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int scene
 
     int radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
     int shape = info & 0x1f;
-    if (shape == GROUNDDECOR) {
+    if (shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL) {
+        // With no gameplay-important flag these are examine-only static centerpieces: crates,
+        // barrels, boxes, tables, furniture and similar clutter. Compact dock/town scenes can place
+        // dozens inside the generic near ring, so give this class its own aggressive radius.
+        radius = PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS;
+    } else if (shape == GROUNDDECOR) {
         radius = PS2_GROUND_DECOR_RENDER_RADIUS;
     } else if (shape >= WALLDECOR_STRAIGHT_NOOFFSET && shape <= WALLDECOR_DIAGONAL_BOTH) {
         radius = PS2_WALL_DECOR_RENDER_RADIUS;

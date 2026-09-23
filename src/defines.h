@@ -102,6 +102,10 @@
 #define PS2_ROOF_RENDER_RADIUS 8
 #define PS2_WALL_DECOR_RENDER_RADIUS 8
 #define PS2_GROUND_DECOR_RENDER_RADIUS 6
+// Examine-only shape-10/11 centerpieces are the dense crate/barrel/box/furniture class that makes
+// compact hubs such as Port Sarim docks pathological. Keep only the immediate 2-tile neighborhood;
+// interactive centerpieces bypass this via PS2_LOC_GAMEPLAY_IMPORTANT_FLAG.
+#define PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS 2
 // Bit 5 is unused by the scene info encoding (shape uses 0..4, rotation uses 6..7).
 // On PS2 only, tag locs that have a real interaction option so render LOD can distinguish
 // gameplay-relevant objects from examine-only scenery even when LocType.active is true.
