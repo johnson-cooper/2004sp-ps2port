@@ -78,39 +78,44 @@ static int ps2_decorative_recovery_frames = 0;
 
 static void ps2_update_decorative_adaptive_lod(void) {
     Client *c = ps2_crash_client;
-    bool render25 = c && c->controller_render_25fps;
-    int lastRenderMs = (c && c->shell) ? c->shell->ps2_last_render_ms : 0;
-    int overloadMs = render25 ? PS2_DECORATIVE_RENDER_BUDGET_25FPS_MS
-                              : PS2_DECORATIVE_RENDER_BUDGET_50FPS_MS;
-    int recoverMs = render25 ? PS2_DECORATIVE_RENDER_RECOVER_25FPS_MS
-                             : PS2_DECORATIVE_RENDER_RECOVER_50FPS_MS;
-
+    int fps = (c && c->shell) ? c->shell->fps : 0;
     bool dense =
         ps2_decorative_last_candidate_count > PS2_DECORATIVE_ADAPTIVE_DENSE_SUBMISSIONS;
-    bool overloaded = dense && lastRenderMs > overloadMs;
-    bool comfortable = lastRenderMs > 0 && lastRenderMs < recoverMs;
 
-    if (overloaded) {
-        ps2_decorative_recovery_frames = 0;
-        if (ps2_decorative_radius > PS2_DECORATIVE_ADAPTIVE_MIN_RADIUS) {
-            ps2_decorative_radius -= PS2_DECORATIVE_ADAPTIVE_RADIUS_STEP;
-            if (ps2_decorative_radius < PS2_DECORATIVE_ADAPTIVE_MIN_RADIUS) {
-                ps2_decorative_radius = PS2_DECORATIVE_ADAPTIVE_MIN_RADIUS;
-            }
+    // Use the exact FPS value shown by ::perf. When a decorative-heavy scene drops the real game
+    // loop below target, immediately choose a smaller proven-safe scenery radius. This avoids all
+    // renderer timing/traversal inference: if the player can see the slowdown, this controller can too.
+    int desiredRadius = PS2_INACTIVE_LOC_RENDER_RADIUS;
+    if (dense && fps > 0) {
+        if (fps < PS2_DECORATIVE_FPS_RADIUS_2) {
+            desiredRadius = 2;
+        } else if (fps < PS2_DECORATIVE_FPS_RADIUS_4) {
+            desiredRadius = 4;
+        } else if (fps < PS2_DECORATIVE_FPS_RADIUS_6) {
+            desiredRadius = 6;
+        } else if (fps < PS2_DECORATIVE_FPS_RADIUS_8) {
+            desiredRadius = 8;
         }
+    }
+
+    // Degrade immediately. If FPS is badly low, jump straight to the 2-tile fallback that already
+    // worked on real hardware rather than spending several slow frames stepping through each level.
+    if (desiredRadius < ps2_decorative_radius) {
+        ps2_decorative_radius = desiredRadius;
+        ps2_decorative_recovery_frames = 0;
         return;
     }
 
-    // Recover far more slowly than we cull. Dense trouble therefore falls quickly toward the
-    // hardware-proven 2-tile fallback, while leaving a busy area restores scenery gradually.
-    if (comfortable) {
+    // Never expand while the loop is still marginal. Require sustained near-50 FPS before restoring
+    // two tiles at a time so dense scenery cannot oscillate in and out every few frames.
+    if (fps >= PS2_DECORATIVE_FPS_RECOVER) {
         ps2_decorative_recovery_frames++;
         if (ps2_decorative_recovery_frames >= PS2_DECORATIVE_ADAPTIVE_RECOVERY_FRAMES) {
             ps2_decorative_recovery_frames = 0;
-            if (ps2_decorative_radius < PS2_INACTIVE_LOC_RENDER_RADIUS) {
+            if (ps2_decorative_radius < desiredRadius) {
                 ps2_decorative_radius += PS2_DECORATIVE_ADAPTIVE_RADIUS_STEP;
-                if (ps2_decorative_radius > PS2_INACTIVE_LOC_RENDER_RADIUS) {
-                    ps2_decorative_radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
+                if (ps2_decorative_radius > desiredRadius) {
+                    ps2_decorative_radius = desiredRadius;
                 }
             }
         }
@@ -1334,8 +1339,8 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.topLevel = topLevel;
 
 #ifdef __PS2__
-    // Feed the previous completed render+present time plus the previous frame's decorative
-    // submissions into the adaptive scenery controller.
+    // Feed the live ::perf FPS plus the previous frame's decorative submissions into the
+    // adaptive scenery controller.
     ps2_update_decorative_adaptive_lod();
     ps2_inactive_loc_draw_count = 0;
     ps2_decorative_candidate_count = 0;

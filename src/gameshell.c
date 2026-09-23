@@ -223,11 +223,6 @@ void gameshell_run(Client *c) {
 #endif
 #ifdef __PS2__
         int64_t gs_t3 = rs2_now();
-        if (ps2_render_frame) {
-            // This is the performance signal adaptive scenery actually needs: everything from
-            // entering client_draw() through the final GS queue execution/sync/present.
-            c->shell->ps2_last_render_ms = (int)(gs_t3 - update_t1);
-        }
         _Perf.update_ms += update_t1 - frame_t0;
         _Perf.draw_ms += draw_t2 - update_t1;
         _Perf.gs_upload_ms += gs_t3 - draw_t2;

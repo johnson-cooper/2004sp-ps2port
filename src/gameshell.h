@@ -31,11 +31,6 @@ struct GameShell {
     // auto-opens at text-entry focus points. Platform-agnostic by design so any other
     // keyboard-less port can opt in later just by also setting this false.
     bool has_keyboard;
-#ifdef __PS2__
-    // Last completed rendered frame's client_draw + GS queue/sync/present time. Heap-owned here
-    // rather than a new global so normal PS2 BSS placement remains unchanged.
-    int ps2_last_render_ms;
-#endif
 };
 
 extern bool update_touch;
