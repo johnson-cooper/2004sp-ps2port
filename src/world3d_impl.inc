@@ -64,6 +64,10 @@ static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
     }
 }
 
+static int ps2_inactive_loc_draw_count = 0;
+static int ps2_decorative_centrepiece_visible_count = 0;
+static bool ps2_decorative_centrepiece_dense = false;
+
 static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
     if ((bitset & 0x40000000) == 0 || (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0) {
         return true;
@@ -106,10 +110,6 @@ static inline int ps2_obj_stack_detail(const GroundObject *objs) {
     }
     return distance <= PS2_OBJ_FULL_DETAIL_RADIUS ? 2 : 1;
 }
-
-static int ps2_inactive_loc_draw_count = 0;
-static int ps2_decorative_centrepiece_visible_count = 0;
-static bool ps2_decorative_centrepiece_dense = false;
 
 static inline bool ps2_is_decorative_centrepiece(int bitset, int8_t info) {
     if ((bitset & 0x40000000) == 0 || (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0) {
