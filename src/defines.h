@@ -106,12 +106,11 @@
 // Adapt their render radius to measured PS2 World3D cost instead of relying on traversal-order caps.
 // Full-detail areas use the ordinary inactive-loc radius; sustained dense/slow scenes step down
 // toward the proven 2-tile Port Sarim fallback, then recover outward slowly when performance returns.
-#define PS2_DECORATIVE_ADAPTIVE_DENSE_SUBMISSIONS 8
 #define PS2_DECORATIVE_ADAPTIVE_MIN_RADIUS 2
 #define PS2_DECORATIVE_ADAPTIVE_RADIUS_STEP 2
 #define PS2_DECORATIVE_ADAPTIVE_RECOVERY_FRAMES 50
 // GameShell FPS is the same value shown by ::perf and reflects the 50 Hz game loop.
-// Dense decorative scenery is progressively shortened as live FPS falls.
+// Decorative scenery is progressively shortened whenever live FPS falls; FPS is authoritative.
 #define PS2_DECORATIVE_FPS_RADIUS_8 44
 #define PS2_DECORATIVE_FPS_RADIUS_6 38
 #define PS2_DECORATIVE_FPS_RADIUS_4 32

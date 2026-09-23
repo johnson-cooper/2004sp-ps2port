@@ -72,21 +72,18 @@ static int ps2_inactive_loc_draw_count = 0;
 // distance-based culling fixes it. Combine those two hardware findings here: measure the real
 // World3D cost and tighten/relax only this decorative class as needed.
 static int ps2_decorative_candidate_count = 0;
-static int ps2_decorative_last_candidate_count = 0;
 static int ps2_decorative_radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
 static int ps2_decorative_recovery_frames = 0;
 
 static void ps2_update_decorative_adaptive_lod(void) {
     Client *c = ps2_crash_client;
     int fps = (c && c->shell) ? c->shell->fps : 0;
-    bool dense =
-        ps2_decorative_last_candidate_count > PS2_DECORATIVE_ADAPTIVE_DENSE_SUBMISSIONS;
 
-    // Use the exact FPS value shown by ::perf. When a decorative-heavy scene drops the real game
-    // loop below target, immediately choose a smaller proven-safe scenery radius. This avoids all
-    // renderer timing/traversal inference: if the player can see the slowdown, this controller can too.
+    // FPS is authoritative. Earlier versions incorrectly required a separate decorative-candidate
+    // count to agree before culling, so a bad density signal could leave radius 10 even at 15 FPS.
+    // The same FPS shown by ::perf now directly selects the decorative centerpiece radius.
     int desiredRadius = PS2_INACTIVE_LOC_RENDER_RADIUS;
-    if (dense && fps > 0) {
+    if (fps > 0) {
         if (fps < PS2_DECORATIVE_FPS_RADIUS_2) {
             desiredRadius = 2;
         } else if (fps < PS2_DECORATIVE_FPS_RADIUS_4) {
@@ -98,16 +95,15 @@ static void ps2_update_decorative_adaptive_lod(void) {
         }
     }
 
-    // Degrade immediately. If FPS is badly low, jump straight to the 2-tile fallback that already
-    // worked on real hardware rather than spending several slow frames stepping through each level.
+    // Degrade immediately. At very low FPS this jumps directly to the exact 2-tile behavior
+    // already proven to remove Port Sarim decorative centerpieces on real hardware.
     if (desiredRadius < ps2_decorative_radius) {
         ps2_decorative_radius = desiredRadius;
         ps2_decorative_recovery_frames = 0;
         return;
     }
 
-    // Never expand while the loop is still marginal. Require sustained near-50 FPS before restoring
-    // two tiles at a time so dense scenery cannot oscillate in and out every few frames.
+    // Restore scenery only after sustained near-50 FPS so the radius cannot bounce every frame.
     if (fps >= PS2_DECORATIVE_FPS_RECOVER) {
         ps2_decorative_recovery_frames++;
         if (ps2_decorative_recovery_frames >= PS2_DECORATIVE_ADAPTIVE_RECOVERY_FRAMES) {
@@ -1339,8 +1335,7 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.topLevel = topLevel;
 
 #ifdef __PS2__
-    // Feed the live ::perf FPS plus the previous frame's decorative submissions into the
-    // adaptive scenery controller.
+    // Feed the live ::perf FPS directly into the adaptive scenery controller.
     ps2_update_decorative_adaptive_lod();
     ps2_inactive_loc_draw_count = 0;
     ps2_decorative_candidate_count = 0;
@@ -1450,9 +1445,6 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
 
                 if (_World3D.tilesRemaining == 0) {
                     _World3D.takingInput = false;
-#ifdef __PS2__
-                    ps2_decorative_last_candidate_count = ps2_decorative_candidate_count;
-#endif
                     return;
                 }
             }
@@ -1506,18 +1498,12 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
 
                 if (_World3D.tilesRemaining == 0) {
                     _World3D.takingInput = false;
-#ifdef __PS2__
-                    ps2_decorative_last_candidate_count = ps2_decorative_candidate_count;
-#endif
                     return;
                 }
             }
         }
     }
 
-#ifdef __PS2__
-    ps2_decorative_last_candidate_count = ps2_decorative_candidate_count;
-#endif
 }
 
 void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int loopCycle) {
