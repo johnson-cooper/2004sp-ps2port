@@ -110,10 +110,10 @@
 #define PS2_DECORATIVE_ADAPTIVE_MIN_RADIUS 2
 #define PS2_DECORATIVE_ADAPTIVE_RADIUS_STEP 2
 #define PS2_DECORATIVE_ADAPTIVE_RECOVERY_FRAMES 50
-#define PS2_DECORATIVE_WORLD_BUDGET_50FPS_MS 16
-#define PS2_DECORATIVE_WORLD_BUDGET_25FPS_MS 32
-#define PS2_DECORATIVE_WORLD_RECOVER_50FPS_MS 11
-#define PS2_DECORATIVE_WORLD_RECOVER_25FPS_MS 22
+#define PS2_DECORATIVE_RENDER_BUDGET_50FPS_MS 18
+#define PS2_DECORATIVE_RENDER_BUDGET_25FPS_MS 36
+#define PS2_DECORATIVE_RENDER_RECOVER_50FPS_MS 12
+#define PS2_DECORATIVE_RENDER_RECOVER_25FPS_MS 24
 // Bit 5 is unused by the scene info encoding (shape uses 0..4, rotation uses 6..7).
 // On PS2 only, tag locs that have a real interaction option so render LOD can distinguish
 // gameplay-relevant objects from examine-only scenery even when LocType.active is true.

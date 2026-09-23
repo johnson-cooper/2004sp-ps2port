@@ -73,23 +73,21 @@ static int ps2_inactive_loc_draw_count = 0;
 static int ps2_decorative_candidate_count = 0;
 static int ps2_decorative_last_candidate_count = 0;
 static int ps2_decorative_radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
-static int ps2_decorative_last_world_ms = 0;
 static int ps2_decorative_recovery_frames = 0;
-static int64_t ps2_world3d_frame_start_ms = 0;
 
 static void ps2_update_decorative_adaptive_lod(void) {
     Client *c = ps2_crash_client;
     bool render25 = c && c->controller_render_25fps;
-    int overloadMs = render25 ? PS2_DECORATIVE_WORLD_BUDGET_25FPS_MS
-                              : PS2_DECORATIVE_WORLD_BUDGET_50FPS_MS;
-    int recoverMs = render25 ? PS2_DECORATIVE_WORLD_RECOVER_25FPS_MS
-                             : PS2_DECORATIVE_WORLD_RECOVER_50FPS_MS;
+    int lastRenderMs = (c && c->shell) ? c->shell->ps2_last_render_ms : 0;
+    int overloadMs = render25 ? PS2_DECORATIVE_RENDER_BUDGET_25FPS_MS
+                              : PS2_DECORATIVE_RENDER_BUDGET_50FPS_MS;
+    int recoverMs = render25 ? PS2_DECORATIVE_RENDER_RECOVER_25FPS_MS
+                             : PS2_DECORATIVE_RENDER_RECOVER_50FPS_MS;
 
     bool dense =
         ps2_decorative_last_candidate_count > PS2_DECORATIVE_ADAPTIVE_DENSE_SUBMISSIONS;
-    bool overloaded = dense && ps2_decorative_last_world_ms > overloadMs;
-    bool comfortable =
-        ps2_decorative_last_world_ms > 0 && ps2_decorative_last_world_ms < recoverMs;
+    bool overloaded = dense && lastRenderMs > overloadMs;
+    bool comfortable = lastRenderMs > 0 && lastRenderMs < recoverMs;
 
     if (overloaded) {
         ps2_decorative_recovery_frames = 0;
@@ -102,8 +100,8 @@ static void ps2_update_decorative_adaptive_lod(void) {
         return;
     }
 
-    // Recovery is deliberately much slower than culling so entering a dense port reacts quickly
-    // without making scenery pulse in/out around the timing boundary.
+    // Recover far more slowly than we cull. Dense trouble therefore falls quickly toward the
+    // hardware-proven 2-tile fallback, while leaving a busy area restores scenery gradually.
     if (comfortable) {
         ps2_decorative_recovery_frames++;
         if (ps2_decorative_recovery_frames >= PS2_DECORATIVE_ADAPTIVE_RECOVERY_FRAMES) {
@@ -1335,12 +1333,11 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.topLevel = topLevel;
 
 #ifdef __PS2__
-    // Feed the previous rendered frame into the adaptive scenery controller before starting the
-    // next draw. This uses actual World3D milliseconds plus actual decorative submissions.
+    // Feed the previous completed render+present time plus the previous frame's decorative
+    // submissions into the adaptive scenery controller.
     ps2_update_decorative_adaptive_lod();
     ps2_inactive_loc_draw_count = 0;
     ps2_decorative_candidate_count = 0;
-    ps2_world3d_frame_start_ms = rs2_now();
 
     // Preserve the fixed 104x104 coordinate space, but submit only the nearby
     // 17x17 terrain window. This removes about 89% of the original 51x51
@@ -1447,11 +1444,8 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
 
                 if (_World3D.tilesRemaining == 0) {
                     _World3D.takingInput = false;
-#ifdef __PS2__
-                    goto ps2_world3d_done;
-#else
+                    ps2_decorative_last_candidate_count = ps2_decorative_candidate_count;
                     return;
-#endif
                 }
             }
         }
@@ -1504,19 +1498,14 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
 
                 if (_World3D.tilesRemaining == 0) {
                     _World3D.takingInput = false;
-#ifdef __PS2__
-                    goto ps2_world3d_done;
-#else
+                    ps2_decorative_last_candidate_count = ps2_decorative_candidate_count;
                     return;
-#endif
                 }
             }
         }
     }
 
 #ifdef __PS2__
-ps2_world3d_done:
-    ps2_decorative_last_world_ms = (int)(rs2_now() - ps2_world3d_frame_start_ms);
     ps2_decorative_last_candidate_count = ps2_decorative_candidate_count;
 #endif
 }
