@@ -115,6 +115,9 @@ void world3d_merge_normals(World3D *world3d, Model *modelA, Model *modelB, int o
 void world3d_draw_minimaptile(World3D *world3d, int level, int x, int z, int *dst, int offset, int step);
 void world3d_click(int mouseX, int mouseY);
 void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, int eyeYaw, int eyePitch, int loopCycle);
+#ifdef __PS2__
+int ps2_world3d_decorative_radius(void);
+#endif
 void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int loopCycle);
 void world3d_draw_tileunderlay(World3D *world3d, TileUnderlay *underlay, int level, int tileX, int tileZ, int sinEyePitch, int cosEyePitch, int sinEyeYaw, int cosEyeYaw);
 void world3d_draw_tileoverlay(int tileX, int tileZ, TileOverlay *overlay, int sinEyePitch, int cosEyePitch, int sinEyeYaw, int cosEyeYaw);

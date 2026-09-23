@@ -170,6 +170,11 @@ void draw_info_overlay(Client *c) {
         sprintf(buf, "FPS: %d", c->shell->fps);
         drawStringRight(c->font_plain11, x, y, buf, YELLOW, true);
         y += 13;
+#ifdef __PS2__
+        sprintf(buf, "LocLOD: %d", ps2_world3d_decorative_radius());
+        drawStringRight(c->font_plain11, x, y, buf, YELLOW, true);
+        y += 13;
+#endif
 #if defined(__vita__)
 #include <psp2/power.h>
         sprintf(buf, "BAT: %d%%", scePowerGetBatteryLifePercent());

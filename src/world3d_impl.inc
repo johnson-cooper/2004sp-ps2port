@@ -75,6 +75,10 @@ static int ps2_decorative_candidate_count = 0;
 static int ps2_decorative_radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
 static int ps2_decorative_recovery_frames = 0;
 
+int ps2_world3d_decorative_radius(void) {
+    return ps2_decorative_radius;
+}
+
 static void ps2_update_decorative_adaptive_lod(void) {
     Client *c = ps2_crash_client;
     int fps = (c && c->shell) ? c->shell->fps : 0;
