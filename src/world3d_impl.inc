@@ -65,97 +65,52 @@ static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
 }
 
 static int ps2_inactive_loc_draw_count = 0;
-static Location *ps2_decorative_loc_keep[PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET];
-static int ps2_decorative_loc_keep_count = 0;
-static bool ps2_decorative_loc_over_budget = false;
 
-static inline bool ps2_is_decorative_location(const Location *loc) {
-    if (!loc || (loc->bitset & 0x40000000) == 0 ||
-        (loc->info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0) {
-        return false;
-    }
+// Rolling nearest-N decorative loc limiter. We deliberately learn candidates from the real draw
+// filter rather than a separate scene prepass: Port Sarim has several traversal paths that made
+// prepasses disagree with what was actually submitted. Each frame records the nearest N decorative
+// locs that reached this filter; the following frame uses that exact proximity cutoff.
+static int ps2_decorative_seen_this_frame = 0;
+static int ps2_decorative_nearest_count = 0;
+static int ps2_decorative_nearest_distance[PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET];
+static int ps2_decorative_nearest_bitset[PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET];
+static bool ps2_decorative_limit_active = false;
+static int ps2_decorative_cutoff_distance = 0;
+static int ps2_decorative_cutoff_bitset = 0;
 
-    int shape = loc->info & 0x1f;
-    return shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL;
+static inline bool ps2_decorative_pair_is_better(int distanceA, int bitsetA,
+                                                  int distanceB, int bitsetB) {
+    return distanceA < distanceB || (distanceA == distanceB && bitsetA < bitsetB);
 }
 
-static inline int ps2_decorative_loc_distance(const Location *loc, int anchorX, int anchorZ) {
-    int dx = (loc->x >> 7) - anchorX;
-    int dz = (loc->z >> 7) - anchorZ;
-    if (dx < 0) dx = -dx;
-    if (dz < 0) dz = -dz;
-    return dx * dx + dz * dz;
-}
+static void ps2_track_decorative_candidate(int distance, int bitset) {
+    ps2_decorative_seen_this_frame++;
 
-static void ps2_consider_decorative_location(Location *loc, int anchorX, int anchorZ) {
-    if (!ps2_is_decorative_location(loc)) {
+    if (ps2_decorative_nearest_count < PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET) {
+        int slot = ps2_decorative_nearest_count++;
+        ps2_decorative_nearest_distance[slot] = distance;
+        ps2_decorative_nearest_bitset[slot] = bitset;
         return;
     }
 
-    int tileX = loc->x >> 7;
-    int tileZ = loc->z >> 7;
-    int dx = tileX - anchorX;
-    int dz = tileZ - anchorZ;
-    if (dx < 0) dx = -dx;
-    if (dz < 0) dz = -dz;
-    if (dx > PS2_INACTIVE_LOC_RENDER_RADIUS || dz > PS2_INACTIVE_LOC_RENDER_RADIUS) {
-        return;
-    }
-
-    for (int i = 0; i < ps2_decorative_loc_keep_count; i++) {
-        if (ps2_decorative_loc_keep[i] == loc) {
-            return;
+    int worst = 0;
+    for (int i = 1; i < ps2_decorative_nearest_count; i++) {
+        if (ps2_decorative_pair_is_better(
+                ps2_decorative_nearest_distance[worst],
+                ps2_decorative_nearest_bitset[worst],
+                ps2_decorative_nearest_distance[i],
+                ps2_decorative_nearest_bitset[i])) {
+            worst = i;
         }
     }
 
-    if (ps2_decorative_loc_keep_count < PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET) {
-        ps2_decorative_loc_keep[ps2_decorative_loc_keep_count++] = loc;
-        return;
+    if (ps2_decorative_pair_is_better(
+            distance, bitset,
+            ps2_decorative_nearest_distance[worst],
+            ps2_decorative_nearest_bitset[worst])) {
+        ps2_decorative_nearest_distance[worst] = distance;
+        ps2_decorative_nearest_bitset[worst] = bitset;
     }
-
-    ps2_decorative_loc_over_budget = true;
-
-    int candidateDistance = ps2_decorative_loc_distance(loc, anchorX, anchorZ);
-    int farthestIndex = 0;
-    int farthestDistance =
-        ps2_decorative_loc_distance(ps2_decorative_loc_keep[0], anchorX, anchorZ);
-
-    for (int i = 1; i < ps2_decorative_loc_keep_count; i++) {
-        int distance = ps2_decorative_loc_distance(ps2_decorative_loc_keep[i], anchorX, anchorZ);
-        if (distance > farthestDistance ||
-            (distance == farthestDistance &&
-             ps2_decorative_loc_keep[i]->bitset > ps2_decorative_loc_keep[farthestIndex]->bitset)) {
-            farthestDistance = distance;
-            farthestIndex = i;
-        }
-    }
-
-    if (candidateDistance < farthestDistance ||
-        (candidateDistance == farthestDistance &&
-         loc->bitset < ps2_decorative_loc_keep[farthestIndex]->bitset)) {
-        ps2_decorative_loc_keep[farthestIndex] = loc;
-    }
-}
-
-static inline bool ps2_keep_decorative_location(const Location *loc) {
-    if (!ps2_is_decorative_location(loc)) {
-        return true;
-    }
-
-    // Fewer than N nearby decorative locs means there is no density problem.
-    if (!ps2_decorative_loc_over_budget) {
-        return true;
-    }
-
-    // In a dense scene, only the preselected nearest N decorative locs may render.
-    // Anything else that reaches the draw path is farther clutter and is rejected.
-    for (int i = 0; i < ps2_decorative_loc_keep_count; i++) {
-        if (ps2_decorative_loc_keep[i] == loc) {
-            return true;
-        }
-    }
-
-    return false;
 }
 
 static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
@@ -180,7 +135,29 @@ static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int scene
     int dz = (sceneZ >> 7) - anchorZ;
     if (dx < 0) dx = -dx;
     if (dz < 0) dz = -dz;
-    return dx <= radius && dz <= radius;
+
+    if (dx > radius || dz > radius) {
+        return false;
+    }
+
+    if (shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL) {
+        int distance = dx * dx + dz * dz;
+
+        // Record every real decorative candidate before deciding whether this frame may draw it.
+        // This keeps the next-frame nearest set correct even for locs currently being culled.
+        ps2_track_decorative_candidate(distance, bitset);
+
+        if (ps2_decorative_limit_active &&
+            ps2_decorative_pair_is_better(
+                ps2_decorative_cutoff_distance,
+                ps2_decorative_cutoff_bitset,
+                distance,
+                bitset)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static inline int ps2_obj_stack_detail(const GroundObject *objs) {
@@ -1369,11 +1346,31 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     // These are per-frame budgets. Resetting them here prevents a dense area from permanently
     // consuming the scenery allowance after the player moves somewhere lighter.
     ps2_inactive_loc_draw_count = 0;
-    ps2_decorative_loc_keep_count = 0;
-    ps2_decorative_loc_over_budget = false;
-    for (int i = 0; i < PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET; i++) {
-        ps2_decorative_loc_keep[i] = NULL;
+
+    // Turn the previous frame's actual decorative submissions into this frame's proximity cutoff.
+    // If there were more than N, find the worst member of the recorded nearest-N set. Anything
+    // farther (or same-distance with a later bitset tie-break) is culled this frame.
+    ps2_decorative_limit_active =
+        ps2_decorative_seen_this_frame > PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET &&
+        ps2_decorative_nearest_count == PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET;
+
+    if (ps2_decorative_limit_active) {
+        int worst = 0;
+        for (int i = 1; i < ps2_decorative_nearest_count; i++) {
+            if (ps2_decorative_pair_is_better(
+                    ps2_decorative_nearest_distance[worst],
+                    ps2_decorative_nearest_bitset[worst],
+                    ps2_decorative_nearest_distance[i],
+                    ps2_decorative_nearest_bitset[i])) {
+                worst = i;
+            }
+        }
+        ps2_decorative_cutoff_distance = ps2_decorative_nearest_distance[worst];
+        ps2_decorative_cutoff_bitset = ps2_decorative_nearest_bitset[worst];
     }
+
+    ps2_decorative_seen_this_frame = 0;
+    ps2_decorative_nearest_count = 0;
 
     // Preserve the fixed 104x104 coordinate space, but submit only the nearby
     // 17x17 terrain window. This removes about 89% of the original 51x51
@@ -1430,40 +1427,7 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     }
 
 
-#ifdef __PS2__
-    // Build the keep set from the full nearby PS2 scene, not only tile->visible entries.
-    // The real loc traversal can still submit scenery through spans/bridges when an owning tile
-    // is not marked visible, which previously let Port Sarim crates bypass the nearest-loc cap.
-    // Pointer identity de-duplicates multi-tile placements; the helper retains only the nearest N.
-    int decorativeAnchorX;
-    int decorativeAnchorZ;
-    ps2_loc_detail_anchor(&decorativeAnchorX, &decorativeAnchorZ);
 
-    for (int level = world3d->minLevel; level < world3d->maxLevel; level++) {
-        Ground ***tiles = world3d->levelTiles[level];
-        for (int x = _World3D.minDrawTileX; x < _World3D.maxDrawTileX; x++) {
-            for (int z = _World3D.minDrawTileZ; z < _World3D.maxDrawTileZ; z++) {
-                Ground *tile = tiles[x][z];
-                if (!tile) {
-                    continue;
-                }
-
-                for (int i = 0; i < tile->locCount; i++) {
-                    ps2_consider_decorative_location(
-                        tile->locs[i], decorativeAnchorX, decorativeAnchorZ);
-                }
-
-                Ground *bridge = tile->bridge;
-                if (bridge) {
-                    for (int i = 0; i < bridge->locCount; i++) {
-                        ps2_consider_decorative_location(
-                            bridge->locs[i], decorativeAnchorX, decorativeAnchorZ);
-                    }
-                }
-            }
-        }
-    }
-#endif
 
     for (int level = world3d->minLevel; level < world3d->maxLevel; level++) {
         Ground ***tiles = world3d->levelTiles[level];
@@ -1663,8 +1627,7 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
 
                     if (loc) {
 #ifdef __PS2__
-                        if (!ps2_keep_decorative_location(loc) ||
-                            !ps2_should_draw_loc_detail(loc->bitset, loc->info, loc->x, loc->z)) {
+                        if (!ps2_should_draw_loc_detail(loc->bitset, loc->info, loc->x, loc->z)) {
                             continue;
                         }
 #endif
@@ -1983,8 +1946,7 @@ void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int l
                 farthest->cycle = _World3D.cycle;
 
 #ifdef __PS2__
-                if (ps2_keep_decorative_location(farthest) &&
-                    ps2_should_draw_loc_detail(farthest->bitset, farthest->info, farthest->x, farthest->z) &&
+                if (ps2_should_draw_loc_detail(farthest->bitset, farthest->info, farthest->x, farthest->z) &&
                     ps2_claim_inactive_loc_budget(farthest->bitset, farthest->info, farthest->x, farthest->z)) {
 #endif
                     Model *model = farthest->model;
