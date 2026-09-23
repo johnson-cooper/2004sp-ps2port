@@ -105,7 +105,7 @@
 // Examine-only shape-10/11 centerpieces are the dense crate/barrel/box/furniture class. Do not
 // cull them in ordinary scenes: only enable the aggressive radius when the current visible scene
 // contains enough of this class to become expensive on PS2 hardware.
-#define PS2_DECORATIVE_CENTREPIECE_DENSE_THRESHOLD 20
+#define PS2_DECORATIVE_CENTREPIECE_DENSE_THRESHOLD 6
 #define PS2_DECORATIVE_CENTREPIECE_DENSE_RADIUS 2
 // Bit 5 is unused by the scene info encoding (shape uses 0..4, rotation uses 6..7).
 // On PS2 only, tag locs that have a real interaction option so render LOD can distinguish
