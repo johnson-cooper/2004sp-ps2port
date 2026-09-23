@@ -19,6 +19,7 @@
 #include "gl11.h"
 #ifdef __PS2__
 #include "client.h"
+#include "gameshell.h"
 #endif
 
 SceneData _World3D = {.lowMemory = true};
