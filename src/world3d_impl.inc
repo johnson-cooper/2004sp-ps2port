@@ -67,11 +67,8 @@ static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
 
 static int ps2_inactive_loc_draw_count = 0;
 
-// Adaptive decorative scenery controller. The old hard cap proved that decorative centerpiece
-// submissions are the Port Sarim pressure source, while the unconditional 2-tile radius proved that
-// distance-based culling fixes it. Combine those two hardware findings here: measure the real
-// World3D cost and tighten/relax only this decorative class as needed.
-static int ps2_decorative_candidate_count = 0;
+// Adaptive decorative scenery controller. The unconditional 2-tile hardware test proved that
+// distance-based centrepiece culling fixes dense Port Sarim scenes. Live FPS now selects that radius.
 static int ps2_decorative_radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
 static int ps2_decorative_recovery_frames = 0;
 
@@ -125,12 +122,13 @@ static void ps2_update_decorative_adaptive_lod(void) {
 }
 
 static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
-    if ((bitset & 0x40000000) == 0 || (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0) {
+    // Non-map/dynamic entities keep their normal draw path.
+    if ((bitset & 0x40000000) == 0) {
         return true;
     }
 
-    int radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
     int shape = info & 0x1f;
+    bool gameplayImportant = (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0;
 
     int anchorX;
     int anchorZ;
@@ -140,12 +138,34 @@ static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int scene
     if (dx < 0) dx = -dx;
     if (dz < 0) dz = -dz;
 
+    // Shape-10/11 centrepieces are the expensive dense-scene class (crates, boxes, barrels,
+    // furniture, stalls, etc.). Under load, *all* static centrepieces use the adaptive radius,
+    // even if they have a real menu option. Their collision/interaction data is untouched; only
+    // their distant model draw is skipped, and the model returns automatically as the player nears.
+    //
+    // This is intentionally checked before gameplayImportant. Previous builds returned true for
+    // important locs first, which let any crate/box with an option bypass LocLOD entirely.
     if (shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL) {
-        // Count the same real draw-filter submissions that made the original hard cap effective.
-        // Count before radius rejection so the density signal stays valid even after LOD tightens.
-        ps2_decorative_candidate_count++;
-        radius = ps2_decorative_radius;
-    } else if (shape == GROUNDDECOR) {
+        if (ps2_decorative_radius < PS2_INACTIVE_LOC_RENDER_RADIUS) {
+            return dx <= ps2_decorative_radius && dz <= ps2_decorative_radius;
+        }
+
+        // At full-performance radius, preserve the old unlimited behavior for genuinely important
+        // centrepieces instead of introducing new culling in healthy scenes.
+        if (gameplayImportant) {
+            return true;
+        }
+
+        return dx <= PS2_INACTIVE_LOC_RENDER_RADIUS && dz <= PS2_INACTIVE_LOC_RENDER_RADIUS;
+    }
+
+    // Non-centrepiece gameplay locs (doors, gates, structural interactions, etc.) remain protected.
+    if (gameplayImportant) {
+        return true;
+    }
+
+    int radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
+    if (shape == GROUNDDECOR) {
         radius = PS2_GROUND_DECOR_RENDER_RADIUS;
     } else if (shape >= WALLDECOR_STRAIGHT_NOOFFSET && shape <= WALLDECOR_DIAGONAL_BOTH) {
         radius = PS2_WALL_DECOR_RENDER_RADIUS;
@@ -1342,7 +1362,6 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     // Feed the live ::perf FPS directly into the adaptive scenery controller.
     ps2_update_decorative_adaptive_lod();
     ps2_inactive_loc_draw_count = 0;
-    ps2_decorative_candidate_count = 0;
 
     // Preserve the fixed 104x104 coordinate space, but submit only the nearby
     // 17x17 terrain window. This removes about 89% of the original 51x51
