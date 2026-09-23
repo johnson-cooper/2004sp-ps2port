@@ -1395,6 +1395,39 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
                         goto ps2_dense_loc_count_done;
                     }
                 }
+
+                // Dock/floor scenes can place their static locs on the bridge Ground rather than
+                // tile->locs. world3d_draw_tile() renders bridge->locs through a separate path, so
+                // include them in the density detector or Port Sarim can render the clutter while
+                // the adaptive threshold incorrectly thinks the scene is sparse.
+                Ground *bridge = tile->bridge;
+                if (bridge) {
+                    for (int i = 0; i < bridge->locCount; i++) {
+                        Location *loc = bridge->locs[i];
+                        if (!loc || loc->minSceneTileX != bridge->x || loc->minSceneTileZ != bridge->z) {
+                            continue;
+                        }
+
+                        if (!ps2_is_decorative_centrepiece(loc->bitset, loc->info)) {
+                            continue;
+                        }
+
+                        int dx = (loc->x >> 7) - detailAnchorX;
+                        int dz = (loc->z >> 7) - detailAnchorZ;
+                        if (dx < 0) dx = -dx;
+                        if (dz < 0) dz = -dz;
+                        if (dx > PS2_INACTIVE_LOC_RENDER_RADIUS || dz > PS2_INACTIVE_LOC_RENDER_RADIUS) {
+                            continue;
+                        }
+
+                        ps2_decorative_centrepiece_visible_count++;
+                        if (ps2_decorative_centrepiece_visible_count >
+                            PS2_DECORATIVE_CENTREPIECE_DENSE_THRESHOLD) {
+                            ps2_decorative_centrepiece_dense = true;
+                            goto ps2_dense_loc_count_done;
+                        }
+                    }
+                }
             }
         }
     }
