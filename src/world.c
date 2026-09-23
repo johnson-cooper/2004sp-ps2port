@@ -673,6 +673,18 @@ void world_add_loc2(World *world, int level, int x, int z, World3D *scene, LinkL
     }
 
     int8_t info = (int8_t)((rotation << 6) + shape);
+#ifdef __PS2__
+    // Apply the same interaction-based detail tag to static map locs. These placements are the
+    // dense scenery that dominates areas such as Port Sarim docks and Draynor village.
+    if (loc->op) {
+        for (int op = 0; op < 5; op++) {
+            if (loc->op[op]) {
+                info |= PS2_LOC_GAMEPLAY_IMPORTANT_FLAG;
+                break;
+            }
+        }
+    }
+#endif
     Model *model;
     int width;
     int offset;
