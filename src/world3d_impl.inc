@@ -75,14 +75,14 @@ static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int scene
     int radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
     int shape = info & 0x1f;
     if (shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL) {
-        // Count the exact decorative centerpiece submissions that reach the real draw path.
-        // Sparse scenes keep their normal radius. Once this frame has already encountered the
-        // configured allowance, only excess crates/barrels/boxes/furniture use the aggressive
-        // dense-scene radius. This avoids all of the prepass/owner-tile/bridge mismatches.
+        // This is the actual draw path, so this counter cannot miss bridge-owned or otherwise
+        // unusually traversed scenery. Keep the first N decorative centerpieces at normal range,
+        // then skip excess crates/barrels/boxes/furniture outright even when they are nearby.
+        // Gameplay-important centerpieces already returned above and never consume this budget.
         ps2_decorative_centrepiece_draw_count++;
         if (ps2_decorative_centrepiece_draw_count >
-            PS2_DECORATIVE_CENTREPIECE_DENSE_THRESHOLD) {
-            radius = PS2_DECORATIVE_CENTREPIECE_DENSE_RADIUS;
+            PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET) {
+            return false;
         }
     } else if (shape == GROUNDDECOR) {
         radius = PS2_GROUND_DECOR_RENDER_RADIUS;

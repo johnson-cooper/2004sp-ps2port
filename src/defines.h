@@ -102,11 +102,10 @@
 #define PS2_ROOF_RENDER_RADIUS 8
 #define PS2_WALL_DECOR_RENDER_RADIUS 8
 #define PS2_GROUND_DECOR_RENDER_RADIUS 6
-// Examine-only shape-10/11 centerpieces are the dense crate/barrel/box/furniture class. Do not
-// cull them in ordinary scenes: only enable the aggressive radius when the current visible scene
-// contains enough of this class to become expensive on PS2 hardware.
-#define PS2_DECORATIVE_CENTREPIECE_DENSE_THRESHOLD 6
-#define PS2_DECORATIVE_CENTREPIECE_DENSE_RADIUS 2
+// Examine-only shape-10/11 centerpieces are the dense crate/barrel/box/furniture class.
+// Keep a generous amount in normal scenes, but hard-cap actual per-frame submissions so compact
+// hubs such as Port Sarim cannot overwhelm the EE/GS path with dozens of nearby clutter models.
+#define PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET 20
 // Bit 5 is unused by the scene info encoding (shape uses 0..4, rotation uses 6..7).
 // On PS2 only, tag locs that have a real interaction option so render LOD can distinguish
 // gameplay-relevant objects from examine-only scenery even when LocType.active is true.
