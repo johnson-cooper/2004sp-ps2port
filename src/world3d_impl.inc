@@ -1444,7 +1444,9 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
 
                 if (_World3D.tilesRemaining == 0) {
                     _World3D.takingInput = false;
+#ifdef __PS2__
                     ps2_decorative_last_candidate_count = ps2_decorative_candidate_count;
+#endif
                     return;
                 }
             }
@@ -1498,7 +1500,9 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
 
                 if (_World3D.tilesRemaining == 0) {
                     _World3D.takingInput = false;
+#ifdef __PS2__
                     ps2_decorative_last_candidate_count = ps2_decorative_candidate_count;
+#endif
                     return;
                 }
             }
