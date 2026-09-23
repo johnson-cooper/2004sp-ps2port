@@ -71,11 +71,11 @@ static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int scene
 
     int radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
     int shape = info & 0x1f;
-    if (shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL) {
-        // With no gameplay-important flag these are examine-only static centerpieces: crates,
-        // barrels, boxes, tables, furniture and similar clutter. Compact dock/town scenes can place
-        // dozens inside the generic near ring, so give this class its own aggressive radius.
-        radius = PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS;
+    if (ps2_decorative_centrepiece_dense &&
+        (shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL)) {
+        // Only dense visible scenes get the aggressive clutter radius. In normal areas these
+        // examine-only centerpieces use the same general scenery radius as before.
+        radius = PS2_DECORATIVE_CENTREPIECE_DENSE_RADIUS;
     } else if (shape == GROUNDDECOR) {
         radius = PS2_GROUND_DECOR_RENDER_RADIUS;
     } else if (shape >= WALLDECOR_STRAIGHT_NOOFFSET && shape <= WALLDECOR_DIAGONAL_BOTH) {
@@ -108,6 +108,17 @@ static inline int ps2_obj_stack_detail(const GroundObject *objs) {
 }
 
 static int ps2_inactive_loc_draw_count = 0;
+static int ps2_decorative_centrepiece_visible_count = 0;
+static bool ps2_decorative_centrepiece_dense = false;
+
+static inline bool ps2_is_decorative_centrepiece(int bitset, int8_t info) {
+    if ((bitset & 0x40000000) == 0 || (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0) {
+        return false;
+    }
+
+    int shape = info & 0x1f;
+    return shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL;
+}
 
 static inline bool ps2_claim_inactive_loc_budget(int bitset, int8_t info, int sceneX, int sceneZ) {
     // Only examine-only/decorative map locs consume this budget. Map locs with a real interaction
@@ -1279,6 +1290,12 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.topLevel = topLevel;
 
 #ifdef __PS2__
+    // These are per-frame budgets. Resetting them here prevents a dense area from permanently
+    // consuming the scenery allowance after the player moves somewhere lighter.
+    ps2_inactive_loc_draw_count = 0;
+    ps2_decorative_centrepiece_visible_count = 0;
+    ps2_decorative_centrepiece_dense = false;
+
     // Preserve the fixed 104x104 coordinate space, but submit only the nearby
     // 17x17 terrain window. This removes about 89% of the original 51x51
     // software-raster workload on the EE.
@@ -1332,6 +1349,36 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
             }
         }
     }
+
+#ifdef __PS2__
+    // Count visible examine-only centerpieces once per scene placement. Using the placement's
+    // minimum tile as its owner avoids counting the same multi-tile loc several times.
+    for (int level = world3d->minLevel; level < world3d->maxLevel; level++) {
+        Ground ***tiles = world3d->levelTiles[level];
+        for (int x = _World3D.minDrawTileX; x < _World3D.maxDrawTileX; x++) {
+            for (int z = _World3D.minDrawTileZ; z < _World3D.maxDrawTileZ; z++) {
+                Ground *tile = tiles[x][z];
+                if (!tile || !tile->visible) {
+                    continue;
+                }
+
+                for (int i = 0; i < tile->locCount; i++) {
+                    Location *loc = tile->locs[i];
+                    if (!loc || loc->minSceneTileX != x || loc->minSceneTileZ != z) {
+                        continue;
+                    }
+
+                    if (ps2_is_decorative_centrepiece(loc->bitset, loc->info)) {
+                        ps2_decorative_centrepiece_visible_count++;
+                    }
+                }
+            }
+        }
+    }
+
+    ps2_decorative_centrepiece_dense =
+        ps2_decorative_centrepiece_visible_count > PS2_DECORATIVE_CENTREPIECE_DENSE_THRESHOLD;
+#endif
 
     for (int level = world3d->minLevel; level < world3d->maxLevel; level++) {
         Ground ***tiles = world3d->levelTiles[level];
