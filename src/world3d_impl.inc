@@ -1351,14 +1351,22 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     }
 
 #ifdef __PS2__
-    // Count visible examine-only centerpieces once per scene placement. Using the placement's
-    // minimum tile as its owner avoids counting the same multi-tile loc several times.
+    // Count examine-only centerpieces once per scene placement across the active PS2 draw window.
+    // Do not require the owner's tile->visible flag here: a loc can still be submitted through the
+    // scene traversal when its owning tile is outside the visibility wedge (or when bridge/span
+    // traversal reaches it), which caused dense Port Sarim clutter to escape the old detector.
+    // This local-window count is intentionally conservative: if enough expensive decorative locs
+    // are close enough to become render candidates, enable the proven dense-scene culling policy.
+    int detailAnchorX;
+    int detailAnchorZ;
+    ps2_loc_detail_anchor(&detailAnchorX, &detailAnchorZ);
+
     for (int level = world3d->minLevel; level < world3d->maxLevel; level++) {
         Ground ***tiles = world3d->levelTiles[level];
         for (int x = _World3D.minDrawTileX; x < _World3D.maxDrawTileX; x++) {
             for (int z = _World3D.minDrawTileZ; z < _World3D.maxDrawTileZ; z++) {
                 Ground *tile = tiles[x][z];
-                if (!tile || !tile->visible) {
+                if (!tile) {
                     continue;
                 }
 
@@ -1368,16 +1376,30 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
                         continue;
                     }
 
-                    if (ps2_is_decorative_centrepiece(loc->bitset, loc->info)) {
-                        ps2_decorative_centrepiece_visible_count++;
+                    if (!ps2_is_decorative_centrepiece(loc->bitset, loc->info)) {
+                        continue;
+                    }
+
+                    int dx = (loc->x >> 7) - detailAnchorX;
+                    int dz = (loc->z >> 7) - detailAnchorZ;
+                    if (dx < 0) dx = -dx;
+                    if (dz < 0) dz = -dz;
+                    if (dx > PS2_INACTIVE_LOC_RENDER_RADIUS || dz > PS2_INACTIVE_LOC_RENDER_RADIUS) {
+                        continue;
+                    }
+
+                    ps2_decorative_centrepiece_visible_count++;
+                    if (ps2_decorative_centrepiece_visible_count >
+                        PS2_DECORATIVE_CENTREPIECE_DENSE_THRESHOLD) {
+                        ps2_decorative_centrepiece_dense = true;
+                        goto ps2_dense_loc_count_done;
                     }
                 }
             }
         }
     }
 
-    ps2_decorative_centrepiece_dense =
-        ps2_decorative_centrepiece_visible_count > PS2_DECORATIVE_CENTREPIECE_DENSE_THRESHOLD;
+ps2_dense_loc_count_done:;
 #endif
 
     for (int level = world3d->minLevel; level < world3d->maxLevel; level++) {
