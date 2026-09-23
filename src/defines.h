@@ -106,6 +106,9 @@
 // Sparse scenes render normally. In dense scenes keep only the nearest N decorative locs around
 // the player; farther clutter is culled even if scene traversal would otherwise still submit it.
 #define PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET 8
+// Under dense decorative submission pressure, discard farther clutter first. The remaining
+// immediate neighborhood is then hard-capped to the draw budget below.
+#define PS2_DECORATIVE_CENTREPIECE_PRESSURE_RADIUS 2
 // Bit 5 is unused by the scene info encoding (shape uses 0..4, rotation uses 6..7).
 // On PS2 only, tag locs that have a real interaction option so render LOD can distinguish
 // gameplay-relevant objects from examine-only scenery even when LocType.active is true.
