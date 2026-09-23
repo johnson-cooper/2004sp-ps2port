@@ -34,6 +34,30 @@ const int ROTATION_WALL_CORNER_TYPE[] = {16, 32, 64, 128};
 const int WALL_DECORATION_ROTATION_FORWARD_X[] = {1, 0, -1, 0};
 const int WALL_DECORATION_ROTATION_FORWARD_Z[] = {0, -1, 0, 1};
 
+#ifdef __PS2__
+static bool ps2_loc_has_priority_option(const LocType *loc) {
+    if (!loc || !loc->op) {
+        return false;
+    }
+
+    for (int op = 0; op < 5; op++) {
+        const char *option = loc->op[op];
+        if (!option) {
+            continue;
+        }
+
+        // Search-only crates/boxes are common dense scenery in places such as Port Sarim.
+        // Treat Search as low-priority clutter on PS2 so these locs still participate in the
+        // decorative draw budget. Any other real action keeps the loc gameplay-important.
+        if (platform_strcasecmp(option, "Search") != 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+#endif
+
 void world_init_global(void) {
     _World.randomHueOffset = (int)(jrand() * 17.0) - 8;
     _World.randomLightnessOffset = (int)(jrand() * 33.0) - 16;
@@ -149,13 +173,8 @@ void world_add_loc(int level, int x, int z, World3D *scene, int (*levelHeightmap
     // crates, barrels, boxes and similar scenery to bypass the PS2 dense-loc budget completely.
     // Preserve the original bitset/picking semantics, but tag only locs with a real menu option as
     // render-important. Examine is implicit and does not appear in loc->op.
-    if (loc->op) {
-        for (int op = 0; op < 5; op++) {
-            if (loc->op[op]) {
-                info |= PS2_LOC_GAMEPLAY_IMPORTANT_FLAG;
-                break;
-            }
-        }
+    if (ps2_loc_has_priority_option(loc)) {
+        info |= PS2_LOC_GAMEPLAY_IMPORTANT_FLAG;
     }
 #endif
     Model *model1;
@@ -676,13 +695,8 @@ void world_add_loc2(World *world, int level, int x, int z, World3D *scene, LinkL
 #ifdef __PS2__
     // Apply the same interaction-based detail tag to static map locs. These placements are the
     // dense scenery that dominates areas such as Port Sarim docks and Draynor village.
-    if (loc->op) {
-        for (int op = 0; op < 5; op++) {
-            if (loc->op[op]) {
-                info |= PS2_LOC_GAMEPLAY_IMPORTANT_FLAG;
-                break;
-            }
-        }
+    if (ps2_loc_has_priority_option(loc)) {
+        info |= PS2_LOC_GAMEPLAY_IMPORTANT_FLAG;
     }
 #endif
     Model *model;
