@@ -67,68 +67,64 @@ static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
 
 static int ps2_inactive_loc_draw_count = 0;
 
-// Adaptive decorative scenery controller. The unconditional 2-tile hardware test proved that
-// distance-based centrepiece culling fixes dense Port Sarim scenes. Live FPS now selects that radius.
-static int ps2_decorative_radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
-static int ps2_decorative_recovery_frames = 0;
-
-int ps2_world3d_decorative_radius(void) {
-    return ps2_decorative_radius;
-}
-
-static void ps2_update_decorative_adaptive_lod(void) {
+// Direct decorative scenery LOD. The old fixed 2-tile hardware test visibly removed the
+// Port Sarim crates/boxes, so low FPS now selects that exact radius without any cached controller
+// state, previous-frame density test, render timing, or recovery logic.
+static inline int ps2_live_decorative_radius(void) {
     Client *c = ps2_crash_client;
     int fps = (c && c->shell) ? c->shell->fps : 0;
 
-    // FPS is authoritative. Earlier versions incorrectly required a separate decorative-candidate
-    // count to agree before culling, so a bad density signal could leave radius 10 even at 15 FPS.
-    // The same FPS shown by ::perf now directly selects the decorative centerpiece radius.
-    int desiredRadius = PS2_INACTIVE_LOC_RENDER_RADIUS;
-    if (fps > 0) {
-        if (fps < PS2_DECORATIVE_FPS_RADIUS_2) {
-            desiredRadius = 2;
-        } else if (fps < PS2_DECORATIVE_FPS_RADIUS_4) {
-            desiredRadius = 4;
-        } else if (fps < PS2_DECORATIVE_FPS_RADIUS_6) {
-            desiredRadius = 6;
-        } else if (fps < PS2_DECORATIVE_FPS_RADIUS_8) {
-            desiredRadius = 8;
-        }
+    if (fps > 0 && fps < PS2_DECORATIVE_FPS_RADIUS_2) {
+        return PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS;
     }
+    if (fps > 0 && fps < PS2_DECORATIVE_FPS_RADIUS_4) {
+        return 4;
+    }
+    if (fps > 0 && fps < PS2_DECORATIVE_FPS_RADIUS_6) {
+        return 6;
+    }
+    if (fps > 0 && fps < PS2_DECORATIVE_FPS_RADIUS_8) {
+        return 8;
+    }
+    return PS2_INACTIVE_LOC_RENDER_RADIUS;
+}
 
-    // Degrade immediately. At very low FPS this jumps directly to the exact 2-tile behavior
-    // already proven to remove Port Sarim decorative centerpieces on real hardware.
-    if (desiredRadius < ps2_decorative_radius) {
-        ps2_decorative_radius = desiredRadius;
-        ps2_decorative_recovery_frames = 0;
-        return;
-    }
-
-    // Restore scenery only after sustained near-50 FPS so the radius cannot bounce every frame.
-    if (fps >= PS2_DECORATIVE_FPS_RECOVER) {
-        ps2_decorative_recovery_frames++;
-        if (ps2_decorative_recovery_frames >= PS2_DECORATIVE_ADAPTIVE_RECOVERY_FRAMES) {
-            ps2_decorative_recovery_frames = 0;
-            if (ps2_decorative_radius < desiredRadius) {
-                ps2_decorative_radius += PS2_DECORATIVE_ADAPTIVE_RADIUS_STEP;
-                if (ps2_decorative_radius > desiredRadius) {
-                    ps2_decorative_radius = desiredRadius;
-                }
-            }
-        }
-    } else {
-        ps2_decorative_recovery_frames = 0;
-    }
+int ps2_world3d_decorative_radius(void) {
+    return ps2_live_decorative_radius();
 }
 
 static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
-    // Non-map/dynamic entities keep their normal draw path.
     if ((bitset & 0x40000000) == 0) {
         return true;
     }
 
     int shape = info & 0x1f;
     bool gameplayImportant = (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0;
+    int radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
+
+    if (shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL) {
+        // This is deliberately the same distance-culling shape as the old known-good 2-tile build.
+        // The only difference is that live FPS picks 10/8/6/4/2 directly on this draw call.
+        radius = ps2_live_decorative_radius();
+
+        // Healthy scenes preserve interactive centrepieces exactly as before. Under load, interaction
+        // remains available in scene/collision data, but the distant model is allowed to disappear.
+        if (gameplayImportant && radius == PS2_INACTIVE_LOC_RENDER_RADIUS) {
+            return true;
+        }
+    } else {
+        if (gameplayImportant) {
+            return true;
+        }
+
+        if (shape == GROUNDDECOR) {
+            radius = PS2_GROUND_DECOR_RENDER_RADIUS;
+        } else if (shape >= WALLDECOR_STRAIGHT_NOOFFSET && shape <= WALLDECOR_DIAGONAL_BOTH) {
+            radius = PS2_WALL_DECOR_RENDER_RADIUS;
+        } else if (shape >= ROOF_STRAIGHT && shape <= ROOFEDGE_SQUARECORNER) {
+            radius = PS2_ROOF_RENDER_RADIUS;
+        }
+    }
 
     int anchorX;
     int anchorZ;
@@ -137,42 +133,6 @@ static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int scene
     int dz = (sceneZ >> 7) - anchorZ;
     if (dx < 0) dx = -dx;
     if (dz < 0) dz = -dz;
-
-    // Shape-10/11 centrepieces are the expensive dense-scene class (crates, boxes, barrels,
-    // furniture, stalls, etc.). Under load, *all* static centrepieces use the adaptive radius,
-    // even if they have a real menu option. Their collision/interaction data is untouched; only
-    // their distant model draw is skipped, and the model returns automatically as the player nears.
-    //
-    // This is intentionally checked before gameplayImportant. Previous builds returned true for
-    // important locs first, which let any crate/box with an option bypass LocLOD entirely.
-    if (shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL) {
-        if (ps2_decorative_radius < PS2_INACTIVE_LOC_RENDER_RADIUS) {
-            return dx <= ps2_decorative_radius && dz <= ps2_decorative_radius;
-        }
-
-        // At full-performance radius, preserve the old unlimited behavior for genuinely important
-        // centrepieces instead of introducing new culling in healthy scenes.
-        if (gameplayImportant) {
-            return true;
-        }
-
-        return dx <= PS2_INACTIVE_LOC_RENDER_RADIUS && dz <= PS2_INACTIVE_LOC_RENDER_RADIUS;
-    }
-
-    // Non-centrepiece gameplay locs (doors, gates, structural interactions, etc.) remain protected.
-    if (gameplayImportant) {
-        return true;
-    }
-
-    int radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
-    if (shape == GROUNDDECOR) {
-        radius = PS2_GROUND_DECOR_RENDER_RADIUS;
-    } else if (shape >= WALLDECOR_STRAIGHT_NOOFFSET && shape <= WALLDECOR_DIAGONAL_BOTH) {
-        radius = PS2_WALL_DECOR_RENDER_RADIUS;
-    } else if (shape >= ROOF_STRAIGHT && shape <= ROOFEDGE_SQUARECORNER) {
-        radius = PS2_ROOF_RENDER_RADIUS;
-    }
-
     return dx <= radius && dz <= radius;
 }
 
@@ -1359,8 +1319,6 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.topLevel = topLevel;
 
 #ifdef __PS2__
-    // Feed the live ::perf FPS directly into the adaptive scenery controller.
-    ps2_update_decorative_adaptive_lod();
     ps2_inactive_loc_draw_count = 0;
 
     // Preserve the fixed 104x104 coordinate space, but submit only the nearby

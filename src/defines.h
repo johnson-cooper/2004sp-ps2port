@@ -106,16 +106,13 @@
 // Adapt their render radius to measured PS2 World3D cost instead of relying on traversal-order caps.
 // Full-detail areas use the ordinary inactive-loc radius; sustained dense/slow scenes step down
 // toward the proven 2-tile Port Sarim fallback, then recover outward slowly when performance returns.
-#define PS2_DECORATIVE_ADAPTIVE_MIN_RADIUS 2
-#define PS2_DECORATIVE_ADAPTIVE_RADIUS_STEP 2
-#define PS2_DECORATIVE_ADAPTIVE_RECOVERY_FRAMES 50
-// GameShell FPS is the same value shown by ::perf and reflects the 50 Hz game loop.
-// Decorative scenery is progressively shortened whenever live FPS falls; FPS is authoritative.
+#define PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS 2
+// Direct live-FPS radius selection. The under-26 path is intentionally identical to the old
+// hardware-proven fixed 2-tile centerpiece cull; there is no intermediate controller state.
 #define PS2_DECORATIVE_FPS_RADIUS_8 44
 #define PS2_DECORATIVE_FPS_RADIUS_6 38
 #define PS2_DECORATIVE_FPS_RADIUS_4 32
 #define PS2_DECORATIVE_FPS_RADIUS_2 26
-#define PS2_DECORATIVE_FPS_RECOVER 47
 // Bit 5 is unused by the scene info encoding (shape uses 0..4, rotation uses 6..7).
 // On PS2 only, tag locs that have a real interaction option so render LOD can distinguish
 // gameplay-relevant objects from examine-only scenery even when LocType.active is true.
