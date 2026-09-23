@@ -138,10 +138,17 @@ static void ps2_consider_decorative_location(Location *loc, int anchorX, int anc
 }
 
 static inline bool ps2_keep_decorative_location(const Location *loc) {
-    if (!ps2_is_decorative_location(loc) || !ps2_decorative_loc_over_budget) {
+    if (!ps2_is_decorative_location(loc)) {
         return true;
     }
 
+    // Fewer than N nearby decorative locs means there is no density problem.
+    if (!ps2_decorative_loc_over_budget) {
+        return true;
+    }
+
+    // In a dense scene, only the preselected nearest N decorative locs may render.
+    // Anything else that reaches the draw path is farther clutter and is rejected.
     for (int i = 0; i < ps2_decorative_loc_keep_count; i++) {
         if (ps2_decorative_loc_keep[i] == loc) {
             return true;
@@ -1424,9 +1431,10 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
 
 
 #ifdef __PS2__
-    // Build a proximity-aware keep set from locs attached to tiles that are actually visible this
-    // frame. A Location can appear in several occupied tiles, so pointer identity de-duplicates it.
-    // Bridge-owned locs are included explicitly because docks can route scenery through that layer.
+    // Build the keep set from the full nearby PS2 scene, not only tile->visible entries.
+    // The real loc traversal can still submit scenery through spans/bridges when an owning tile
+    // is not marked visible, which previously let Port Sarim crates bypass the nearest-loc cap.
+    // Pointer identity de-duplicates multi-tile placements; the helper retains only the nearest N.
     int decorativeAnchorX;
     int decorativeAnchorZ;
     ps2_loc_detail_anchor(&decorativeAnchorX, &decorativeAnchorZ);
@@ -1436,12 +1444,13 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
         for (int x = _World3D.minDrawTileX; x < _World3D.maxDrawTileX; x++) {
             for (int z = _World3D.minDrawTileZ; z < _World3D.maxDrawTileZ; z++) {
                 Ground *tile = tiles[x][z];
-                if (!tile || !tile->visible) {
+                if (!tile) {
                     continue;
                 }
 
                 for (int i = 0; i < tile->locCount; i++) {
-                    ps2_consider_decorative_location(tile->locs[i], decorativeAnchorX, decorativeAnchorZ);
+                    ps2_consider_decorative_location(
+                        tile->locs[i], decorativeAnchorX, decorativeAnchorZ);
                 }
 
                 Ground *bridge = tile->bridge;
