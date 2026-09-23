@@ -66,21 +66,58 @@ static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
 
 static int ps2_inactive_loc_draw_count = 0;
 
-// Count the real decorative draw-filter submissions, because that is the metric that correlated
-// with the Port Sarim slowdown and made the original hard cap effective. Dense mode is based on
-// the previous rendered frame so every candidate still reaches this filter and keeps the signal live.
+// Adaptive decorative scenery controller. The old hard cap proved that decorative centerpiece
+// submissions are the Port Sarim pressure source, while the unconditional 2-tile radius proved that
+// distance-based culling fixes it. Combine those two hardware findings here: measure the real
+// World3D cost and tighten/relax only this decorative class as needed.
 static int ps2_decorative_candidate_count = 0;
-static bool ps2_decorative_pressure = false;
-static int ps2_decorative_kept_count = 0;
-static int ps2_decorative_kept_bitset[PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET];
+static int ps2_decorative_last_candidate_count = 0;
+static int ps2_decorative_radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
+static int ps2_decorative_last_world_ms = 0;
+static int ps2_decorative_recovery_frames = 0;
+static int64_t ps2_world3d_frame_start_ms = 0;
 
-static inline bool ps2_decorative_already_kept(int bitset) {
-    for (int i = 0; i < ps2_decorative_kept_count; i++) {
-        if (ps2_decorative_kept_bitset[i] == bitset) {
-            return true;
+static void ps2_update_decorative_adaptive_lod(void) {
+    Client *c = ps2_crash_client;
+    bool render25 = c && c->controller_render_25fps;
+    int overloadMs = render25 ? PS2_DECORATIVE_WORLD_BUDGET_25FPS_MS
+                              : PS2_DECORATIVE_WORLD_BUDGET_50FPS_MS;
+    int recoverMs = render25 ? PS2_DECORATIVE_WORLD_RECOVER_25FPS_MS
+                             : PS2_DECORATIVE_WORLD_RECOVER_50FPS_MS;
+
+    bool dense =
+        ps2_decorative_last_candidate_count > PS2_DECORATIVE_ADAPTIVE_DENSE_SUBMISSIONS;
+    bool overloaded = dense && ps2_decorative_last_world_ms > overloadMs;
+    bool comfortable =
+        ps2_decorative_last_world_ms > 0 && ps2_decorative_last_world_ms < recoverMs;
+
+    if (overloaded) {
+        ps2_decorative_recovery_frames = 0;
+        if (ps2_decorative_radius > PS2_DECORATIVE_ADAPTIVE_MIN_RADIUS) {
+            ps2_decorative_radius -= PS2_DECORATIVE_ADAPTIVE_RADIUS_STEP;
+            if (ps2_decorative_radius < PS2_DECORATIVE_ADAPTIVE_MIN_RADIUS) {
+                ps2_decorative_radius = PS2_DECORATIVE_ADAPTIVE_MIN_RADIUS;
+            }
         }
+        return;
     }
-    return false;
+
+    // Recovery is deliberately much slower than culling so entering a dense port reacts quickly
+    // without making scenery pulse in/out around the timing boundary.
+    if (comfortable) {
+        ps2_decorative_recovery_frames++;
+        if (ps2_decorative_recovery_frames >= PS2_DECORATIVE_ADAPTIVE_RECOVERY_FRAMES) {
+            ps2_decorative_recovery_frames = 0;
+            if (ps2_decorative_radius < PS2_INACTIVE_LOC_RENDER_RADIUS) {
+                ps2_decorative_radius += PS2_DECORATIVE_ADAPTIVE_RADIUS_STEP;
+                if (ps2_decorative_radius > PS2_INACTIVE_LOC_RENDER_RADIUS) {
+                    ps2_decorative_radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
+                }
+            }
+        }
+    } else {
+        ps2_decorative_recovery_frames = 0;
+    }
 }
 
 static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
@@ -100,28 +137,10 @@ static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int scene
     if (dz < 0) dz = -dz;
 
     if (shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL) {
-        // Count every real decorative submission before culling. This intentionally mirrors the
-        // signal used by the known-good hard-cap experiment instead of trying to infer scene density.
+        // Count the same real draw-filter submissions that made the original hard cap effective.
+        // Count before radius rejection so the density signal stays valid even after LOD tightens.
         ps2_decorative_candidate_count++;
-
-        if (ps2_decorative_pressure) {
-            // First remove farther clutter. Because the renderer often traverses locs farthest-first,
-            // doing the proximity test before claiming a slot prevents distant boxes from consuming
-            // the eight-object allowance ahead of nearby scenery.
-            if (dx > PS2_DECORATIVE_CENTREPIECE_PRESSURE_RADIUS ||
-                dz > PS2_DECORATIVE_CENTREPIECE_PRESSURE_RADIUS) {
-                return false;
-            }
-
-            // A multi-tile loc can reach this filter more than once. Let an already-kept placement
-            // render through all of its necessary paths without consuming another object slot.
-            if (!ps2_decorative_already_kept(bitset)) {
-                if (ps2_decorative_kept_count >= PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET) {
-                    return false;
-                }
-                ps2_decorative_kept_bitset[ps2_decorative_kept_count++] = bitset;
-            }
-        }
+        radius = ps2_decorative_radius;
     } else if (shape == GROUNDDECOR) {
         radius = PS2_GROUND_DECOR_RENDER_RADIUS;
     } else if (shape >= WALLDECOR_STRAIGHT_NOOFFSET && shape <= WALLDECOR_DIAGONAL_BOTH) {
@@ -1316,17 +1335,12 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.topLevel = topLevel;
 
 #ifdef __PS2__
-    // These are per-frame budgets. Resetting them here prevents a dense area from permanently
-    // consuming the scenery allowance after the player moves somewhere lighter.
+    // Feed the previous rendered frame into the adaptive scenery controller before starting the
+    // next draw. This uses actual World3D milliseconds plus actual decorative submissions.
+    ps2_update_decorative_adaptive_lod();
     ps2_inactive_loc_draw_count = 0;
-
-    // If the previous rendered frame sent more than eight decorative candidates through the real
-    // draw filter, engage proximity-first culling for this frame. Candidates are counted before
-    // rejection, so dense mode stays active until the player truly leaves the cluttered area.
-    ps2_decorative_pressure =
-        ps2_decorative_candidate_count > PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET;
     ps2_decorative_candidate_count = 0;
-    ps2_decorative_kept_count = 0;
+    ps2_world3d_frame_start_ms = rs2_now();
 
     // Preserve the fixed 104x104 coordinate space, but submit only the nearby
     // 17x17 terrain window. This removes about 89% of the original 51x51
@@ -1433,7 +1447,11 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
 
                 if (_World3D.tilesRemaining == 0) {
                     _World3D.takingInput = false;
+#ifdef __PS2__
+                    goto ps2_world3d_done;
+#else
                     return;
+#endif
                 }
             }
         }
@@ -1486,11 +1504,21 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
 
                 if (_World3D.tilesRemaining == 0) {
                     _World3D.takingInput = false;
+#ifdef __PS2__
+                    goto ps2_world3d_done;
+#else
                     return;
+#endif
                 }
             }
         }
     }
+
+#ifdef __PS2__
+ps2_world3d_done:
+    ps2_decorative_last_world_ms = (int)(rs2_now() - ps2_world3d_frame_start_ms);
+    ps2_decorative_last_candidate_count = ps2_decorative_candidate_count;
+#endif
 }
 
 void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int loopCycle) {

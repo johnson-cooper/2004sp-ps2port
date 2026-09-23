@@ -103,12 +103,17 @@
 #define PS2_WALL_DECOR_RENDER_RADIUS 8
 #define PS2_GROUND_DECOR_RENDER_RADIUS 6
 // Examine-only shape-10/11 centerpieces are the dense crate/barrel/box/furniture class.
-// Sparse scenes render normally. In dense scenes keep only the nearest N decorative locs around
-// the player; farther clutter is culled even if scene traversal would otherwise still submit it.
-#define PS2_DECORATIVE_CENTREPIECE_DRAW_BUDGET 8
-// Under dense decorative submission pressure, discard farther clutter first. The remaining
-// immediate neighborhood is then hard-capped to the draw budget below.
-#define PS2_DECORATIVE_CENTREPIECE_PRESSURE_RADIUS 2
+// Adapt their render radius to measured PS2 World3D cost instead of relying on traversal-order caps.
+// Full-detail areas use the ordinary inactive-loc radius; sustained dense/slow scenes step down
+// toward the proven 2-tile Port Sarim fallback, then recover outward slowly when performance returns.
+#define PS2_DECORATIVE_ADAPTIVE_DENSE_SUBMISSIONS 8
+#define PS2_DECORATIVE_ADAPTIVE_MIN_RADIUS 2
+#define PS2_DECORATIVE_ADAPTIVE_RADIUS_STEP 2
+#define PS2_DECORATIVE_ADAPTIVE_RECOVERY_FRAMES 50
+#define PS2_DECORATIVE_WORLD_BUDGET_50FPS_MS 16
+#define PS2_DECORATIVE_WORLD_BUDGET_25FPS_MS 32
+#define PS2_DECORATIVE_WORLD_RECOVER_50FPS_MS 11
+#define PS2_DECORATIVE_WORLD_RECOVER_25FPS_MS 22
 // Bit 5 is unused by the scene info encoding (shape uses 0..4, rotation uses 6..7).
 // On PS2 only, tag locs that have a real interaction option so render LOD can distinguish
 // gameplay-relevant objects from examine-only scenery even when LocType.active is true.
