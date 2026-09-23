@@ -1239,13 +1239,24 @@ void world_build(World *world, World3D *scene, CollisionMap **collision) {
                                 int rgb;
 
                                 if (textureId >= 0) {
-#if defined(__PS2__) && PS2_UNTEXTURED_TERRAIN
-                                    // Keep the per-vertex light gradient, but use the existing
-                                    // underlay/floor colour instead of a sampled terrain texture.
-                                    // Texture assets remain available for characters and UI icons.
-                                    textureId = -1;
-                                    hsl = baseColor != -1 ? baseColor : hsl24to16(flo->hue, flo->saturation, flo->lightness);
-                                    rgb = _Pix3D.palette[adjustLightness(hsl, 96)];
+#if defined(__PS2__) && (PS2_UNTEXTURED_TERRAIN || PS2_WATER_ONLY_TERRAIN_TEXTURES)
+                                    bool flattenTerrainTexture = PS2_UNTEXTURED_TERRAIN != 0;
+#if PS2_WATER_ONLY_TERRAIN_TEXTURES
+                                    flattenTerrainTexture =
+                                        flattenTerrainTexture ||
+                                        platform_strcasecmp(flo->name, "water") != 0;
+#endif
+                                    if (flattenTerrainTexture) {
+                                        // Keep terrain lighting while avoiding expensive GS texture
+                                        // state/batch breaks for non-water floor overlays. Model and
+                                        // object textures are unaffected because this is terrain-only.
+                                        textureId = -1;
+                                        hsl = baseColor != -1 ? baseColor : hsl24to16(flo->hue, flo->saturation, flo->lightness);
+                                        rgb = _Pix3D.palette[adjustLightness(hsl, 96)];
+                                    } else {
+                                        rgb = pix3d_get_average_texture_rgb(textureId);
+                                        hsl = -1;
+                                    }
 #else
                                     rgb = pix3d_get_average_texture_rgb(textureId);
                                     hsl = -1;

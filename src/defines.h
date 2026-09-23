@@ -170,6 +170,10 @@
 // Keep the one-slot texel cache above so the memory delta stays essentially flat; measure real-PS2
 // frame time separately because texture-cache churn can cost CPU even when it does not cost heap.
 #define PS2_UNTEXTURED_TERRAIN 0
+// Keep water/rivers on the GS texture path, but approximate other terrain overlays with their
+// lit floor colour. Dense dock/brick floors otherwise split the fast untextured GS batches into
+// many small textured runs and cause large scene-dependent frame-time spikes on real hardware.
+#define PS2_WATER_ONLY_TERRAIN_TEXTURES 1
 #define PS2_FLAT_TERRAIN 0
 // Keep synchronous scene/land construction enabled. The minimap remains disabled.
 #define PS2_DEFER_SCENE_REBUILD 0
