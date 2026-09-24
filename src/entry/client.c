@@ -129,6 +129,10 @@ const int LOC_SHAPE_TO_LAYER[23] = {0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2,
 static void client_draw_interface(Client *c, Component *com, int x, int y, int scrollY);
 static void client_scenemap_free(Client *c);
 static void client_build_scene(Client *c);
+#ifdef __PS2__
+static void client_ps2_reset_residency_window(Client *c);
+static void client_ps2_maybe_shift_residency_window(Client *c);
+#endif
 static void client_clear_caches(void);
 static void client_update_orbit_camera(Client *c);
 static int8_t *client_load_map_file(const char *kind, int mapsquareX, int mapsquareZ, int *out_size);
@@ -5909,6 +5913,72 @@ static void client_scenemap_free(Client *c) {
     free(c->sceneMapLocDataIndexLength);
 }
 
+#ifdef __PS2__
+static void client_ps2_reset_residency_window(Client *c) {
+    c->ps2ResidencyMinTileX = PS2_LOC_MIN_TILE;
+    c->ps2ResidencyMaxTileX = PS2_LOC_MAX_TILE;
+    c->ps2ResidencyMinTileZ = PS2_LOC_MIN_TILE;
+    c->ps2ResidencyMaxTileZ = PS2_LOC_MAX_TILE;
+    c->ps2ResidencyWindowValid = true;
+}
+
+static int client_ps2_residency_axis_target(int currentMin, int playerTile) {
+    const int centreMin = PS2_LOC_MIN_TILE;
+    const int lowMin = PS2_RESIDENCY_SCENE_MIN_TILE;
+    const int highMin = PS2_RESIDENCY_SCENE_MAX_TILE - PS2_RESIDENCY_TILE_COUNT;
+    const int centreTile = (PS2_RESIDENCY_SCENE_MIN_TILE + PS2_RESIDENCY_SCENE_MAX_TILE) / 2;
+
+    // Edge windows stay latched until the player has crossed back through the scene centre. That
+    // hysteresis prevents rebuild thrash if movement/camera updates hover around a shift threshold.
+    if (currentMin <= lowMin) {
+        return playerTile >= centreTile ? centreMin : lowMin;
+    }
+    if (currentMin >= highMin) {
+        return playerTile <= centreTile ? centreMin : highMin;
+    }
+
+    // The centre window shifts before the player can see its unloaded edge. Use the compiled maximum
+    // render radius plus a small guard so runtime radius changes cannot expose missing locs first.
+    if (playerTile <= PS2_LOC_MIN_TILE + PS2_RESIDENCY_SHIFT_MARGIN) {
+        return lowMin;
+    }
+    if (playerTile >= PS2_LOC_MAX_TILE - PS2_RESIDENCY_SHIFT_MARGIN) {
+        return highMin;
+    }
+    return centreMin;
+}
+
+static void client_ps2_maybe_shift_residency_window(Client *c) {
+    if (!c || c->scene_state != 2 || !c->local_player || !c->ps2ResidencyWindowValid ||
+        !c->sceneMapLandData || !c->sceneMapLocData) {
+        return;
+    }
+
+    int playerTileX = c->local_player->pathing_entity.pathTileX[0];
+    int playerTileZ = c->local_player->pathing_entity.pathTileZ[0];
+    int targetMinX = client_ps2_residency_axis_target(c->ps2ResidencyMinTileX, playerTileX);
+    int targetMinZ = client_ps2_residency_axis_target(c->ps2ResidencyMinTileZ, playerTileZ);
+
+    if (targetMinX == c->ps2ResidencyMinTileX && targetMinZ == c->ps2ResidencyMinTileZ) {
+        return;
+    }
+
+    c->ps2ResidencyMinTileX = targetMinX;
+    c->ps2ResidencyMaxTileX = targetMinX + PS2_RESIDENCY_TILE_COUNT;
+    c->ps2ResidencyMinTileZ = targetMinZ;
+    c->ps2ResidencyMaxTileZ = targetMinZ + PS2_RESIDENCY_TILE_COUNT;
+
+    rs2_log("PS2 residency shift: player=%d,%d window=[%d,%d)x[%d,%d)\n", playerTileX, playerTileZ,
+            c->ps2ResidencyMinTileX, c->ps2ResidencyMaxTileX,
+            c->ps2ResidencyMinTileZ, c->ps2ResidencyMaxTileZ);
+
+    // Reuse the normal proven scene-rebuild path with the map squares already resident in
+    // sceneMapLandData/sceneMapLocData. world3d_reset() recycles the old scene arena first, so this
+    // moves the bounded residency window instead of accumulating another copy of static geometry.
+    client_build_scene(c);
+}
+#endif
+
 void client_update_game(Client *c) {
 #ifdef __PS2__
     ps2_live_update_count++;
@@ -6051,6 +6121,7 @@ void client_update_game(Client *c) {
         phase_t0 = rs2_now();
         updatePlayers(c);
         _TickPhase.players_ms += rs2_now() - phase_t0;
+        client_ps2_maybe_shift_residency_window(c);
         phase_t0 = rs2_now();
         updateNpcs(c);
         _TickPhase.npcs_ms += rs2_now() - phase_t0;
@@ -6816,6 +6887,12 @@ bool client_read(Client *c) {
         c->sceneCenterZoneZ = zoneZ;
         c->sceneBaseTileX = (c->sceneCenterZoneX - 6) * 8;
         c->sceneBaseTileZ = (c->sceneCenterZoneZ - 6) * 8;
+#ifdef __PS2__
+        // A server region rebuild recentres the 104x104 coordinate space around the player. Return
+        // the bounded residency window to its hardware-good centre position; later walking can slide
+        // it again without waiting for another server transition.
+        c->ps2ResidencyWindowValid = false;
+#endif
         c->scene_state = 1;
         pixmap_bind(c->area_viewport);
         drawStringCenter(c->font_plain12, 257, 151, "Loading - please wait.", BLACK);
@@ -8591,6 +8668,15 @@ static void client_build_scene(Client *c) {
 #endif
 
     World *world = world_new(104, 104, c->levelHeightmap, c->levelTileFlags);
+#ifdef __PS2__
+    if (!c->ps2ResidencyWindowValid) {
+        client_ps2_reset_residency_window(c);
+    }
+    world->ps2ResidencyMinTileX = c->ps2ResidencyMinTileX;
+    world->ps2ResidencyMaxTileX = c->ps2ResidencyMaxTileX;
+    world->ps2ResidencyMinTileZ = c->ps2ResidencyMinTileZ;
+    world->ps2ResidencyMaxTileZ = c->ps2ResidencyMaxTileZ;
+#endif
     _World.lowMemory = _World3D.lowMemory;
 #ifdef __PS2__
     ps2_scene_checkpoint(c, "scene: world_new done");
