@@ -5914,14 +5914,6 @@ static void client_scenemap_free(Client *c) {
 }
 
 #ifdef __PS2__
-static void client_ps2_reset_residency_window(Client *c) {
-    c->ps2ResidencyMinTileX = PS2_LOC_MIN_TILE;
-    c->ps2ResidencyMaxTileX = PS2_LOC_MAX_TILE;
-    c->ps2ResidencyMinTileZ = PS2_LOC_MIN_TILE;
-    c->ps2ResidencyMaxTileZ = PS2_LOC_MAX_TILE;
-    c->ps2ResidencyWindowValid = true;
-}
-
 static int client_ps2_residency_axis_target(int currentMin, int playerTile) {
     const int centreMin = PS2_LOC_MIN_TILE;
     const int lowMin = PS2_RESIDENCY_SCENE_MIN_TILE;
@@ -5946,6 +5938,27 @@ static int client_ps2_residency_axis_target(int currentMin, int playerTile) {
         return highMin;
     }
     return centreMin;
+}
+
+static void client_ps2_reset_residency_window(Client *c) {
+    int minX = PS2_LOC_MIN_TILE;
+    int minZ = PS2_LOC_MIN_TILE;
+
+    // PLAYER_INFO has already placed the local player before a normal scene build. Seed the new
+    // bounded window around that actual local tile so a freshly loaded map cannot immediately
+    // request a second full build just because the player arrived near one edge of the 104x104 scene.
+    if (c->local_player) {
+        minX = client_ps2_residency_axis_target(PS2_LOC_MIN_TILE,
+                                                c->local_player->pathing_entity.pathTileX[0]);
+        minZ = client_ps2_residency_axis_target(PS2_LOC_MIN_TILE,
+                                                c->local_player->pathing_entity.pathTileZ[0]);
+    }
+
+    c->ps2ResidencyMinTileX = minX;
+    c->ps2ResidencyMaxTileX = minX + PS2_RESIDENCY_TILE_COUNT;
+    c->ps2ResidencyMinTileZ = minZ;
+    c->ps2ResidencyMaxTileZ = minZ + PS2_RESIDENCY_TILE_COUNT;
+    c->ps2ResidencyWindowValid = true;
 }
 
 static void client_ps2_maybe_shift_residency_window(Client *c) {
@@ -6041,6 +6054,11 @@ void client_update_game(Client *c) {
     ps2_live_stage = 2; // packet handling returned
     ps2_heap_after_packets_kb = mallinfo().fordblks / 1024;
     _TickPhase.packets_ms += rs2_now() - phase_t0;
+
+    // Scene rebuilds are safe at this phase boundary: packet processing (including any server-driven
+    // REBUILD_NORMAL/PLAYER_INFO build) is complete, while per-tick player/NPC/merge-loc iteration has
+    // not started yet. Never tear down/rebuild World3D from inside the entity-update sequence.
+    client_ps2_maybe_shift_residency_window(c);
 #endif
 
     #ifdef __PS2__
@@ -6117,7 +6135,6 @@ void client_update_game(Client *c) {
         phase_t0 = rs2_now();
         updatePlayers(c);
         _TickPhase.players_ms += rs2_now() - phase_t0;
-        client_ps2_maybe_shift_residency_window(c);
         phase_t0 = rs2_now();
         updateNpcs(c);
         _TickPhase.npcs_ms += rs2_now() - phase_t0;
