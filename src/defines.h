@@ -107,12 +107,9 @@
 // Full-detail areas use the ordinary inactive-loc radius; sustained dense/slow scenes step down
 // toward the proven 2-tile Port Sarim fallback, then recover outward slowly when performance returns.
 #define PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS 2
-// Direct live-FPS radius selection. The under-26 path is intentionally identical to the old
-// hardware-proven fixed 2-tile centerpiece cull; there is no intermediate controller state.
-#define PS2_DECORATIVE_FPS_RADIUS_8 44
-#define PS2_DECORATIVE_FPS_RADIUS_6 38
-#define PS2_DECORATIVE_FPS_RADIUS_4 32
-#define PS2_DECORATIVE_FPS_RADIUS_2 26
+// Emergency scenery LOD: only engage the hardware-proven 2-tile centerpiece cull when
+// the live game loop is genuinely struggling. Otherwise keep normal loc visibility.
+#define PS2_DECORATIVE_FPS_LIMIT_TRIGGER 15
 // Bit 5 is unused by the scene info encoding (shape uses 0..4, rotation uses 6..7).
 // On PS2 only, tag locs that have a real interaction option so render LOD can distinguish
 // gameplay-relevant objects from examine-only scenery even when LocType.active is true.

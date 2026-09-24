@@ -67,25 +67,20 @@ static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
 
 static int ps2_inactive_loc_draw_count = 0;
 
-// Direct decorative scenery LOD. The old fixed 2-tile hardware test visibly removed the
-// Port Sarim crates/boxes, so low FPS now selects that exact radius without any cached controller
-// state, previous-frame density test, render timing, or recovery logic.
+// Binary decorative scenery LOD. The old fixed 2-tile hardware test visibly removed the
+// Port Sarim crates/boxes, so only FPS <= 15 enables that exact emergency radius. There are no
+// intermediate stages, cached controller state, density gates, render timing, or recovery logic.
 static inline int ps2_live_decorative_radius(void) {
     Client *c = ps2_crash_client;
     int fps = (c && c->shell) ? c->shell->fps : 0;
 
-    if (fps > 0 && fps < PS2_DECORATIVE_FPS_RADIUS_2) {
+    // Binary emergency LOD. At 15 FPS or below, use the exact 2-tile centerpiece
+    // cull already proven to recover Port Sarim performance on real PS2 hardware.
+    // Above 15 FPS, restore normal loc visibility immediately.
+    if (fps > 0 && fps <= PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
         return PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS;
     }
-    if (fps > 0 && fps < PS2_DECORATIVE_FPS_RADIUS_4) {
-        return 4;
-    }
-    if (fps > 0 && fps < PS2_DECORATIVE_FPS_RADIUS_6) {
-        return 6;
-    }
-    if (fps > 0 && fps < PS2_DECORATIVE_FPS_RADIUS_8) {
-        return 8;
-    }
+
     return PS2_INACTIVE_LOC_RENDER_RADIUS;
 }
 
