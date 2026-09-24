@@ -20,6 +20,7 @@
 #ifdef __PS2__
 #include "client.h"
 #include "gameshell.h"
+#include "platform/ps2_music.h"
 #endif
 
 SceneData _World3D = {.lowMemory = true};
@@ -73,6 +74,7 @@ static int ps2_inactive_loc_draw_count = 0;
 // the radius straight back to 2, preventing the old full-pop-in / immediate-emergency oscillation.
 static bool ps2_decorative_emergency_active = false;
 static bool ps2_decorative_trigger_armed = false;
+static bool ps2_decorative_audio_guard = false;
 static bool ps2_decorative_have_last_tile = false;
 static bool ps2_decorative_have_scene_base = false;
 static int ps2_decorative_last_tile_x = 0;
@@ -111,6 +113,7 @@ static void ps2_reset_decorative_lod_for_scene(Client *c) {
 
 static void ps2_update_decorative_emergency_recovery(void) {
     Client *c = ps2_crash_client;
+    ps2_decorative_audio_guard = ps2_music_emergency_guard_active();
 
     // Controller setting is the master gate. When disabled, immediately restore the normal
     // decorative radius and keep the trigger/recovery state disarmed, regardless of FPS.
@@ -158,6 +161,14 @@ static void ps2_update_decorative_emergency_recovery(void) {
 
     if (ps2_decorative_emergency_active) {
         int fps = c->shell ? c->shell->fps : 0;
+
+        // A song swap is a short-lived I/O/SPU2 event, not evidence that the scene itself is too
+        // expensive. Freeze the current emergency/recovery state until the async load settles.
+        if (ps2_decorative_audio_guard) {
+            ps2_decorative_last_tile_x = tileX;
+            ps2_decorative_last_tile_z = tileZ;
+            return;
+        }
 
         // If an attempted recovery step is still too expensive, return immediately to the
         // hardware-proven radius 2 and restart movement accumulation from there.
@@ -207,6 +218,7 @@ static inline int ps2_live_decorative_radius(void) {
     // controller, the first centerpiece draw seen at <=15 FPS immediately enters radius-2 mode.
     if (ps2_decorative_trigger_armed &&
         !ps2_decorative_emergency_active &&
+        !ps2_decorative_audio_guard &&
         fps > 0 && fps <= PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
         ps2_decorative_emergency_active = true;
         ps2_decorative_trigger_armed = false;

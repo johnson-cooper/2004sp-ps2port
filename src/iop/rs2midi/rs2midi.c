@@ -4,6 +4,7 @@
 #define MODNAME "rs2midi"
 #define RS2MIDI_RPC_ID 0x5253324d
 #define RS2MIDI_SFX_RPC_ID 0x52533253
+#define RS2MIDI_MUSIC_LOAD_RPC_ID 0x5253324c
 
 #define RS2MIDI_RPC_PING       0
 #define RS2MIDI_RPC_LOAD       1
@@ -16,6 +17,7 @@
 #define RS2MIDI_RPC_NOTE_ON_ADDR 8
 #define RS2MIDI_RPC_SET_MIX      9
 #define RS2MIDI_RPC_SFX_NOTE_ON  10
+#define RS2MIDI_RPC_LOAD_ABS_LARGE 11
 
 #define RS2MIDI_PONG 0x52533250u
 
@@ -36,8 +38,11 @@
 #define RS2MIDI_SFX_CORE           1
 #define RS2MIDI_SFX_VOICE          23u
 #define RS2MIDI_MAX_SAMPLE_BYTES   800u
+#define RS2MIDI_MUSIC_LOAD_MAX_BYTES 4096u
 #define RS2MIDI_RPC_HEADER_BYTES  64u
 #define RS2MIDI_RPC_BUFFER_BYTES  1024u
+#define RS2MIDI_MUSIC_LOAD_RPC_BUFFER_BYTES \
+    (RS2MIDI_RPC_HEADER_BYTES + RS2MIDI_MUSIC_LOAD_MAX_BYTES)
 #define RS2MIDI_DMA_CHANNEL       0
 #define RS2MIDI_CORE              0
 #define RS2MIDI_DEFAULT_VOICE     0
@@ -52,8 +57,10 @@ IRX_ID(MODNAME, 1, 1);
 static SifRpcDataQueue_t rs2midi_queue;
 static SifRpcServerData_t rs2midi_server;
 static SifRpcServerData_t rs2midi_sfx_server;
+static SifRpcServerData_t rs2midi_music_load_server;
 static u8 rs2midi_rpc_buffer[RS2MIDI_RPC_BUFFER_BYTES] __attribute__((aligned(64)));
 static u8 rs2midi_sfx_rpc_buffer[RS2MIDI_RPC_BUFFER_BYTES] __attribute__((aligned(64)));
+static u8 rs2midi_music_load_rpc_buffer[RS2MIDI_MUSIC_LOAD_RPC_BUFFER_BYTES] __attribute__((aligned(64)));
 
 static u32 rs2midi_sample_loaded_mask;
 
@@ -237,9 +244,14 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
         break;
     }
 
-    case RS2MIDI_RPC_LOAD_ABS: {
+    case RS2MIDI_RPC_LOAD_ABS:
+    case RS2MIDI_RPC_LOAD_ABS_LARGE: {
         u32 sample_addr = words[0];
         u32 sample_size = words[1];
+        u32 max_sample_bytes =
+            function == RS2MIDI_RPC_LOAD_ABS_LARGE
+                ? RS2MIDI_MUSIC_LOAD_MAX_BYTES
+                : RS2MIDI_MAX_SAMPLE_BYTES;
         words[2] = (u32)-999;
 
         int pack_range =
@@ -247,7 +259,7 @@ static void *rs2midi_rpc_handler(int function, void *data, int size)
         int sfx_range =
             rs2midi_valid_sfx_range(sample_addr, sample_size);
 
-        if (sample_size > RS2MIDI_MAX_SAMPLE_BYTES ||
+        if (sample_size > max_sample_bytes ||
             (!pack_range && !sfx_range) ||
             size < (int)(RS2MIDI_RPC_HEADER_BYTES + sample_size)) {
             status = RS2MIDI_ERR_ARGS;
@@ -464,6 +476,16 @@ static void rs2midi_rpc_thread(void *arg)
         RS2MIDI_SFX_RPC_ID,
         (SifRpcFunc_t)rs2midi_rpc_handler,
         rs2midi_sfx_rpc_buffer,
+        NULL,
+        NULL,
+        &rs2midi_queue);
+    // Song sample uploads get their own RPC buffer/client exactly like SFX. The EE can queue
+    // a 4 KiB SPU2 DMA and return to gameplay immediately while this same IOP worker finishes it.
+    sceSifRegisterRpc(
+        &rs2midi_music_load_server,
+        RS2MIDI_MUSIC_LOAD_RPC_ID,
+        (SifRpcFunc_t)rs2midi_rpc_handler,
+        rs2midi_music_load_rpc_buffer,
         NULL,
         NULL,
         &rs2midi_queue);
