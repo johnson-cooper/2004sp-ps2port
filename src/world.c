@@ -1017,6 +1017,195 @@ static FloType *world_flotype_get(int id, int level, int x, int z) {
 }
 
 #ifdef __PS2__
+__attribute__((section(".ps2_runtime_text"), noinline))
+void world_build_residency_rect(World *world, World3D *scene) {
+    int minX = world->ps2ResidencyMinTileX;
+    int maxX = world->ps2ResidencyMaxTileX;
+    int minZ = world->ps2ResidencyMinTileZ;
+    int maxZ = world->ps2ResidencyMaxTileZ;
+
+    if (minX < 1) minX = 1;
+    if (minZ < 1) minZ = 1;
+    if (maxX > world->maxTileX - 1) maxX = world->maxTileX - 1;
+    if (maxZ > world->maxTileZ - 1) maxZ = world->maxTileZ - 1;
+    if (minX >= maxX || minZ >= maxZ) {
+        return;
+    }
+
+    // Static loc placement happens before this helper, just like the normal whole-scene build. That
+    // means its shadows are already present in levelShademap. Refresh only the light samples needed
+    // by this strip (plus its north/east corner samples) rather than rerunning the whole scene.
+    for (int level = 0; level < 4; level++) {
+        int8_t (*shademap)[104 + 1] = world->levelShademap[level];
+        int8_t lightAmbient = 96;
+        int lightAttenuation = 768;
+        int8_t lightX = -50;
+        int8_t lightY = -10;
+        int8_t lightZ = -50;
+#ifdef USE_FLOATS
+        int lightMag = (int)sqrtf((float)(lightX * lightX + lightY * lightY + lightZ * lightZ));
+#else
+        int lightMag = (int)sqrt(lightX * lightX + lightY * lightY + lightZ * lightZ);
+#endif
+        int lightMagnitude = lightAttenuation * lightMag >> 8;
+        int lightMaxX = maxX < world->maxTileX - 2 ? maxX : world->maxTileX - 2;
+        int lightMaxZ = maxZ < world->maxTileZ - 2 ? maxZ : world->maxTileZ - 2;
+
+        for (int z = minZ; z <= lightMaxZ; z++) {
+            for (int x = minX; x <= lightMaxX; x++) {
+                int dx = world->levelHeightmap[level][x + 1][z] - world->levelHeightmap[level][x - 1][z];
+                int dz = world->levelHeightmap[level][x][z + 1] - world->levelHeightmap[level][x][z - 1];
+#ifdef USE_FLOATS
+                int len = (int)sqrtf((float)(dx * dx + dz * dz + 65536));
+#else
+                int len = (int)sqrt(dx * dx + dz * dz + 65536);
+#endif
+                int normalX = (dx << 8) / len;
+                int normalY = 65536 / len;
+                int normalZ = (dz << 8) / len;
+                int light = lightAmbient + (lightX * normalX + lightY * normalY + lightZ * normalZ) / lightMagnitude;
+                int shade = (shademap[x - 1][z] >> 2) + (shademap[x + 1][z] >> 3) +
+                            (shademap[x][z - 1] >> 2) + (shademap[x][z + 1] >> 3) +
+                            (shademap[x][z] >> 1);
+                world->levelLightmap[x][z] = light - shade;
+            }
+        }
+
+        for (int x = minX; x < maxX; x++) {
+            for (int z = minZ; z < maxZ; z++) {
+                if (_World.lowMemory &&
+                    (((world->levelTileFlags[level][x][z] & 0x10) != 0) ||
+                     world_get_drawlevel(world, level, x, z) != _World.levelBuilt)) {
+                    continue;
+                }
+
+                // Non-overlapping strips should never contain terrain that is already live. A loc can
+                // legitimately have created the Ground scaffold first, so only skip an existing tile
+                // when it already owns an actual underlay/overlay surface.
+                Ground *existing = scene->levelTiles[level][x][z];
+                if (existing && (existing->underlay || existing->overlay)) {
+                    world3d_set_drawlevel(scene, level, x, z, world_get_drawlevel(world, level, x, z));
+                    continue;
+                }
+
+                int underlayId = world->levelTileUnderlayIds[level][x][z] & 0xff;
+                int overlayId = world->levelTileOverlayIds[level][x][z] & 0xff;
+                if (underlayId > _FloType.count) underlayId = 0;
+                if (overlayId > _FloType.count) overlayId = 0;
+
+                if (underlayId > 0 || overlayId > 0) {
+                    int heightSW = world->levelHeightmap[level][x][z];
+                    int heightSE = world->levelHeightmap[level][x + 1][z];
+                    int heightNE = world->levelHeightmap[level][x + 1][z + 1];
+                    int heightNW = world->levelHeightmap[level][x][z + 1];
+
+                    int lightSW = world->levelLightmap[x][z];
+                    int lightSE = world->levelLightmap[x + 1][z];
+                    int lightNE = world->levelLightmap[x + 1][z + 1];
+                    int lightNW = world->levelLightmap[x][z + 1];
+
+                    int chroma = 0;
+                    int saturation = 0;
+                    int lightness = 0;
+                    int luminance = 0;
+                    int magnitude = 0;
+                    for (int bx = x - 5; bx <= x + 5; bx++) {
+                        if (bx < 0 || bx >= world->maxTileX) continue;
+                        for (int bz = z - 5; bz <= z + 5; bz++) {
+                            if (bz < 0 || bz >= world->maxTileZ) continue;
+                            int blendId = world->levelTileUnderlayIds[level][bx][bz] & 0xff;
+                            if (blendId <= 0 || blendId > _FloType.count) continue;
+                            FloType *flu = _FloType.instances[blendId - 1];
+                            chroma += flu->chroma;
+                            saturation += flu->saturation;
+                            lightness += flu->lightness;
+                            luminance += flu->luminance;
+                            magnitude++;
+                        }
+                    }
+
+                    int baseColor = -1;
+                    int tintColor = -1;
+                    if (underlayId > 0 && luminance > 0 && magnitude > 0) {
+                        int hue = chroma * 256 / luminance;
+                        int sat = saturation / magnitude;
+                        int lit = lightness / magnitude;
+                        baseColor = hsl24to16(hue, sat, lit);
+
+                        int randomHue = (hue + _World.randomHueOffset) & 0xff;
+                        lit += _World.randomLightnessOffset;
+                        if (lit < 0) lit = 0;
+                        if (lit > 255) lit = 255;
+                        tintColor = hsl24to16(randomHue, sat, lit);
+                    }
+
+                    int shadeColor = 0;
+                    if (baseColor != -1) {
+                        shadeColor = _Pix3D.palette[mulHSL(tintColor, 96)];
+                    }
+
+                    if (overlayId == 0) {
+                        world3d_set_tile(scene, level, x, z, 0, 0, -1,
+                                         heightSW, heightSE, heightNE, heightNW,
+                                         mulHSL(baseColor, lightSW), mulHSL(baseColor, lightSE),
+                                         mulHSL(baseColor, lightNE), mulHSL(baseColor, lightNW),
+                                         0, 0, 0, 0, shadeColor, 0);
+                    } else {
+                        int shape = world->levelTileOverlayShape[level][x][z] + 1;
+                        int8_t rotation = world->levelTileOverlayRotation[level][x][z];
+                        FloType *flo = _FloType.instances[overlayId - 1];
+                        int textureId = flo->texture;
+                        int hsl;
+                        int rgb;
+
+                        if (textureId >= 0) {
+#if PS2_UNTEXTURED_TERRAIN
+                            textureId = -1;
+                            hsl = baseColor != -1 ? baseColor :
+                                  hsl24to16(flo->hue, flo->saturation, flo->lightness);
+                            rgb = _Pix3D.palette[adjustLightness(hsl, 96)];
+#else
+                            rgb = pix3d_get_average_texture_rgb(textureId);
+                            hsl = -1;
+#endif
+                        } else if (flo->rgb == MAGENTA) {
+                            rgb = 0;
+                            hsl = -2;
+                            textureId = -1;
+                        } else {
+                            hsl = hsl24to16(flo->hue, flo->saturation, flo->lightness);
+                            rgb = _Pix3D.palette[adjustLightness(flo->hsl, 96)];
+                        }
+
+                        world3d_set_tile(scene, level, x, z, shape, rotation, textureId,
+                                         heightSW, heightSE, heightNE, heightNW,
+                                         mulHSL(baseColor, lightSW), mulHSL(baseColor, lightSE),
+                                         mulHSL(baseColor, lightNE), mulHSL(baseColor, lightNW),
+                                         adjustLightness(hsl, lightSW), adjustLightness(hsl, lightSE),
+                                         adjustLightness(hsl, lightNE), adjustLightness(hsl, lightNW),
+                                         shadeColor, rgb);
+                    }
+                }
+
+                world3d_set_drawlevel(scene, level, x, z, world_get_drawlevel(world, level, x, z));
+            }
+        }
+    }
+
+    // Match the normal scene-build ordering: terrain and static locs are both present before bridges
+    // shift their tile columns. Only this new strip is touched, so already-live bridge columns cannot
+    // be shifted a second time.
+    for (int x = minX; x < maxX; x++) {
+        for (int z = minZ; z < maxZ; z++) {
+            if ((world->levelTileFlags[1][x][z] & 0x2) == 2) {
+                world3d_set_bridge(scene, x, z);
+            }
+        }
+    }
+}
+#endif
+
+#ifdef __PS2__
 void world_build(World *world, World3D *scene, CollisionMap **collision, Client *c) {
     char ps2_stage_label[48];
     ps2_scene_checkpoint(c, "WORLD BUILD ENTER");
