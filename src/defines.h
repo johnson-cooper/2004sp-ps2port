@@ -109,7 +109,7 @@
 // Emergency scenery LOD. Enter immediately at 15 FPS or below, then latch the cull until the
 // player has actually moved away from the overloaded area and performance has stayed healthy.
 #define PS2_DECORATIVE_FPS_LIMIT_TRIGGER 15
-#define PS2_DECORATIVE_FPS_RELEASE 40
+#define PS2_DECORATIVE_FPS_RELEASE 25
 #define PS2_DECORATIVE_RELEASE_DISTANCE 8
 #define PS2_DECORATIVE_RELEASE_FRAMES 75
 // Bit 5 is unused by the scene info encoding (shape uses 0..4, rotation uses 6..7).
