@@ -60,17 +60,3 @@ void world_build(World *world, World3D *scene, CollisionMap **collision, Client 
 void world_build(World *world, World3D *scene, CollisionMap **collision);
 #endif
 int world_get_drawlevel(World *world, int level, int stx, int stz);
-#ifdef __PS2__
-// Full-scene static-loc metadata + bounded visual residency. Terrain remains on the established
-// fixed 80x80 scene; only static loc models/wrappers are recycled while the player moves.
-void world_ps2_loc_stream_begin_scene(void);
-void world_ps2_loc_stream_materialize(World3D *scene, int (*levelHeightmap)[104 + 1][104 + 1],
-                                      int8_t (*levelTileFlags)[104][104], LinkList *locs,
-                                      int playerX, int playerZ);
-void world_ps2_loc_stream_update(World3D *scene, int (*levelHeightmap)[104 + 1][104 + 1],
-                                 int8_t (*levelTileFlags)[104][104], LinkList *locs,
-                                 int playerX, int playerZ);
-void world_ps2_loc_stream_forget(int level, int x, int z, int layer);
-int world_ps2_loc_stream_descriptor_count(void);
-int world_ps2_loc_stream_resident_count(void);
-#endif
