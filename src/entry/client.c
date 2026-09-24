@@ -6001,6 +6001,11 @@ static bool client_ps2_materialize_residency_rect(Client *c, int minX, int maxX,
 }
 
 __attribute__((section(".ps2_runtime_text"), noinline))
+static bool client_ps2_residency_fits(int minX, int maxX, int minZ, int maxZ) {
+    return (maxX - minX) * (maxZ - minZ) <= PS2_RESIDENCY_MAX_TILES;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
 static void client_ps2_maybe_expand_residency_window(Client *c) {
     if (!c || c->scene_state != 2 || !c->local_player || !c->ps2ResidencyWindowValid ||
         !c->ps2ResidencyWorld) {
@@ -6018,25 +6023,29 @@ static void client_ps2_maybe_expand_residency_window(Client *c) {
     // strip for diagonal travel, avoiding duplicate loc insertion while keeping the player several
     // tiles inside the already-materialised render margin.
     if (minX > PS2_RESIDENCY_SCENE_MIN_TILE && x - minX <= PS2_RESIDENCY_EXPAND_MARGIN) {
-        if (client_ps2_materialize_residency_rect(c, PS2_RESIDENCY_SCENE_MIN_TILE, minX, minZ, maxZ)) {
+        if (client_ps2_residency_fits(PS2_RESIDENCY_SCENE_MIN_TILE, maxX, minZ, maxZ) &&
+            client_ps2_materialize_residency_rect(c, PS2_RESIDENCY_SCENE_MIN_TILE, minX, minZ, maxZ)) {
             c->ps2ResidencyMinTileX = PS2_RESIDENCY_SCENE_MIN_TILE;
         }
         return;
     }
     if (maxX < PS2_RESIDENCY_SCENE_MAX_TILE && (maxX - 1) - x <= PS2_RESIDENCY_EXPAND_MARGIN) {
-        if (client_ps2_materialize_residency_rect(c, maxX, PS2_RESIDENCY_SCENE_MAX_TILE, minZ, maxZ)) {
+        if (client_ps2_residency_fits(minX, PS2_RESIDENCY_SCENE_MAX_TILE, minZ, maxZ) &&
+            client_ps2_materialize_residency_rect(c, maxX, PS2_RESIDENCY_SCENE_MAX_TILE, minZ, maxZ)) {
             c->ps2ResidencyMaxTileX = PS2_RESIDENCY_SCENE_MAX_TILE;
         }
         return;
     }
     if (minZ > PS2_RESIDENCY_SCENE_MIN_TILE && z - minZ <= PS2_RESIDENCY_EXPAND_MARGIN) {
-        if (client_ps2_materialize_residency_rect(c, minX, maxX, PS2_RESIDENCY_SCENE_MIN_TILE, minZ)) {
+        if (client_ps2_residency_fits(minX, maxX, PS2_RESIDENCY_SCENE_MIN_TILE, maxZ) &&
+            client_ps2_materialize_residency_rect(c, minX, maxX, PS2_RESIDENCY_SCENE_MIN_TILE, minZ)) {
             c->ps2ResidencyMinTileZ = PS2_RESIDENCY_SCENE_MIN_TILE;
         }
         return;
     }
     if (maxZ < PS2_RESIDENCY_SCENE_MAX_TILE && (maxZ - 1) - z <= PS2_RESIDENCY_EXPAND_MARGIN) {
-        if (client_ps2_materialize_residency_rect(c, minX, maxX, maxZ, PS2_RESIDENCY_SCENE_MAX_TILE)) {
+        if (client_ps2_residency_fits(minX, maxX, minZ, PS2_RESIDENCY_SCENE_MAX_TILE) &&
+            client_ps2_materialize_residency_rect(c, minX, maxX, maxZ, PS2_RESIDENCY_SCENE_MAX_TILE)) {
             c->ps2ResidencyMaxTileZ = PS2_RESIDENCY_SCENE_MAX_TILE;
         }
     }
