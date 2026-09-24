@@ -67,21 +67,56 @@ static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
 
 static int ps2_inactive_loc_draw_count = 0;
 
-// Binary decorative scenery LOD. The old fixed 2-tile hardware test visibly removed the
-// Port Sarim crates/boxes, so only FPS <= 15 enables that exact emergency radius. There are no
-// intermediate stages, cached controller state, density gates, render timing, or recovery logic.
-static inline int ps2_live_decorative_radius(void) {
+// Latched decorative scenery LOD. The direct 15-FPS toggle worked, but it oscillated:
+// culling raised FPS, which immediately restored the locs, which dropped FPS again. Emergency mode
+// now stays active for the overloaded area instead of using the current frame as an on/off switch.
+static bool ps2_decorative_emergency_active = false;
+static int ps2_decorative_emergency_tile_x = 0;
+static int ps2_decorative_emergency_tile_z = 0;
+static int ps2_decorative_release_frames = 0;
+
+static void ps2_update_decorative_emergency_lod(void) {
     Client *c = ps2_crash_client;
     int fps = (c && c->shell) ? c->shell->fps : 0;
 
-    // Binary emergency LOD. At 15 FPS or below, use the exact 2-tile centerpiece
-    // cull already proven to recover Port Sarim performance on real PS2 hardware.
-    // Above 15 FPS, restore normal loc visibility immediately.
-    if (fps > 0 && fps <= PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
-        return PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS;
+    int tileX;
+    int tileZ;
+    ps2_loc_detail_anchor(&tileX, &tileZ);
+
+    if (!ps2_decorative_emergency_active) {
+        if (fps > 0 && fps <= PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
+            ps2_decorative_emergency_active = true;
+            ps2_decorative_emergency_tile_x = tileX;
+            ps2_decorative_emergency_tile_z = tileZ;
+            ps2_decorative_release_frames = 0;
+        }
+        return;
     }
 
-    return PS2_INACTIVE_LOC_RENDER_RADIUS;
+    // Never release just because culling itself fixed the FPS. Require the player to leave the
+    // overloaded neighborhood first, otherwise standing at Port Sarim would endlessly toggle.
+    int dx = tileX - ps2_decorative_emergency_tile_x;
+    int dz = tileZ - ps2_decorative_emergency_tile_z;
+    if (dx < 0) dx = -dx;
+    if (dz < 0) dz = -dz;
+    bool movedAway = dx >= PS2_DECORATIVE_RELEASE_DISTANCE ||
+                     dz >= PS2_DECORATIVE_RELEASE_DISTANCE;
+
+    if (movedAway && fps >= PS2_DECORATIVE_FPS_RELEASE) {
+        ps2_decorative_release_frames++;
+        if (ps2_decorative_release_frames >= PS2_DECORATIVE_RELEASE_FRAMES) {
+            ps2_decorative_emergency_active = false;
+            ps2_decorative_release_frames = 0;
+        }
+    } else {
+        ps2_decorative_release_frames = 0;
+    }
+}
+
+static inline int ps2_live_decorative_radius(void) {
+    return ps2_decorative_emergency_active
+        ? PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS
+        : PS2_INACTIVE_LOC_RENDER_RADIUS;
 }
 
 int ps2_world3d_decorative_radius(void) {
@@ -1314,6 +1349,7 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.topLevel = topLevel;
 
 #ifdef __PS2__
+    ps2_update_decorative_emergency_lod();
     ps2_inactive_loc_draw_count = 0;
 
     // Preserve the fixed 104x104 coordinate space, but submit only the nearby
