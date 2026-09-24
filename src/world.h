@@ -67,6 +67,7 @@ void world_add_loc2(World *world, int level, int x, int z, World3D *scene, LinkL
 // client_build_scene(). `c` is used only to reuse client.c's existing on-screen checkpoint drawing
 // (ps2_scene_checkpoint) - passing NULL is safe (falls back to log-only).
 void world_build(World *world, World3D *scene, CollisionMap **collision, Client *c);
+void world_build_residency_rect(World *world, World3D *scene);
 #else
 void world_build(World *world, World3D *scene, CollisionMap **collision);
 #endif
