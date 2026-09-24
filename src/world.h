@@ -26,6 +26,14 @@ typedef struct {
     int *blendLuminance;
     int *blendMagnitude;
     int (*levelOccludemap)[104 + 1][104 + 1];
+#ifdef __PS2__
+    // Runtime-selected bounded residency window. These live on the heap-owned World rather than in
+    // global/BSS storage because real hardware has proven normal BSS placement to be layout-sensitive.
+    int ps2ResidencyMinTileX;
+    int ps2ResidencyMaxTileX;
+    int ps2ResidencyMinTileZ;
+    int ps2ResidencyMaxTileZ;
+#endif
 } World;
 
 typedef struct {
