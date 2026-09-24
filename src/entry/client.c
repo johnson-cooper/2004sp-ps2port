@@ -5956,7 +5956,6 @@ static bool client_ps2_materialize_residency_rect(Client *c, int minX, int maxX,
     world->ps2ResidencyMaxTileX = maxX;
     world->ps2ResidencyMinTileZ = minZ;
     world->ps2ResidencyMaxTileZ = maxZ;
-    world->ps2IncrementalBuild = true;
 
     p1isaac(c->out, 239);
     for (int i = 0; i < c->sceneMapIndexLength; i++) {
@@ -5983,7 +5982,7 @@ static bool client_ps2_materialize_residency_rect(Client *c, int minX, int maxX,
     free(data);
 
     p1isaac(c->out, 239);
-    world_build(world, c->scene, c->levelCollisionMap, c);
+    world_build_residency_rect(world, c->scene);
 
     for (int x = minX; x < maxX; x++) {
         for (int z = minZ; z < maxZ; z++) {
@@ -5998,7 +5997,6 @@ static bool client_ps2_materialize_residency_rect(Client *c, int minX, int maxX,
         }
     }
 
-    world->ps2IncrementalBuild = false;
     return true;
 }
 
