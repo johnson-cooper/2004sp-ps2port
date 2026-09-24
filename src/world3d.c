@@ -36,6 +36,23 @@ static int ps2_runtime_render_radius(void) {
     }
     if (radius < CONTROLLER_RENDER_RADIUS_MIN) radius = CONTROLLER_RENDER_RADIUS_MIN;
     if (radius > PS2_RENDER_RADIUS) radius = PS2_RENDER_RADIUS;
+
+    // The fixed 96x96 PS2 scene is deliberately large enough for the normal 12-tile view all the
+    // way to the stock server's rebuild boundary. Only the optional 16-tile setting needs tapering
+    // near an edge. This is render-only: no scene allocations or ownership change while walking.
+    if (c && c->local_player) {
+        int px = c->local_player->pathing_entity.pathTileX[0];
+        int pz = c->local_player->pathing_entity.pathTileZ[0];
+        int edge = px - PS2_TERRAIN_MIN_TILE;
+        int d = (PS2_TERRAIN_MAX_X_TILE - 1) - px;
+        if (d < edge) edge = d;
+        d = pz - PS2_TERRAIN_MIN_TILE;
+        if (d < edge) edge = d;
+        d = (PS2_TERRAIN_MAX_Z_TILE - 1) - pz;
+        if (d < edge) edge = d;
+        if (edge < radius) radius = edge;
+        if (radius < 1) radius = 1;
+    }
     return radius;
 }
 
@@ -262,12 +279,20 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.topLevel = topLevel;
 
     _World3D.minDrawTileX = _World3D.eyeTileX - drawRadius;
-    if (_World3D.minDrawTileX < 0) _World3D.minDrawTileX = 0;
+    if (_World3D.minDrawTileX < PS2_TERRAIN_MIN_TILE) _World3D.minDrawTileX = PS2_TERRAIN_MIN_TILE;
     _World3D.minDrawTileZ = _World3D.eyeTileZ - drawRadius;
-    if (_World3D.minDrawTileZ < 0) _World3D.minDrawTileZ = 0;
+    if (_World3D.minDrawTileZ < PS2_TERRAIN_MIN_TILE) _World3D.minDrawTileZ = PS2_TERRAIN_MIN_TILE;
     _World3D.maxDrawTileX = _World3D.eyeTileX + drawRadius;
-    if (_World3D.maxDrawTileX > world3d->maxTileX) _World3D.maxDrawTileX = world3d->maxTileX;
+    if (_World3D.maxDrawTileX > PS2_TERRAIN_MAX_X_TILE) _World3D.maxDrawTileX = PS2_TERRAIN_MAX_X_TILE;
     _World3D.maxDrawTileZ = _World3D.eyeTileZ + drawRadius;
+    if (_World3D.maxDrawTileZ > PS2_TERRAIN_MAX_Z_TILE) _World3D.maxDrawTileZ = PS2_TERRAIN_MAX_Z_TILE;
+
+    // Never traverse the four-tile safety border that was intentionally not materialised. Keeping
+    // renderer bounds identical to the immutable residency rectangle prevents the old "terrain/locs
+    // disappear before REBUILD_NORMAL" path without introducing live scene streaming.
+    if (_World3D.minDrawTileX < 0) _World3D.minDrawTileX = 0;
+    if (_World3D.minDrawTileZ < 0) _World3D.minDrawTileZ = 0;
+    if (_World3D.maxDrawTileX > world3d->maxTileX) _World3D.maxDrawTileX = world3d->maxTileX;
     if (_World3D.maxDrawTileZ > world3d->maxTileZ) _World3D.maxDrawTileZ = world3d->maxTileZ;
 
     world3d_update_activeoccluders();
