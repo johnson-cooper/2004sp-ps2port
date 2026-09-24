@@ -137,17 +137,16 @@
 // bypass both limits so Talk-to/combat feedback is never culled by the performance budget.
 #define PS2_NPC_RENDER_RADIUS 8
 #define PS2_NPC_RENDER_BUDGET 8
-// Immutable PS2 scene residency. 96x96 (tiles 4..99) leaves a 12-tile scenery/terrain margin
-// when the stock server reaches its normal rebuild boundaries around local tiles 16/87, matching
-// the controller's default 12-tile view without any live scene mutation. This experiment relies on
-// reclaiming temporary model-lighting normals from libc heap instead of retaining them in the 6 MiB
-// scene arena, which is the memory cost that made the earlier 96x96 attempt unstable.
-#define PS2_LOC_MIN_TILE 4
-#define PS2_LOC_MAX_TILE 100
-#define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 4)
-#define PS2_TERRAIN_MAX_X_TILE 100
-#define PS2_TERRAIN_MAX_Z_TILE 100
-#define PS2_TERRAIN_MAX_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MAX_TILE : 100)
+// Maximum legal immutable PS2 scene residency. The map format's usable interior is tiles 1..102;
+// tile 0 and tile 103 are the client's safety border and are already rejected by loc placement.
+// Loading 102x102 therefore covers every terrain/static-loc tile the current REBUILD_NORMAL can
+// legally expose, while retaining the lighting-scratch reclamation that made 96x96 stable.
+#define PS2_LOC_MIN_TILE 1
+#define PS2_LOC_MAX_TILE 103
+#define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 1)
+#define PS2_TERRAIN_MAX_X_TILE 103
+#define PS2_TERRAIN_MAX_Z_TILE 103
+#define PS2_TERRAIN_MAX_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MAX_TILE : 103)
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
