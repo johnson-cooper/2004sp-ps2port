@@ -5034,7 +5034,7 @@ static void handleControllerButtonInput(Client *c) {
         if (dpad_y != 0) {
             c->controller_settings_row += dpad_y;
             if (c->controller_settings_row < 0) c->controller_settings_row = 0;
-            if (c->controller_settings_row > 7) c->controller_settings_row = 7;
+            if (c->controller_settings_row > 8) c->controller_settings_row = 8;
         }
         if (dpad_x != 0) {
             if (c->controller_settings_row == 0) {
@@ -5084,12 +5084,16 @@ static void handleControllerButtonInput(Client *c) {
                 // Left chooses the proven 25 FPS fallback; Right restores full-rate 50 FPS.
                 c->controller_render_25fps = dpad_x < 0;
                 c->controller_render_phase = false;
+            } else if (c->controller_settings_row == 7) {
+                // Emergency mode is a true master gate. Left disables all low-FPS activation;
+                // Right restores the existing adaptive trigger/recovery behavior unchanged.
+                c->controller_emergency_mode = dpad_x > 0;
             }
         }
 
         if (c->controller_confirm_pressed) {
             c->controller_confirm_pressed = false;
-            if (c->controller_settings_row == 7) {
+            if (c->controller_settings_row == 8) {
                 c->controller_cursor_deadzone = 20;
                 c->controller_cursor_speed = 5;
                 c->controller_camera_deadzone = 40;
@@ -5097,6 +5101,7 @@ static void handleControllerButtonInput(Client *c) {
                 c->controller_render_radius = CONTROLLER_RENDER_RADIUS_DEFAULT;
                 c->controller_afk_minutes = 0;
                 c->controller_render_25fps = false;
+                c->controller_emergency_mode = true;
                 c->controller_render_phase = false;
                 c->shell->idle_cycles = 0;
             }
@@ -10600,6 +10605,8 @@ static const char ps2_settings_close_help[] PS2_RUNTIME_RODATA = "L3 or Triangle
 #define ps2_settings_frame_rate "Frame rate"
 #define ps2_settings_25_fps "25 FPS"
 #define ps2_settings_50_fps "50 FPS"
+#define ps2_settings_emergency_mode "Emergency mode"
+#define ps2_settings_on "On"
 #define ps2_settings_reset_defaults "Reset defaults"
 #define ps2_settings_fmt_int "%d"
 #define ps2_settings_off "Off"
@@ -10626,7 +10633,7 @@ static void controller_settings_draw(Client *c) {
     pix2d_fill_rect(x + 1, y + 1, 0x303946, w - 2, 25);
     drawStringTaggableCenter(c->font_bold12, ps2_settings_title, x + w / 2, y + 18, WHITE, true);
 
-    const char *labels[8] = {
+    const char *labels[9] = {
         ps2_settings_left_deadzone,
         ps2_settings_cursor_speed,
         ps2_settings_right_deadzone,
@@ -10634,11 +10641,12 @@ static void controller_settings_draw(Client *c) {
         ps2_settings_render_radius,
         ps2_settings_afk_timer,
         ps2_settings_frame_rate,
+        ps2_settings_emergency_mode,
         ps2_settings_reset_defaults
     };
     char value[32];
-    for (int row = 0; row < 8; row++) {
-        int rowY = y + 46 + row * 27;
+    for (int row = 0; row < 9; row++) {
+        int rowY = y + 46 + row * 25;
         int color = row == c->controller_settings_row ? YELLOW : WHITE;
         if (row == 0) {
             snprintf(value, sizeof(value), ps2_settings_fmt_int, c->controller_cursor_deadzone);
@@ -10662,6 +10670,8 @@ static void controller_settings_draw(Client *c) {
             }
         } else if (row == 6) {
             strcpy(value, c->controller_render_25fps ? ps2_settings_25_fps : ps2_settings_50_fps);
+        } else if (row == 7) {
+            strcpy(value, c->controller_emergency_mode ? ps2_settings_on : ps2_settings_off);
         } else {
             strcpy(value, ps2_settings_x);
         }
@@ -14183,6 +14193,7 @@ Client *client_new(void) {
     c->controller_audio_volume = 0;
     c->controller_render_radius = CONTROLLER_RENDER_RADIUS_DEFAULT;
     c->controller_afk_minutes = 0;
+    c->controller_emergency_mode = true;
     c->controller_grid_cancel_pressed = false;
     c->controller_hotkey_run_pressed = false;
     c->controller_run_enabled = false;

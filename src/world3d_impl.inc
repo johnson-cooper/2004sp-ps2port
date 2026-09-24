@@ -111,6 +111,14 @@ static void ps2_reset_decorative_lod_for_scene(Client *c) {
 
 static void ps2_update_decorative_emergency_recovery(void) {
     Client *c = ps2_crash_client;
+
+    // Controller setting is the master gate. When disabled, immediately restore the normal
+    // decorative radius and keep the trigger/recovery state disarmed, regardless of FPS.
+    if (c && !c->controller_emergency_mode) {
+        ps2_reset_decorative_lod_for_scene(c);
+        return;
+    }
+
     if (!c || !c->local_player) {
         return;
     }
@@ -181,6 +189,18 @@ static void ps2_update_decorative_emergency_recovery(void) {
 
 static inline int ps2_live_decorative_radius(void) {
     Client *c = ps2_crash_client;
+
+    // Absolute draw-path guard as well as the per-frame recovery guard above: with Emergency mode
+    // Off, low FPS can never enter radius-2 mode, even if this function is reached independently.
+    if (c && !c->controller_emergency_mode) {
+        if (ps2_decorative_emergency_active ||
+            ps2_decorative_trigger_armed ||
+            ps2_decorative_radius != PS2_INACTIVE_LOC_RENDER_RADIUS) {
+            ps2_reset_decorative_lod_for_scene(c);
+        }
+        return PS2_INACTIVE_LOC_RENDER_RADIUS;
+    }
+
     int fps = (c && c->shell) ? c->shell->fps : 0;
 
     // Preserve the exact known-good activation path: once the scene grace period has armed the
