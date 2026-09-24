@@ -68,15 +68,19 @@ static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
 static int ps2_inactive_loc_draw_count = 0;
 
 // Latched decorative scenery LOD. Trigger detection stays in the exact per-loc radius helper
-// that was proven to work on hardware. Recovery is counted once per World3D cycle so multiple locs
-// in the same frame cannot accidentally advance the release timer.
+// that is proven to work on hardware. Recovery is deliberately separate and runs once every
+// World3D frame, so leaving a dense area cannot strand emergency mode just because no centerpieces
+// are being considered for drawing anymore.
 static bool ps2_decorative_emergency_active = false;
 static int ps2_decorative_emergency_tile_x = 0;
 static int ps2_decorative_emergency_tile_z = 0;
 static int ps2_decorative_release_frames = 0;
-static int ps2_decorative_release_cycle = -1;
 
-static inline int ps2_live_decorative_radius(void) {
+static void ps2_update_decorative_emergency_recovery(void) {
+    if (!ps2_decorative_emergency_active) {
+        return;
+    }
+
     Client *c = ps2_crash_client;
     int fps = (c && c->shell) ? c->shell->fps : 0;
 
@@ -84,49 +88,53 @@ static inline int ps2_live_decorative_radius(void) {
     int tileZ;
     ps2_loc_detail_anchor(&tileX, &tileZ);
 
-    // Keep the trigger on the same path as the known-good direct 2-tile build. As soon as a
-    // centerpiece reaches this draw test at 15 FPS or below, latch emergency LOD immediately.
+    int dx = tileX - ps2_decorative_emergency_tile_x;
+    int dz = tileZ - ps2_decorative_emergency_tile_z;
+    if (dx < 0) dx = -dx;
+    if (dz < 0) dz = -dz;
+
+    bool movedAway = dx >= PS2_DECORATIVE_RELEASE_DISTANCE ||
+                     dz >= PS2_DECORATIVE_RELEASE_DISTANCE;
+
+    // Recovery progresses every rendered scene, not only on frames containing centerpieces.
+    // Any new severe slowdown resets the release streak and leaves emergency mode latched.
+    if (fps > 0 && fps <= PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
+        ps2_decorative_release_frames = 0;
+        return;
+    }
+
+    if (movedAway && fps >= PS2_DECORATIVE_FPS_RELEASE) {
+        ps2_decorative_release_frames++;
+        if (ps2_decorative_release_frames >= PS2_DECORATIVE_RELEASE_FRAMES) {
+            ps2_decorative_emergency_active = false;
+            ps2_decorative_release_frames = 0;
+        }
+    } else {
+        ps2_decorative_release_frames = 0;
+    }
+}
+
+static inline int ps2_live_decorative_radius(void) {
+    Client *c = ps2_crash_client;
+    int fps = (c && c->shell) ? c->shell->fps : 0;
+
+    // Keep the activation on the known-good per-loc path. The first centerpiece considered at
+    // 15 FPS or below immediately latches the hardware-proven 2-tile cull.
     if (fps > 0 && fps <= PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
         if (!ps2_decorative_emergency_active) {
+            int tileX;
+            int tileZ;
+            ps2_loc_detail_anchor(&tileX, &tileZ);
             ps2_decorative_emergency_tile_x = tileX;
             ps2_decorative_emergency_tile_z = tileZ;
         }
         ps2_decorative_emergency_active = true;
         ps2_decorative_release_frames = 0;
-        ps2_decorative_release_cycle = _World3D.cycle;
-        return PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS;
     }
 
-    if (!ps2_decorative_emergency_active) {
-        return PS2_INACTIVE_LOC_RENDER_RADIUS;
-    }
-
-    // Evaluate recovery at most once per rendered scene. Requiring movement away from the trigger
-    // area prevents the culling-induced FPS recovery from immediately restoring the expensive locs.
-    if (ps2_decorative_release_cycle != _World3D.cycle) {
-        ps2_decorative_release_cycle = _World3D.cycle;
-
-        int dx = tileX - ps2_decorative_emergency_tile_x;
-        int dz = tileZ - ps2_decorative_emergency_tile_z;
-        if (dx < 0) dx = -dx;
-        if (dz < 0) dz = -dz;
-
-        bool movedAway = dx >= PS2_DECORATIVE_RELEASE_DISTANCE ||
-                         dz >= PS2_DECORATIVE_RELEASE_DISTANCE;
-
-        if (movedAway && fps >= PS2_DECORATIVE_FPS_RELEASE) {
-            ps2_decorative_release_frames++;
-            if (ps2_decorative_release_frames >= PS2_DECORATIVE_RELEASE_FRAMES) {
-                ps2_decorative_emergency_active = false;
-                ps2_decorative_release_frames = 0;
-                return PS2_INACTIVE_LOC_RENDER_RADIUS;
-            }
-        } else {
-            ps2_decorative_release_frames = 0;
-        }
-    }
-
-    return PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS;
+    return ps2_decorative_emergency_active
+        ? PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS
+        : PS2_INACTIVE_LOC_RENDER_RADIUS;
 }
 
 int ps2_world3d_decorative_radius(void) {
@@ -1361,6 +1369,7 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.topLevel = topLevel;
 
 #ifdef __PS2__
+    ps2_update_decorative_emergency_recovery();
     ps2_inactive_loc_draw_count = 0;
 
     // Preserve the fixed 104x104 coordinate space, but submit only the nearby
