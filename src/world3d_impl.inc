@@ -67,9 +67,10 @@ static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
 
 static int ps2_inactive_loc_draw_count = 0;
 
-// Latched decorative scenery LOD. Activation stays on the exact per-loc FPS path proven on
-// hardware. Login/map-load false triggers are prevented with a simple scene grace period instead
-// of depending on player movement or a prior healthy FPS sample.
+// Adaptive decorative scenery LOD. Activation stays on the exact per-loc FPS path proven on
+// hardware. Once triggered, recovery is progressive rather than binary: nearby scenery returns in
+// 2-tile radius steps as the player moves through a healthy area. A renewed <=15 FPS drop collapses
+// the radius straight back to 2, preventing the old full-pop-in / immediate-emergency oscillation.
 static bool ps2_decorative_emergency_active = false;
 static bool ps2_decorative_trigger_armed = false;
 static bool ps2_decorative_have_last_tile = false;
@@ -78,8 +79,9 @@ static int ps2_decorative_last_tile_x = 0;
 static int ps2_decorative_last_tile_z = 0;
 static int ps2_decorative_last_scene_base_x = 0;
 static int ps2_decorative_last_scene_base_z = 0;
-static int ps2_decorative_tiles_travelled = 0;
+static int ps2_decorative_recovery_tiles = 0;
 static int ps2_decorative_scene_frames = 0;
+static int ps2_decorative_radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
 
 static inline bool ps2_player_scene_tile(int *tileX, int *tileZ) {
     Client *c = ps2_crash_client;
@@ -95,8 +97,9 @@ static inline bool ps2_player_scene_tile(int *tileX, int *tileZ) {
 static void ps2_reset_decorative_lod_for_scene(Client *c) {
     ps2_decorative_emergency_active = false;
     ps2_decorative_trigger_armed = false;
-    ps2_decorative_tiles_travelled = 0;
+    ps2_decorative_recovery_tiles = 0;
     ps2_decorative_scene_frames = 0;
+    ps2_decorative_radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
     ps2_decorative_have_last_tile = false;
 
     if (c) {
@@ -112,7 +115,8 @@ static void ps2_update_decorative_emergency_recovery(void) {
         return;
     }
 
-    // Region/map changes reset the emergency state and restart the short grace period.
+    // A real region/map switch restarts the grace period. Loading-time FPS dips therefore cannot
+    // activate the emergency cull before the new scene has rendered normally for a short period.
     if (!ps2_decorative_have_scene_base ||
         c->sceneBaseTileX != ps2_decorative_last_scene_base_x ||
         c->sceneBaseTileZ != ps2_decorative_last_scene_base_z) {
@@ -138,20 +142,36 @@ static void ps2_update_decorative_emergency_recovery(void) {
         }
     }
 
+    int dx = tileX - ps2_decorative_last_tile_x;
+    int dz = tileZ - ps2_decorative_last_tile_z;
+    if (dx < 0) dx = -dx;
+    if (dz < 0) dz = -dz;
+    int step = dx > dz ? dx : dz;
+
     if (ps2_decorative_emergency_active) {
-        int dx = tileX - ps2_decorative_last_tile_x;
-        int dz = tileZ - ps2_decorative_last_tile_z;
-        if (dx < 0) dx = -dx;
-        if (dz < 0) dz = -dz;
+        int fps = c->shell ? c->shell->fps : 0;
 
-        int step = dx > dz ? dx : dz;
-        ps2_decorative_tiles_travelled += step;
+        // If an attempted recovery step is still too expensive, return immediately to the
+        // hardware-proven radius 2 and restart movement accumulation from there.
+        if (fps > 0 && fps <= PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
+            ps2_decorative_radius = PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS;
+            ps2_decorative_recovery_tiles = 0;
+        } else {
+            ps2_decorative_recovery_tiles += step;
 
-        if (ps2_decorative_tiles_travelled >= PS2_DECORATIVE_RELEASE_DISTANCE) {
-            ps2_decorative_emergency_active = false;
-            ps2_decorative_trigger_armed = false;
-            ps2_decorative_tiles_travelled = 0;
-            ps2_decorative_scene_frames = 0;
+            // Require both movement and a healthy FPS margin before expanding visibility. This is
+            // hysteresis: <=15 contracts immediately, >=20 permits slow recovery, 16-19 simply holds.
+            if (fps >= PS2_DECORATIVE_FPS_RECOVER &&
+                ps2_decorative_recovery_tiles >= PS2_DECORATIVE_RECOVERY_STEP_TILES) {
+                ps2_decorative_recovery_tiles = 0;
+                ps2_decorative_radius += PS2_DECORATIVE_RECOVERY_RADIUS_STEP;
+
+                if (ps2_decorative_radius >= PS2_INACTIVE_LOC_RENDER_RADIUS) {
+                    ps2_decorative_radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
+                    ps2_decorative_emergency_active = false;
+                    ps2_decorative_trigger_armed = true;
+                }
+            }
         }
     }
 
@@ -163,25 +183,22 @@ static inline int ps2_live_decorative_radius(void) {
     Client *c = ps2_crash_client;
     int fps = (c && c->shell) ? c->shell->fps : 0;
 
-    // This is the same direct live-FPS decision path that previously made Port Sarim locs
-    // disappear correctly on hardware. The only gate is the post-load grace-period arm.
+    // Preserve the exact known-good activation path: once the scene grace period has armed the
+    // controller, the first centerpiece draw seen at <=15 FPS immediately enters radius-2 mode.
     if (ps2_decorative_trigger_armed &&
         !ps2_decorative_emergency_active &&
         fps > 0 && fps <= PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
         ps2_decorative_emergency_active = true;
         ps2_decorative_trigger_armed = false;
-        ps2_decorative_tiles_travelled = 0;
+        ps2_decorative_radius = PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS;
+        ps2_decorative_recovery_tiles = 0;
     }
 
-    return ps2_decorative_emergency_active
-        ? PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS
-        : PS2_INACTIVE_LOC_RENDER_RADIUS;
+    return ps2_decorative_radius;
 }
 
 int ps2_world3d_decorative_radius(void) {
-    return ps2_decorative_emergency_active
-        ? PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS
-        : PS2_INACTIVE_LOC_RENDER_RADIUS;
+    return ps2_decorative_radius;
 }
 
 int ps2_world3d_decorative_emergency_active(void) {
@@ -193,7 +210,7 @@ int ps2_world3d_decorative_trigger_armed(void) {
 }
 
 int ps2_world3d_decorative_tiles_travelled(void) {
-    return ps2_decorative_tiles_travelled;
+    return ps2_decorative_recovery_tiles;
 }
 
 int ps2_world3d_decorative_scene_frames(void) {

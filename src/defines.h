@@ -106,10 +106,13 @@
 // Keep normal visibility during healthy gameplay. If live FPS falls to 15 or below,
 // switch directly to the hardware-proven 2-tile emergency cull; otherwise use the normal radius.
 #define PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS 2
-// Emergency scenery LOD. Enter immediately at 15 FPS or below, then keep the cull latched
-// until the player has moved at least 8 tiles away from the point where it triggered.
+// Emergency scenery LOD. Enter immediately at 15 FPS or below. Recovery is deliberately
+// gradual: with at least 20 FPS, every 2 tiles of real player travel expands centerpiece visibility
+// by two tiles (2 -> 4 -> 6 -> 8 -> 10). Falling back to 15 FPS or below collapses it to 2 again.
 #define PS2_DECORATIVE_FPS_LIMIT_TRIGGER 15
-#define PS2_DECORATIVE_RELEASE_DISTANCE 8
+#define PS2_DECORATIVE_FPS_RECOVER 20
+#define PS2_DECORATIVE_RECOVERY_STEP_TILES 2
+#define PS2_DECORATIVE_RECOVERY_RADIUS_STEP 2
 #define PS2_DECORATIVE_SCENE_GRACE_FRAMES 30
 // Bit 5 is unused by the scene info encoding (shape uses 0..4, rotation uses 6..7).
 // On PS2 only, tag locs that have a real interaction option so render LOD can distinguish
