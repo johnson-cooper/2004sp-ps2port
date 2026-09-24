@@ -146,13 +146,6 @@
 #define PS2_TERRAIN_MAX_X_TILE 92
 #define PS2_TERRAIN_MAX_Z_TILE 92
 #define PS2_TERRAIN_MAX_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MAX_TILE : 92)
-// Static loc streamer: keep compact metadata for the whole server scene, but materialise only a
-// player-centred window of actual models. 48x48 leaves an 8-tile preload margin around the maximum
-// 16-tile camera radius. Recenter every 8 player tiles, reusing the same high-end loc arena.
-#define PS2_LOC_STREAM_DESCRIPTOR_CAPACITY 10240
-#define PS2_LOC_STREAM_WINDOW_SIZE 48
-#define PS2_LOC_STREAM_WINDOW_HALF (PS2_LOC_STREAM_WINDOW_SIZE / 2)
-#define PS2_LOC_STREAM_RECENTER_TILES 8
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
