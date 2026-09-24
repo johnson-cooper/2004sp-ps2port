@@ -68,15 +68,17 @@ static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
 static int ps2_inactive_loc_draw_count = 0;
 
 // Latched decorative scenery LOD. Activation stays on the exact per-loc path proven on
-// hardware. Map transitions are detected explicitly through scene-base changes, so ordinary player
-// movement never needs to be guessed from jump size. Emergency mode is disarmed on a new scene and
-// can only arm after that scene has produced a healthy (>15 FPS) frame.
+// hardware. Map transitions are detected explicitly through scene-base changes. After entering a
+// new scene (or after releasing emergency mode), the trigger is disarmed until the player actually
+// moves at least one tile; this blocks load-time FPS dips without requiring FPS to recover first.
 static bool ps2_decorative_emergency_active = false;
 static bool ps2_decorative_trigger_armed = false;
 static bool ps2_decorative_have_last_tile = false;
 static bool ps2_decorative_have_scene_base = false;
 static int ps2_decorative_last_tile_x = 0;
 static int ps2_decorative_last_tile_z = 0;
+static int ps2_decorative_arm_origin_x = 0;
+static int ps2_decorative_arm_origin_z = 0;
 static int ps2_decorative_last_scene_base_x = 0;
 static int ps2_decorative_last_scene_base_z = 0;
 static int ps2_decorative_tiles_travelled = 0;
@@ -102,6 +104,16 @@ static void ps2_reset_decorative_lod_for_scene(Client *c) {
         ps2_decorative_last_scene_base_x = c->sceneBaseTileX;
         ps2_decorative_last_scene_base_z = c->sceneBaseTileZ;
         ps2_decorative_have_scene_base = true;
+
+        int tileX;
+        int tileZ;
+        if (ps2_player_scene_tile(&tileX, &tileZ)) {
+            ps2_decorative_arm_origin_x = tileX;
+            ps2_decorative_arm_origin_z = tileZ;
+            ps2_decorative_last_tile_x = tileX;
+            ps2_decorative_last_tile_z = tileZ;
+            ps2_decorative_have_last_tile = true;
+        }
     }
 }
 
@@ -111,15 +123,13 @@ static void ps2_update_decorative_emergency_recovery(void) {
         return;
     }
 
-    // A region/map switch changes sceneBaseTileX/Z. Treat that as a new scene, not player travel,
-    // and keep emergency triggering disabled until this new scene demonstrates a healthy frame.
+    // Region/map changes are not player movement. Reset the LOD state and require one genuine
+    // player-tile movement before low FPS is allowed to trigger emergency mode in the new scene.
     if (!ps2_decorative_have_scene_base ||
         c->sceneBaseTileX != ps2_decorative_last_scene_base_x ||
         c->sceneBaseTileZ != ps2_decorative_last_scene_base_z) {
         ps2_reset_decorative_lod_for_scene(c);
     }
-
-    int fps = c->shell ? c->shell->fps : 0;
 
     int tileX;
     int tileZ;
@@ -131,40 +141,46 @@ static void ps2_update_decorative_emergency_recovery(void) {
         ps2_decorative_last_tile_x = tileX;
         ps2_decorative_last_tile_z = tileZ;
         ps2_decorative_have_last_tile = true;
-    } else if (ps2_decorative_emergency_active) {
-        int dx = tileX - ps2_decorative_last_tile_x;
-        int dz = tileZ - ps2_decorative_last_tile_z;
-        if (dx < 0) dx = -dx;
-        if (dz < 0) dz = -dz;
+    }
 
-        // Because scene-base changes are handled above, these deltas are genuine player movement.
-        // Count the Chebyshev tile distance so running at low render FPS still advances recovery.
-        int step = dx > dz ? dx : dz;
+    int dx = tileX - ps2_decorative_last_tile_x;
+    int dz = tileZ - ps2_decorative_last_tile_z;
+    if (dx < 0) dx = -dx;
+    if (dz < 0) dz = -dz;
+    int step = dx > dz ? dx : dz;
+
+    if (ps2_decorative_emergency_active) {
         ps2_decorative_tiles_travelled += step;
 
         if (ps2_decorative_tiles_travelled >= PS2_DECORATIVE_RELEASE_DISTANCE) {
             ps2_decorative_emergency_active = false;
             ps2_decorative_trigger_armed = false;
             ps2_decorative_tiles_travelled = 0;
+            ps2_decorative_arm_origin_x = tileX;
+            ps2_decorative_arm_origin_z = tileZ;
+        }
+    } else if (!ps2_decorative_trigger_armed) {
+        int armDx = tileX - ps2_decorative_arm_origin_x;
+        int armDz = tileZ - ps2_decorative_arm_origin_z;
+        if (armDx < 0) armDx = -armDx;
+        if (armDz < 0) armDz = -armDz;
+
+        // One real tile of movement is enough to prove we're past the static load/rebuild moment.
+        // Do not depend on FPS here; dense scenes may never exceed the emergency threshold.
+        if (armDx >= 1 || armDz >= 1) {
+            ps2_decorative_trigger_armed = true;
         }
     }
 
     ps2_decorative_last_tile_x = tileX;
     ps2_decorative_last_tile_z = tileZ;
-
-    // Login/map-load slowdown cannot arm emergency mode. We require at least one healthy frame in
-    // the current scene first; after a movement release, the same rule prevents immediate re-latch.
-    if (!ps2_decorative_emergency_active &&
-        !ps2_decorative_trigger_armed &&
-        fps > PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
-        ps2_decorative_trigger_armed = true;
-    }
 }
 
 static inline int ps2_live_decorative_radius(void) {
     Client *c = ps2_crash_client;
     int fps = (c && c->shell) ? c->shell->fps : 0;
 
+    // Keep activation on the exact per-loc path already proven on real hardware.
     if (ps2_decorative_trigger_armed &&
         !ps2_decorative_emergency_active &&
         fps > 0 && fps <= PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
