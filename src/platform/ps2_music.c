@@ -21,6 +21,7 @@
 #include "ps2_midi_bank.h"
 
 #define RS2MIDI_RPC_ID 0x5253324d
+#define RS2MIDI_SFX_RPC_ID 0x52533253
 
 #define RS2MIDI_RPC_PING       0
 #define RS2MIDI_RPC_LOAD       1
@@ -213,6 +214,11 @@ typedef struct Ps2SfxState {
     uint8_t queue_tail;
     uint8_t queue_count;
     uint8_t cache_next;
+    uint8_t rpc_ready;
+    uint8_t reserved0;
+    uint16_t reserved1;
+    SifRpcClientData_t rpc;
+    Rs2MidiRpcPacket rpc_packet __attribute__((aligned(64)));
     Ps2SfxCacheEntry cache[PS2_SFX_CACHE_COUNT];
     Ps2SfxRequest queue[PS2_SFX_QUEUE_COUNT];
 } Ps2SfxState;
@@ -1901,6 +1907,23 @@ PS2_AUDIO_STATIC bool ps2_audio_init_backend(void)
         return false;
     }
 
+    // SFX voice-start commands use their own client so they can be fire-and-forget without
+    // colliding with the synchronous MIDI/sample-upload RPCs on ps2_music_state.rpc.
+    memset(&ps2_sfx_state.rpc, 0, sizeof(ps2_sfx_state.rpc));
+    ps2_sfx_state.rpc_ready = 0;
+    for (int attempt = 0; attempt < 64; attempt++) {
+        int rc = sceSifBindRpc(
+            &ps2_sfx_state.rpc, RS2MIDI_SFX_RPC_ID, 0);
+        if (rc < 0) {
+            break;
+        }
+        if (ps2_sfx_state.rpc.server != NULL) {
+            ps2_sfx_state.rpc_ready = 1;
+            break;
+        }
+        DelayThread(1000);
+    }
+
     Rs2MidiRpcPacket packet __attribute__((aligned(64)));
     memset(&packet, 0, sizeof(packet));
     packet.words[0] = 0x12345678u;
@@ -2318,6 +2341,59 @@ PS2_AUDIO_STATIC bool ps2_sfx_load_request(
     return true;
 }
 
+PS2_AUDIO_STATIC bool ps2_sfx_note_on_async(
+    uint32_t sample_addr,
+    uint32_t pitch,
+    uint32_t volume)
+{
+    if (!ps2_sfx_state.rpc_ready ||
+        ps2_sfx_state.rpc.server == NULL) {
+        // Hardware-safe fallback: if the second endpoint ever fails to bind, keep SFX audible.
+        // This reuses the old synchronous command only in that exceptional case.
+        Rs2MidiRpcPacket packet __attribute__((aligned(64)));
+        memset(&packet, 0, RS2MIDI_RPC_HEADER_BYTES);
+        packet.words[0] = PS2_SFX_VOICE;
+        packet.words[1] = pitch;
+        packet.words[2] = volume;
+        packet.words[3] = volume;
+        packet.words[4] = sample_addr;
+        return ps2_audio_rpc_status(
+                   &ps2_music_state.rpc,
+                   RS2MIDI_RPC_SFX_NOTE_ON,
+                   &packet,
+                   5 * (int)sizeof(uint32_t)) >= 0;
+    }
+
+    // Never wait on the IOP from the gameplay thread. If the previous one-shot command has not
+    // retired yet, drop this effect instead of introducing a frame hitch.
+    if (sceSifCheckStatRpc(&ps2_sfx_state.rpc)) {
+        return false;
+    }
+
+    Rs2MidiRpcPacket *packet = &ps2_sfx_state.rpc_packet;
+    memset(packet, 0, RS2MIDI_RPC_HEADER_BYTES);
+    packet->words[0] = PS2_SFX_VOICE;
+    packet->words[1] = pitch;
+    packet->words[2] = volume;
+    packet->words[3] = volume;
+    packet->words[4] = sample_addr;
+
+    // With NOWAIT and no completion callback/receive buffer, PS2SDK queues the call and returns
+    // immediately. The persistent packet stays untouched until sceSifCheckStatRpc() reports idle.
+    int rc = sceSifCallRpc(
+        &ps2_sfx_state.rpc,
+        RS2MIDI_RPC_SFX_NOTE_ON,
+        SIF_RPC_M_NOWAIT,
+        packet,
+        5 * (int)sizeof(uint32_t),
+        NULL,
+        0,
+        NULL,
+        NULL);
+
+    return rc >= 0;
+}
+
 PS2_AUDIO_STATIC void ps2_sfx_update(void)
 {
     if (!ps2_music_state.ready || ps2_sfx_state.queue_count == 0u) {
@@ -2391,22 +2467,11 @@ PS2_AUDIO_STATIC void ps2_sfx_update(void)
     }
 
     if (should_play && ps2_sfx_load_request(request)) {
-        Rs2MidiRpcPacket packet __attribute__((aligned(64)));
-        memset(&packet, 0, sizeof(packet));
-        packet.words[0] = PS2_SFX_VOICE;
-        packet.words[1] = ps2_sfx_state.pitch;
         uint32_t sfx_volume = ps2_audio_scale_volume(0x3fffu);
-        packet.words[2] = sfx_volume;
-        packet.words[3] = sfx_volume;
-        packet.words[4] = ps2_sfx_state.loaded_addr;
-
-        int32_t status = ps2_audio_rpc_status(
-            &ps2_music_state.rpc,
-            RS2MIDI_RPC_SFX_NOTE_ON,
-            &packet,
-            RS2MIDI_RPC_HEADER_BYTES);
-
-        if (status >= 0) {
+        if (ps2_sfx_note_on_async(
+                ps2_sfx_state.loaded_addr,
+                ps2_sfx_state.pitch,
+                sfx_volume)) {
             ps2_sfx_state.last_start_ms = now;
             ps2_sfx_state.last_duration_ms = request->duration_ms;
         }

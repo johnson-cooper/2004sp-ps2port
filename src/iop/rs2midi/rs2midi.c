@@ -3,6 +3,7 @@
 
 #define MODNAME "rs2midi"
 #define RS2MIDI_RPC_ID 0x5253324d
+#define RS2MIDI_SFX_RPC_ID 0x52533253
 
 #define RS2MIDI_RPC_PING       0
 #define RS2MIDI_RPC_LOAD       1
@@ -50,7 +51,9 @@ IRX_ID(MODNAME, 1, 1);
 
 static SifRpcDataQueue_t rs2midi_queue;
 static SifRpcServerData_t rs2midi_server;
+static SifRpcServerData_t rs2midi_sfx_server;
 static u8 rs2midi_rpc_buffer[RS2MIDI_RPC_BUFFER_BYTES] __attribute__((aligned(64)));
+static u8 rs2midi_sfx_rpc_buffer[RS2MIDI_RPC_BUFFER_BYTES] __attribute__((aligned(64)));
 
 static u32 rs2midi_sample_loaded_mask;
 
@@ -451,6 +454,16 @@ static void rs2midi_rpc_thread(void *arg)
         RS2MIDI_RPC_ID,
         (SifRpcFunc_t)rs2midi_rpc_handler,
         rs2midi_rpc_buffer,
+        NULL,
+        NULL,
+        &rs2midi_queue);
+    // SFX uses a second server/buffer on the same queue. Calls are still serialized by the IOP
+    // thread, but an EE NOWAIT SFX command can no longer be overwritten by the next MIDI RPC.
+    sceSifRegisterRpc(
+        &rs2midi_sfx_server,
+        RS2MIDI_SFX_RPC_ID,
+        (SifRpcFunc_t)rs2midi_rpc_handler,
+        rs2midi_sfx_rpc_buffer,
         NULL,
         NULL,
         &rs2midi_queue);
