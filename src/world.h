@@ -27,12 +27,15 @@ typedef struct {
     int *blendMagnitude;
     int (*levelOccludemap)[104 + 1][104 + 1];
 #ifdef __PS2__
-    // Runtime-selected bounded residency window. These live on the heap-owned World rather than in
-    // global/BSS storage because real hardware has proven normal BSS placement to be layout-sensitive.
+    // Runtime-selected materialisation rectangle. The initial scene uses a 51x51 page centred on
+    // the local player; later walking may add non-overlapping strips without resetting World3D.
+    // Keep this heap-owned rather than adding normal-BSS state: real hardware has proven BSS layout
+    // itself can affect networking stability.
     int ps2ResidencyMinTileX;
     int ps2ResidencyMaxTileX;
     int ps2ResidencyMinTileZ;
     int ps2ResidencyMaxTileZ;
+    bool ps2IncrementalBuild;
 #endif
 } World;
 
