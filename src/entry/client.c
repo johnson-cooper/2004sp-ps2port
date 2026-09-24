@@ -6060,6 +6060,12 @@ void client_update_game(Client *c) {
         phase_t0 = rs2_now();
         updateMergeLocs(c);
         _TickPhase.mergelocs_ms += rs2_now() - phase_t0;
+
+        if (c->scene_state == 2 && c->local_player) {
+            world_ps2_loc_stream_update(c->scene, c->levelHeightmap, c->levelTileFlags, c->locList,
+                                        c->local_player->pathing_entity.pathTileX[0],
+                                        c->local_player->pathing_entity.pathTileZ[0]);
+        }
 #else
         updatePlayers(c);
         updateNpcs(c);
@@ -8582,6 +8588,9 @@ static void client_build_scene(Client *c) {
     pix3d_clear_texels();
     client_clear_caches();
     world3d_reset(c->scene);
+#ifdef __PS2__
+    world_ps2_loc_stream_begin_scene();
+#endif
     for (int level = 0; level < 4; level++) {
         collisionmap_reset(c->levelCollisionMap[level]);
     }
@@ -8782,6 +8791,17 @@ static void client_build_scene(Client *c) {
 #ifdef __PS2__
     ps2_scene_checkpoint(c, "scene: world_build done");
     ps2_phase_checkpoint(c, "scene: world_build done");
+
+    // Materialise the first bounded static-loc window only after terrain/bridges are finalised.
+    // The runtime insertion path is bridge-safe and uses the recyclable high end of the same 6 MiB arena.
+    int ps2LocCenterX = 52;
+    int ps2LocCenterZ = 52;
+    if (c->local_player) {
+        ps2LocCenterX = c->local_player->pathing_entity.pathTileX[0];
+        ps2LocCenterZ = c->local_player->pathing_entity.pathTileZ[0];
+    }
+    world_ps2_loc_stream_materialize(c->scene, c->levelHeightmap, c->levelTileFlags, c->locList,
+                                     ps2LocCenterX, ps2LocCenterZ);
 #endif
 
     // NO_TIMEOUT
@@ -9086,6 +9106,10 @@ void addLoc(Client *c, int level, int x, int z, int id, int angle, int shape, in
     if (_Client.lowmem && level != c->currentLevel) {
         return;
     }
+
+#ifdef __PS2__
+    world_ps2_loc_stream_forget(level, x, z, layer);
+#endif
 
     int bitset = 0;
 

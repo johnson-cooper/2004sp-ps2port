@@ -615,6 +615,12 @@ void world3d_set_tile(World3D *world3d, int level, int x, int z, int shape, int 
 }
 
 void world3d_add_grounddecoration(World3D *world3d, Model *model, int tileLevel, int tileX, int tileZ, int y, int bitset, int8_t info) {
+    // loctype_get_model() can legitimately return NULL when the bounded PS2 loc arena is exhausted.
+    // Never leave a GroundDecor with a NULL model for the renderer to dereference later.
+    if (!model) {
+        return;
+    }
+
     GroundDecor *decor = calloc(1, sizeof(GroundDecor));
     if (!decor) {
 #ifdef __PS2__

@@ -48,7 +48,20 @@ typedef struct {
 } BumpAllocator;
 
 static BumpAllocator alloc = {0};
+#ifdef __PS2__
+static void *bump_alloc(int size) __attribute__((section(".ps2_runtime_text"), noinline));
+#else
 static void *bump_alloc(int size);
+#endif
+#ifdef __PS2__
+// The 6 MiB PS2 arena is shared from both ends. Permanent terrain/scene allocations grow upward
+// through alloc.used. Recyclable static-loc models grow downward from ps2_loc_arena_top.
+static bool ps2_loc_arena_active __attribute__((section(".ps2_runtime_data"))) = false;
+static bool ps2_loc_arena_failed __attribute__((section(".ps2_runtime_data"))) = false;
+static int ps2_loc_arena_top __attribute__((section(".ps2_runtime_data"))) = 0;
+static int ps2_loc_alloc_count __attribute__((section(".ps2_runtime_data"))) = 0;
+static int ps2_loc_largest_alloc __attribute__((section(".ps2_runtime_data"))) = 0;
+#endif
 
 int bump_allocator_used(void) {
 #ifdef __PS2__
@@ -94,6 +107,13 @@ bool bump_allocator_init(int capacity) {
     }
     alloc.capacity = capacity;
     alloc.used = 0;
+#ifdef __PS2__
+    ps2_loc_arena_top = capacity;
+    ps2_loc_arena_active = false;
+    ps2_loc_arena_failed = false;
+    ps2_loc_alloc_count = 0;
+    ps2_loc_largest_alloc = 0;
+#endif
     return true;
 }
 
@@ -138,6 +158,13 @@ void bump_allocator_reset(void) {
 
     alloc.used = 0;
 #ifdef __PS2__
+    // Full scene rebuild reclaims both ends at once. Do not erase bytes here: world3d_reset() still
+    // needs the old arena-backed Location/Ground records long enough to free their heap wrappers.
+    ps2_loc_arena_top = alloc.capacity;
+    ps2_loc_arena_active = false;
+    ps2_loc_arena_failed = false;
+    ps2_loc_alloc_count = 0;
+    ps2_loc_largest_alloc = 0;
     ps2_scene_arena_generation++;
     if (ps2_scene_arena_generation == 0) {
         ps2_scene_arena_generation = 1;
@@ -147,6 +174,50 @@ void bump_allocator_reset(void) {
     memset(alloc.histogram, 0, sizeof(alloc.histogram));
 #endif
 }
+
+#ifdef __PS2__
+__attribute__((section(".ps2_runtime_text"), noinline))
+void ps2_loc_allocator_begin(void) {
+    ps2_loc_arena_active = true;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+void ps2_loc_allocator_end(void) {
+    ps2_loc_arena_active = false;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+void ps2_loc_allocator_reset(void) {
+    // Callers detach every streamed World3D wrapper and clear loc model side-caches before this.
+    // Rewinding the high pointer then reclaims every static-loc model/Location allocation in O(1).
+    ps2_loc_arena_active = false;
+    ps2_loc_arena_top = alloc.capacity;
+    ps2_loc_arena_failed = false;
+    ps2_loc_alloc_count = 0;
+    ps2_loc_largest_alloc = 0;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+int ps2_loc_allocator_used(void) {
+    return alloc.capacity - ps2_loc_arena_top;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+int ps2_scene_allocator_used(void) {
+    return alloc.used;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+int ps2_allocator_gap(void) {
+    int gap = ps2_loc_arena_top - alloc.used;
+    return gap > 0 ? gap : 0;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+bool ps2_loc_allocator_failed(void) {
+    return ps2_loc_arena_failed;
+}
+#endif
 
 void *rs2_malloc(bool use_allocator, int size) {
     return use_allocator ? bump_alloc(size) : malloc(size);
@@ -167,42 +238,66 @@ void *rs2_calloc(bool use_allocator, int count, int size) {
 
 static void *bump_alloc(int size) {
 #ifdef __PS2__
-    int aligned_ptr = (alloc.used + 15) & ~15;
-#elif __SIZEOF_POINTER__ == 4
-    int aligned_ptr = (alloc.used + 3) & ~3;
-#else
-    int aligned_ptr = (alloc.used + 7) & ~7;
-#endif
+    if (size < 0) {
+        return NULL;
+    }
 
-#ifdef __PS2__
+    if (ps2_loc_arena_active) {
+        // Grow the recyclable loc arena downward. Align the resulting address, not merely the size,
+        // so every returned EE pointer retains the hardware-proven qword alignment.
+        int next_top = (ps2_loc_arena_top - size) & ~15;
+        ps2_loc_alloc_count++;
+        if (size > ps2_loc_largest_alloc) {
+            ps2_loc_largest_alloc = size;
+        }
+
+        if (next_top < alloc.used) {
+            // This is a normal streaming budget boundary, not a fatal EE-memory error. The caller
+            // stops admitting lower-priority scenery and keeps the already-built structural set.
+            ps2_loc_arena_failed = true;
+            return NULL;
+        }
+
+        ps2_loc_arena_top = next_top;
+        return alloc.data + next_top;
+    }
+
+    int aligned_ptr = (alloc.used + 15) & ~15;
     alloc.alloc_count++;
     if (size > alloc.largest_alloc) {
         alloc.largest_alloc = size;
     }
     int bucket = size <= 32 ? 0 : size <= 128 ? 1 : size <= 512 ? 2 : size <= 2048 ? 3 : size <= 8192 ? 4 : 5;
     alloc.histogram[bucket]++;
-#endif
 
-    if (aligned_ptr + size > alloc.capacity) {
-#ifdef __PS2__
+    // Permanent scene data may grow only up to the current bottom of the loc arena.
+    if (aligned_ptr + size > ps2_loc_arena_top) {
         char oom_msg[112];
         snprintf(oom_msg, sizeof(oom_msg),
-                 "Allocator full: attempted=%d cap=%d count=%d largest=%d hist=%d/%d/%d/%d/%d/%d",
-                 aligned_ptr + size, alloc.capacity, alloc.alloc_count, alloc.largest_alloc,
-                 alloc.histogram[0], alloc.histogram[1], alloc.histogram[2], alloc.histogram[3],
-                 alloc.histogram[4], alloc.histogram[5]);
+                 "Allocator full: attempted=%d loc_top=%d cap=%d count=%d largest=%d",
+                 aligned_ptr + size, ps2_loc_arena_top, alloc.capacity, alloc.alloc_count, alloc.largest_alloc);
         rs2_error("%s\n", oom_msg);
         ps2_report_oom(oom_msg);
-        // Bare-metal PS2 cannot safely exit back to an OS here. Let NULL-aware callers degrade/skip
-        // optional work rather than locking the EE in exit().
         return NULL;
-#else
-        rs2_error("Allocator full: this should never happen! attempted: %d, capacity: %d", aligned_ptr + size, alloc.capacity);
-        exit(1);
-#endif
     }
 
     void *next = alloc.data + aligned_ptr;
     alloc.used = aligned_ptr + size;
     return next;
+#else
+#if __SIZEOF_POINTER__ == 4
+    int aligned_ptr = (alloc.used + 3) & ~3;
+#else
+    int aligned_ptr = (alloc.used + 7) & ~7;
+#endif
+
+    if (aligned_ptr + size > alloc.capacity) {
+        rs2_error("Allocator full: this should never happen! attempted: %d, capacity: %d", aligned_ptr + size, alloc.capacity);
+        exit(1);
+    }
+
+    void *next = alloc.data + aligned_ptr;
+    alloc.used = aligned_ptr + size;
+    return next;
+#endif
 }

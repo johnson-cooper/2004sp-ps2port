@@ -26,6 +26,7 @@
 extern Pix3D _Pix3D;
 extern FloTypeData _FloType;
 extern SeqTypeData _SeqType;
+extern LocTypeData _LocType;
 
 WorldData _World = {.lowMemory = true};
 
@@ -153,6 +154,9 @@ int noise(int x, int y) {
     return n2 >> 19 & 0xff;
 }
 
+#ifdef __PS2__
+__attribute__((section(".ps2_runtime_text"), noinline))
+#endif
 void world_add_loc(int level, int x, int z, World3D *scene, int (*levelHeightmap)[104 + 1][104 + 1], LinkList *locs, CollisionMap *collision, int locId, int shape, int rotation, int trueLevel) {
     int heightSW = levelHeightmap[trueLevel][x][z];
     int heightSE = levelHeightmap[trueLevel][x + 1][z];
@@ -186,7 +190,7 @@ void world_add_loc(int level, int x, int z, World3D *scene, int (*levelHeightmap
         model1 = loctype_get_model(loc, GROUNDDECOR, rotation, heightSW, heightSE, heightNE, heightNW, -1);
         world3d_add_grounddecoration(scene, model1, level, x, z, y, bitset, info);
 
-        if (loc->blockwalk && loc->active) {
+        if (loc->blockwalk && loc->active && collision) {
             collisionmap_set_blocked(collision, x, z);
         }
 
@@ -221,7 +225,7 @@ void world_add_loc(int level, int x, int z, World3D *scene, int (*levelHeightmap
             world3d_add_loc(scene, level, x, z, y, model1, NULL, bitset, info, width, height, yaw);
         }
 
-        if (loc->blockwalk) {
+        if (loc->blockwalk && collision) {
             collisionmap_add_loc(collision, x, z, loc->width, loc->length, rotation, loc->blockrange);
         }
 
@@ -232,7 +236,7 @@ void world_add_loc(int level, int x, int z, World3D *scene, int (*levelHeightmap
         model1 = loctype_get_model(loc, shape, rotation, heightSW, heightSE, heightNE, heightNW, -1);
         world3d_add_loc(scene, level, x, z, y, model1, NULL, bitset, info, 1, 1, 0);
 
-        if (loc->blockwalk) {
+        if (loc->blockwalk && collision) {
             collisionmap_add_loc(collision, x, z, loc->width, loc->length, rotation, loc->blockrange);
         }
 
@@ -243,7 +247,7 @@ void world_add_loc(int level, int x, int z, World3D *scene, int (*levelHeightmap
         model1 = loctype_get_model(loc, WALL_STRAIGHT, rotation, heightSW, heightSE, heightNE, heightNW, -1);
         world3d_add_wall(scene, level, x, z, y, ROTATION_WALL_TYPE[rotation], 0, model1, NULL, bitset, info);
 
-        if (loc->blockwalk) {
+        if (loc->blockwalk && collision) {
             collisionmap_add_wall(collision, x, z, shape, rotation, loc->blockrange);
         }
 
@@ -254,7 +258,7 @@ void world_add_loc(int level, int x, int z, World3D *scene, int (*levelHeightmap
         model1 = loctype_get_model(loc, WALL_DIAGONALCORNER, rotation, heightSW, heightSE, heightNE, heightNW, -1);
         world3d_add_wall(scene, level, x, z, y, ROTATION_WALL_CORNER_TYPE[rotation], 0, model1, NULL, bitset, info);
 
-        if (loc->blockwalk) {
+        if (loc->blockwalk && collision) {
             collisionmap_add_wall(collision, x, z, shape, rotation, loc->blockrange);
         }
 
@@ -267,7 +271,7 @@ void world_add_loc(int level, int x, int z, World3D *scene, int (*levelHeightmap
         model2 = loctype_get_model(loc, WALL_L, nextRotation, heightSW, heightSE, heightNE, heightNW, -1);
         world3d_add_wall(scene, level, x, z, y, ROTATION_WALL_TYPE[rotation], ROTATION_WALL_TYPE[nextRotation], model3, model2, bitset, info);
 
-        if (loc->blockwalk) {
+        if (loc->blockwalk && collision) {
             collisionmap_add_wall(collision, x, z, shape, rotation, loc->blockrange);
         }
 
@@ -278,7 +282,7 @@ void world_add_loc(int level, int x, int z, World3D *scene, int (*levelHeightmap
         model1 = loctype_get_model(loc, WALL_SQUARECORNER, rotation, heightSW, heightSE, heightNE, heightNW, -1);
         world3d_add_wall(scene, level, x, z, y, ROTATION_WALL_CORNER_TYPE[rotation], 0, model1, NULL, bitset, info);
 
-        if (loc->blockwalk) {
+        if (loc->blockwalk && collision) {
             collisionmap_add_wall(collision, x, z, shape, rotation, loc->blockrange);
         }
 
@@ -289,7 +293,7 @@ void world_add_loc(int level, int x, int z, World3D *scene, int (*levelHeightmap
         model1 = loctype_get_model(loc, shape, rotation, heightSW, heightSE, heightNE, heightNW, -1);
         world3d_add_loc(scene, level, x, z, y, model1, NULL, bitset, info, 1, 1, 0);
 
-        if (loc->blockwalk) {
+        if (loc->blockwalk && collision) {
             collisionmap_add_loc(collision, x, z, loc->width, loc->length, rotation, loc->blockrange);
         }
 
@@ -435,6 +439,396 @@ void world_load_ground(World *world, int originX, int originZ, int xOffset, int 
     free(buf);
 }
 
+
+#ifdef __PS2__
+#define PS2_LOC_DESC_ENABLED    0x01
+#define PS2_LOC_DESC_RESIDENT   0x02
+#define PS2_LOC_DESC_PRIORITY   0x04
+
+typedef struct {
+    uint16_t locId;
+    uint8_t x;
+    uint8_t z;
+    uint8_t level;
+    uint8_t shape;
+    uint8_t rotation;
+    uint8_t flags;
+    // Exact streamed multi-tile Location inserted for layer 2. Tracking the pointer avoids
+    // remove-by-anchor accidentally detaching a permanent/server loc that shares the tile.
+    Location *residentLoc;
+} Ps2StaticLocDescriptor;
+
+static Ps2StaticLocDescriptor *ps2_static_loc_descriptors __attribute__((section(".ps2_runtime_data"))) = NULL;
+static int ps2_static_loc_count __attribute__((section(".ps2_runtime_data"))) = 0;
+static int ps2_static_loc_resident_count __attribute__((section(".ps2_runtime_data"))) = 0;
+static int ps2_loc_stream_center_x __attribute__((section(".ps2_runtime_data"))) = 0;
+static int ps2_loc_stream_center_z __attribute__((section(".ps2_runtime_data"))) = 0;
+static bool ps2_loc_stream_center_valid __attribute__((section(".ps2_runtime_data"))) = false;
+static bool ps2_loc_stream_available __attribute__((section(".ps2_runtime_data"))) = false;
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static int ps2_loc_layer_for_shape(int shape) {
+    if (shape <= WALL_SQUARECORNER) return 0;
+    if (shape <= WALLDECOR_DIAGONAL_BOTH) return 1;
+    if (shape == GROUNDDECOR) return 3;
+    return 2;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static bool ps2_static_loc_allowed(World *world, int level, int x, int z, LocType *loc, int shape) {
+    if (_World.lowMemory) {
+        if ((world->levelTileFlags[level][x][z] & 0x10) != 0) {
+            return false;
+        }
+        if (world_get_drawlevel(world, level, x, z) != _World.levelBuilt) {
+            return false;
+        }
+        if (shape == GROUNDDECOR && !loc->active && !loc->forcedecor) {
+            return false;
+        }
+    }
+    return true;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static void ps2_static_loc_add_collision(CollisionMap *collision, LocType *loc, int x, int z, int shape, int rotation) {
+    if (!collision || !loc->blockwalk) {
+        return;
+    }
+
+    if (shape == GROUNDDECOR) {
+        if (loc->active) {
+            collisionmap_set_blocked(collision, x, z);
+        }
+    } else if (shape <= WALL_SQUARECORNER) {
+        collisionmap_add_wall(collision, x, z, shape, rotation, loc->blockrange);
+    } else if (shape >= WALLDECOR_STRAIGHT_NOOFFSET && shape <= WALLDECOR_DIAGONAL_BOTH) {
+        // Wall decorations do not affect clipping.
+    } else {
+        collisionmap_add_loc(collision, x, z, loc->width, loc->length, rotation, loc->blockrange);
+    }
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static void ps2_static_loc_record(int locId, int level, int x, int z, int shape, int rotation, LocType *loc) {
+    if (!ps2_loc_stream_available || !ps2_static_loc_descriptors ||
+        ps2_static_loc_count >= PS2_LOC_STREAM_DESCRIPTOR_CAPACITY) {
+        return;
+    }
+
+    Ps2StaticLocDescriptor *d = &ps2_static_loc_descriptors[ps2_static_loc_count++];
+    d->locId = (uint16_t)locId;
+    d->x = (uint8_t)x;
+    d->z = (uint8_t)z;
+    d->level = (uint8_t)level;
+    d->shape = (uint8_t)shape;
+    d->rotation = (uint8_t)rotation;
+    d->flags = PS2_LOC_DESC_ENABLED;
+    d->residentLoc = NULL;
+
+    bool structural = shape <= WALLDECOR_DIAGONAL_BOTH ||
+                      (shape >= ROOF_STRAIGHT && shape <= ROOFEDGE_SQUARECORNER);
+    if (structural || loc->blockwalk || loc->blockrange || ps2_loc_has_priority_option(loc)) {
+        d->flags |= PS2_LOC_DESC_PRIORITY;
+    }
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static bool ps2_static_loc_footprint_in_window(const Ps2StaticLocDescriptor *d, LocType *loc,
+                                                int minX, int maxX, int minZ, int maxZ) {
+    int x = d->x;
+    int z = d->z;
+    int width = 1;
+    int length = 1;
+
+    if (d->shape == CENTREPIECE_STRAIGHT || d->shape == CENTREPIECE_DIAGONAL) {
+        if (d->rotation == 1 || d->rotation == 3) {
+            width = loc->length;
+            length = loc->width;
+        } else {
+            width = loc->width;
+            length = loc->length;
+        }
+    }
+
+    // Never let streamed locs create Ground scaffolds outside the hardware-proven terrain envelope.
+    if (x < PS2_TERRAIN_MIN_TILE || z < PS2_TERRAIN_MIN_TILE ||
+        x + width > PS2_TERRAIN_MAX_X_TILE || z + length > PS2_TERRAIN_MAX_Z_TILE) {
+        return false;
+    }
+
+    return x < maxX && x + width > minX && z < maxZ && z + length > minZ;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static bool ps2_static_loc_bitset_matches(int bitset, const Ps2StaticLocDescriptor *d) {
+    return bitset != 0 && ((bitset >> 14) & 0x7fff) == d->locId;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static Location *ps2_static_loc_find_exact(World3D *scene, const Ps2StaticLocDescriptor *d) {
+    if (!scene || d->level >= scene->maxLevel || d->x >= scene->maxTileX || d->z >= scene->maxTileZ) {
+        return NULL;
+    }
+
+    Ground *tile = scene->levelTiles[d->level][d->x][d->z];
+    if (!tile) {
+        return NULL;
+    }
+
+    for (int i = 0; i < tile->locCount; i++) {
+        Location *loc = tile->locs[i];
+        if (!loc || loc->minSceneTileX != d->x || loc->minSceneTileZ != d->z) {
+            continue;
+        }
+
+        if (((loc->bitset >> 14) & 0x7fff) != d->locId) {
+            continue;
+        }
+
+        int info = loc->info & 0xff;
+        if ((info & 0x1f) == d->shape && ((info >> 6) & 0x3) == d->rotation) {
+            return loc;
+        }
+    }
+
+    return NULL;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static bool ps2_static_loc_visual_present(World3D *scene, Ps2StaticLocDescriptor *d) {
+    int layer = ps2_loc_layer_for_shape(d->shape);
+
+    if (layer == 0) {
+        return ps2_static_loc_bitset_matches(world3d_get_wallbitset(scene, d->level, d->x, d->z), d);
+    }
+    if (layer == 1) {
+        return ps2_static_loc_bitset_matches(world3d_get_walldecorationbitset(scene, d->level, d->z, d->x), d);
+    }
+    if (layer == 3) {
+        return ps2_static_loc_bitset_matches(world3d_get_grounddecorationbitset(scene, d->level, d->x, d->z), d);
+    }
+
+    d->residentLoc = ps2_static_loc_find_exact(scene, d);
+    return d->residentLoc != NULL;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static void ps2_static_loc_remove_visual(World3D *scene, Ps2StaticLocDescriptor *d) {
+    if ((d->flags & PS2_LOC_DESC_RESIDENT) == 0) {
+        d->residentLoc = NULL;
+        return;
+    }
+
+    int layer = ps2_loc_layer_for_shape(d->shape);
+    if (layer == 0) {
+        if (ps2_static_loc_bitset_matches(world3d_get_wallbitset(scene, d->level, d->x, d->z), d)) {
+            world3d_remove_wall(scene, d->level, d->x, d->z, 1);
+        }
+    } else if (layer == 1) {
+        if (ps2_static_loc_bitset_matches(world3d_get_walldecorationbitset(scene, d->level, d->z, d->x), d)) {
+            world3d_remove_walldecoration(scene, d->level, d->x, d->z);
+        }
+    } else if (layer == 2) {
+        // This pointer is arena-backed but remains valid until ps2_loc_allocator_reset() below.
+        if (d->residentLoc) {
+            world3d_remove_loc2(scene, d->residentLoc);
+        }
+    } else {
+        if (ps2_static_loc_bitset_matches(world3d_get_grounddecorationbitset(scene, d->level, d->x, d->z), d)) {
+            world3d_remove_grounddecoration(scene, d->level, d->x, d->z);
+        }
+    }
+
+    d->residentLoc = NULL;
+    d->flags &= ~PS2_LOC_DESC_RESIDENT;
+    if (ps2_static_loc_resident_count > 0) {
+        ps2_static_loc_resident_count--;
+    }
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+void world_ps2_loc_stream_begin_scene(void) {
+    if (!ps2_static_loc_descriptors) {
+        ps2_static_loc_descriptors = calloc(PS2_LOC_STREAM_DESCRIPTOR_CAPACITY,
+                                            sizeof(Ps2StaticLocDescriptor));
+    }
+
+    ps2_loc_stream_available = ps2_static_loc_descriptors != NULL;
+    ps2_static_loc_count = 0;
+    ps2_static_loc_resident_count = 0;
+    ps2_loc_stream_center_x = 0;
+    ps2_loc_stream_center_z = 0;
+    ps2_loc_stream_center_valid = false;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static int ps2_loc_stream_clamp_center(int value) {
+    int lo = PS2_TERRAIN_MIN_TILE + PS2_LOC_STREAM_WINDOW_HALF;
+    int hi = PS2_TERRAIN_MAX_TILE - PS2_LOC_STREAM_WINDOW_HALF;
+    if (value < lo) return lo;
+    if (value > hi) return hi;
+    return value;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static void ps2_loc_stream_rebuild(World3D *scene, int (*levelHeightmap)[104 + 1][104 + 1],
+                                   int8_t (*levelTileFlags)[104][104], LinkList *locs,
+                                   int playerX, int playerZ) {
+    if (!ps2_loc_stream_available || !ps2_static_loc_descriptors) {
+        return;
+    }
+
+    int centerX = ps2_loc_stream_clamp_center(playerX);
+    int centerZ = ps2_loc_stream_clamp_center(playerZ);
+
+    // Detach/free every heap wrapper while the old high-end arena bytes are still intact.
+    for (int i = 0; i < ps2_static_loc_count; i++) {
+        ps2_static_loc_remove_visual(scene, &ps2_static_loc_descriptors[i]);
+    }
+
+    // Loc model side-caches contain pointers into the recyclable high end. Clear them before rewind.
+    lrucache_clear(_LocType.modelCacheStatic);
+    lrucache_clear(_LocType.modelCacheDynamic);
+    ps2_loc_allocator_reset();
+
+    int minX = centerX - PS2_LOC_STREAM_WINDOW_HALF;
+    int maxX = minX + PS2_LOC_STREAM_WINDOW_SIZE;
+    int minZ = centerZ - PS2_LOC_STREAM_WINDOW_HALF;
+    int maxZ = minZ + PS2_LOC_STREAM_WINDOW_SIZE;
+
+    ps2_loc_allocator_begin();
+
+    // Three passes preserve useful scenery under pressure: walls first, then structural/actionable
+    // objects and building parts, then decorative clutter.
+    for (int pass = 0; pass < 3 && !ps2_loc_allocator_failed(); pass++) {
+        for (int i = 0; i < ps2_static_loc_count; i++) {
+            Ps2StaticLocDescriptor *d = &ps2_static_loc_descriptors[i];
+            if ((d->flags & PS2_LOC_DESC_ENABLED) == 0) {
+                continue;
+            }
+
+            bool wall = d->shape <= WALL_SQUARECORNER;
+            bool priority = (d->flags & PS2_LOC_DESC_PRIORITY) != 0;
+            if ((pass == 0 && !wall) ||
+                (pass == 1 && (wall || !priority)) ||
+                (pass == 2 && priority)) {
+                continue;
+            }
+
+            LocType *loc = loctype_get(d->locId);
+            if (!ps2_static_loc_footprint_in_window(d, loc, minX, maxX, minZ, maxZ)) {
+                continue;
+            }
+
+            int trueLevel = d->level;
+            if (d->level < 3 && (levelTileFlags[1][d->x][d->z] & 0x2) == 2) {
+                trueLevel = d->level + 1;
+            }
+
+            // Visual-only insertion: collision was populated once at decode time.
+            world_add_loc(d->level, d->x, d->z, scene, levelHeightmap, locs, NULL,
+                          d->locId, d->shape, d->rotation, trueLevel);
+
+            if (ps2_loc_allocator_failed()) {
+                break;
+            }
+
+            if (ps2_static_loc_visual_present(scene, d)) {
+                d->flags |= PS2_LOC_DESC_RESIDENT;
+                ps2_static_loc_resident_count++;
+            }
+        }
+    }
+
+    // sharelight walls/building pieces are intentionally left unlit by loctype_get_model() for the
+    // normal scene-wide merge pass. Streamed locs are added after world_build(), so finish that same
+    // lighting step now. Already-lit permanent models have vertex_normal == NULL and are skipped.
+    if (!_World.fullbright) {
+        world3d_build_models(scene, 64, 768, -50, -10, -50);
+    }
+
+    ps2_loc_allocator_end();
+
+    // Never let a persistent/server-added loc reuse a Model pointer owned by the recyclable high
+    // arena. World3D wrappers keep the streamed models alive; only the lookup side-caches are cleared.
+    lrucache_clear(_LocType.modelCacheStatic);
+    lrucache_clear(_LocType.modelCacheDynamic);
+
+    ps2_loc_stream_center_x = centerX;
+    ps2_loc_stream_center_z = centerZ;
+    ps2_loc_stream_center_valid = true;
+
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+void world_ps2_loc_stream_materialize(World3D *scene, int (*levelHeightmap)[104 + 1][104 + 1],
+                                      int8_t (*levelTileFlags)[104][104], LinkList *locs,
+                                      int playerX, int playerZ) {
+    ps2_loc_stream_rebuild(scene, levelHeightmap, levelTileFlags, locs, playerX, playerZ);
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+void world_ps2_loc_stream_update(World3D *scene, int (*levelHeightmap)[104 + 1][104 + 1],
+                                 int8_t (*levelTileFlags)[104][104], LinkList *locs,
+                                 int playerX, int playerZ) {
+    if (!ps2_loc_stream_available || !ps2_static_loc_descriptors) {
+        return;
+    }
+
+    int wantedX = ps2_loc_stream_clamp_center(playerX);
+    int wantedZ = ps2_loc_stream_clamp_center(playerZ);
+
+    if (!ps2_loc_stream_center_valid) {
+        ps2_loc_stream_rebuild(scene, levelHeightmap, levelTileFlags, locs, playerX, playerZ);
+        return;
+    }
+
+    int dx = wantedX - ps2_loc_stream_center_x;
+    int dz = wantedZ - ps2_loc_stream_center_z;
+    if (dx < 0) dx = -dx;
+    if (dz < 0) dz = -dz;
+
+    if (dx >= PS2_LOC_STREAM_RECENTER_TILES || dz >= PS2_LOC_STREAM_RECENTER_TILES) {
+        ps2_loc_stream_rebuild(scene, levelHeightmap, levelTileFlags, locs, playerX, playerZ);
+    }
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+void world_ps2_loc_stream_forget(int level, int x, int z, int layer) {
+    if (!ps2_loc_stream_available || !ps2_static_loc_descriptors) {
+        return;
+    }
+
+    // A server LOC_ADD_CHANGE/LOC_DEL supersedes the original map descriptor at this anchor/layer.
+    // Mark it disabled so a later window rebuild cannot resurrect stale static scenery.
+    for (int i = 0; i < ps2_static_loc_count; i++) {
+        Ps2StaticLocDescriptor *d = &ps2_static_loc_descriptors[i];
+        if ((d->flags & PS2_LOC_DESC_ENABLED) == 0) continue;
+        if (d->level == level && d->x == x && d->z == z && ps2_loc_layer_for_shape(d->shape) == layer) {
+            if ((d->flags & PS2_LOC_DESC_RESIDENT) != 0 && ps2_static_loc_resident_count > 0) {
+                ps2_static_loc_resident_count--;
+            }
+            d->residentLoc = NULL;
+            d->flags &= ~(PS2_LOC_DESC_ENABLED | PS2_LOC_DESC_RESIDENT);
+        }
+    }
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+int world_ps2_loc_stream_descriptor_count(void) {
+    return ps2_static_loc_count;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+int world_ps2_loc_stream_resident_count(void) {
+    return ps2_static_loc_resident_count;
+}
+#endif
+
+#ifdef __PS2__
+__attribute__((section(".ps2_runtime_text"), noinline))
+#endif
 void world_load_locations(World *world, World3D *scene, LinkList *locs, CollisionMap **collision, int8_t *src, int src_len, int xOffset, int zOffset) {
 #if defined(__PS2__) && defined(PS2_LOC_DECODE_ONLY)
     // 2026-09-14: temporary decode-only diagnostic (PS2_LOC_DECODE_ONLY, set in ps2.yaml - remove
@@ -594,11 +988,7 @@ void world_load_locations(World *world, World3D *scene, LinkList *locs, Collisio
             (void)shape;
             (void)rotation;
 #else
-            if (stx > 0 && stz > 0 && stx < 104 - 1 && stz < 104 - 1
-#ifdef __PS2__
-                && stx >= ps2LocMinTile && stx < ps2LocMaxTile && stz >= ps2LocMinTile && stz < ps2LocMaxTile
-#endif
-            ) {
+            if (stx > 0 && stz > 0 && stx < 104 - 1 && stz < 104 - 1) {
                 int currentLevel = level;
                 if ((world->levelTileFlags[1][stx][stz] & 0x2) == 2) {
                     currentLevel = level - 1;
@@ -627,7 +1017,35 @@ void world_load_locations(World *world, World3D *scene, LinkList *locs, Collisio
                             (int)(rs2_now() - ps2_t0));
                 }
 #endif
+#ifdef __PS2__
+                LocType *ps2Loc = loctype_get(locId);
+                if (!ps2_static_loc_allowed(world, level, stx, stz, ps2Loc, shape)) {
+                    continue;
+                }
+
+                if (ps2Loc->anim == -1) {
+                    if (ps2_loc_stream_available) {
+                        // Static map locs: keep collision for the whole decoded scene, but defer
+                        // their models/wrappers to the bounded moving visual window.
+                        ps2_static_loc_add_collision(collisionMap, ps2Loc, stx, stz, shape, rotation);
+                        ps2_static_loc_record(locId, level, stx, stz, shape, rotation, ps2Loc);
+                    } else if (stx >= ps2LocMinTile && stx < ps2LocMaxTile &&
+                               stz >= ps2LocMinTile && stz < ps2LocMaxTile) {
+                        // Allocation failure falls back to the exact hardware-good fixed-80x80 path.
+                        world_add_loc2(world, level, stx, stz, scene, locs, collisionMap, locId, shape, rotation);
+                    }
+                } else if (stx >= ps2LocMinTile && stx < ps2LocMaxTile &&
+                           stz >= ps2LocMinTile && stz < ps2LocMaxTile) {
+                    // Animated map locs retain the established permanent path so LocEntity sequence
+                    // state is never destroyed/recreated as the static window moves.
+                    world_add_loc2(world, level, stx, stz, scene, locs, collisionMap, locId, shape, rotation);
+                } else {
+                    // Preserve clipping even when a distant animated visual is outside residency.
+                    ps2_static_loc_add_collision(collisionMap, ps2Loc, stx, stz, shape, rotation);
+                }
+#else
                 world_add_loc2(world, level, stx, stz, scene, locs, collisionMap, locId, shape, rotation);
+#endif
             }
 #endif
         }
