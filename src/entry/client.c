@@ -8753,7 +8753,61 @@ static void client_build_scene(Client *c) {
 
     // NO_TIMEOUT
     p1isaac(c->out, 239); // NO_TIMEOUT
-    for (int i = 0; i < maps; i++) {
+#ifdef __PS2__
+    // Build the player-nearest loc mapsquares first. Under extreme dense-city memory pressure the
+    // world.c reserve guard can then shed far decorative geometry instead of allowing a far corner
+    // to consume the arena before the player's immediate surroundings are materialised.
+    int ps2LocOrder[16];
+    bool ps2LocOrderValid = maps > 0 && maps <= (int)(sizeof(ps2LocOrder) / sizeof(ps2LocOrder[0]));
+    if (ps2LocOrderValid) {
+        int anchorX = 52;
+        int anchorZ = 52;
+        if (c->local_player) {
+            anchorX = c->local_player->pathing_entity.x >> 7;
+            anchorZ = c->local_player->pathing_entity.z >> 7;
+        }
+
+        for (int order = 0; order < maps; order++) {
+            ps2LocOrder[order] = order;
+        }
+
+        for (int order = 1; order < maps; order++) {
+            int key = ps2LocOrder[order];
+            int keyCenterX = (c->sceneMapIndex[key] >> 8) * 64 - c->sceneBaseTileX + 32;
+            int keyCenterZ = (c->sceneMapIndex[key] & 0xff) * 64 - c->sceneBaseTileZ + 32;
+            int keyDx = keyCenterX - anchorX;
+            int keyDz = keyCenterZ - anchorZ;
+            if (keyDx < 0) keyDx = -keyDx;
+            if (keyDz < 0) keyDz = -keyDz;
+            int keyDistance = keyDx > keyDz ? keyDx : keyDz;
+
+            int pos = order - 1;
+            while (pos >= 0) {
+                int current = ps2LocOrder[pos];
+                int currentCenterX = (c->sceneMapIndex[current] >> 8) * 64 - c->sceneBaseTileX + 32;
+                int currentCenterZ = (c->sceneMapIndex[current] & 0xff) * 64 - c->sceneBaseTileZ + 32;
+                int currentDx = currentCenterX - anchorX;
+                int currentDz = currentCenterZ - anchorZ;
+                if (currentDx < 0) currentDx = -currentDx;
+                if (currentDz < 0) currentDz = -currentDz;
+                int currentDistance = currentDx > currentDz ? currentDx : currentDz;
+                if (currentDistance <= keyDistance) {
+                    break;
+                }
+                ps2LocOrder[pos + 1] = current;
+                pos--;
+            }
+            ps2LocOrder[pos + 1] = key;
+        }
+    }
+#endif
+
+    for (int locOrder = 0; locOrder < maps; locOrder++) {
+#ifdef __PS2__
+        int i = ps2LocOrderValid ? ps2LocOrder[locOrder] : locOrder;
+#else
+        int i = locOrder;
+#endif
         int8_t *src = c->sceneMapLocData[i];
         if (src) {
             Packet *buf = packet_new(src, c->sceneMapLocDataIndexLength[i]);

@@ -56,6 +56,102 @@ static bool ps2_loc_has_priority_option(const LocType *loc) {
 
     return false;
 }
+
+// Dense-city scene construction has a hard 6 MiB arena ceiling. Full 1..102 loc-file coverage is
+// correct, but a few extreme regions contain enough unique static geometry to consume that arena.
+// Reserve space before the allocator actually fails. The player-nearest mapsquares are decoded first
+// in client_build_scene(), so pressure shedding naturally falls on the far edge of the scene.
+#define PS2_LOC_ARENA_SOFT_RESERVE (2 * 1024 * 1024)
+#define PS2_LOC_ARENA_HARD_RESERVE (1 * 1024 * 1024)
+#define PS2_LOC_ARENA_PANIC_RESERVE (512 * 1024)
+#define PS2_LOC_HEAP_SOFT_RESERVE (1536 * 1024)
+#define PS2_LOC_HEAP_HARD_RESERVE (768 * 1024)
+#define PS2_LOC_HEAP_PANIC_RESERVE (384 * 1024)
+
+static int ps2_loc_player_distance(int x, int z) {
+    int playerX = 52;
+    int playerZ = 52;
+
+    if (ps2_crash_client && ps2_crash_client->local_player) {
+        playerX = ps2_crash_client->local_player->pathing_entity.x >> 7;
+        playerZ = ps2_crash_client->local_player->pathing_entity.z >> 7;
+    }
+
+    int dx = x - playerX;
+    int dz = z - playerZ;
+    if (dx < 0) dx = -dx;
+    if (dz < 0) dz = -dz;
+    return dx > dz ? dx : dz;
+}
+
+static bool ps2_loc_is_structural_wall(int shape) {
+    return (shape >= WALL_STRAIGHT && shape <= WALL_SQUARECORNER) || shape == WALL_DIAGONAL;
+}
+
+static bool ps2_loc_should_skip_visual_for_memory(const LocType *loc, int shape, int x, int z) {
+    if (!loc || ps2_loc_has_priority_option(loc) || loc->anim != -1 || ps2_loc_is_structural_wall(shape)) {
+        return false;
+    }
+
+    const int arenaRemaining = bump_allocator_scene_remaining();
+    const int heapHeadroom = ps2_heap_headroom_bytes();
+    if (arenaRemaining > PS2_LOC_ARENA_SOFT_RESERVE && heapHeadroom > PS2_LOC_HEAP_SOFT_RESERVE) {
+        return false;
+    }
+
+    const int distance = ps2_loc_player_distance(x, z);
+
+    // Never make a nearby blocking centrepiece invisible unless memory is at the final panic margin.
+    // Its collision is preserved even when the visual is eventually shed.
+    if (loc->blockwalk && distance <= 12 &&
+        arenaRemaining > PS2_LOC_ARENA_PANIC_RESERVE &&
+        heapHeadroom > PS2_LOC_HEAP_PANIC_RESERVE) {
+        return false;
+    }
+
+    const bool roof = shape >= ROOF_STRAIGHT && shape <= ROOFEDGE_SQUARECORNER;
+
+    if (arenaRemaining <= PS2_LOC_ARENA_PANIC_RESERVE ||
+        heapHeadroom <= PS2_LOC_HEAP_PANIC_RESERVE) {
+        // At the last reserve, protect only structural walls, actionable/animated locs (handled
+        // above), and a very small near ring. Crashing is worse than dropping decorative geometry.
+        return distance > (roof ? 12 : 8) || !loc->blockwalk;
+    }
+
+    if (arenaRemaining <= PS2_LOC_ARENA_HARD_RESERVE ||
+        heapHeadroom <= PS2_LOC_HEAP_HARD_RESERVE) {
+        return distance > (roof ? 24 : 16);
+    }
+
+    return distance > (roof ? 36 : 28);
+}
+
+static void ps2_loc_apply_collision_only(CollisionMap *collision, const LocType *loc,
+                                         int shape, int rotation, int x, int z) {
+    if (!collision || !loc || !loc->blockwalk) {
+        return;
+    }
+
+    if (shape == GROUNDDECOR) {
+        if (loc->active) {
+            collisionmap_set_blocked(collision, x, z);
+        }
+        return;
+    }
+
+    if (shape >= WALL_STRAIGHT && shape <= WALL_SQUARECORNER) {
+        collisionmap_add_wall(collision, x, z, shape, rotation, loc->blockrange);
+        return;
+    }
+
+    // Wall decorations (4..8) never add collision in the normal path.
+    if (shape >= WALLDECOR_STRAIGHT_NOOFFSET && shape <= WALLDECOR_DIAGONAL_BOTH) {
+        return;
+    }
+
+    // Diagonal walls, centrepieces and roof/roof-edge shapes all use rectangular loc collision.
+    collisionmap_add_loc(collision, x, z, loc->width, loc->length, rotation, loc->blockrange);
+}
 #endif
 
 void world_init_global(void) {
@@ -684,6 +780,13 @@ void world_add_loc2(World *world, int level, int x, int z, World3D *scene, LinkL
  #ifdef __PS2__
     if (ps2_watch_loc_684) {
         ps2_scene_checkpoint(ps2_crash_client, "loc 684: loctype_get returned");
+    }
+
+    // Full loc-file coverage is retained, including collision. Only the expensive visual/model side
+    // is allowed to degrade once the dense-scene reserve is being consumed.
+    if (ps2_loc_should_skip_visual_for_memory(loc, shape, x, z)) {
+        ps2_loc_apply_collision_only(collision, loc, shape, rotation, x, z);
+        return;
     }
  #endif
     int bitset = x + (z << 7) + (locId << 14) + 0x40000000;

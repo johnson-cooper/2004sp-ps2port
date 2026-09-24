@@ -22,16 +22,7 @@ static LocType *loctype_new(void) {
 
 void loctype_unpack(Jagfile *config) {
     _LocType.modelCacheStatic = lrucache_new(500);
-#ifdef __PS2__
-    // PS2 scene models live in a reset-only bump arena. Evicting a dynamic loc model does not
-    // reclaim its arena bytes, so rebuilding an evicted variant later in the same dense scene
-    // consumes the arena twice. 150 entries was small enough to thrash in large cities once the
-    // full loc residency window was restored. 512 matches the existing PS2 side-cache strategy
-    // while costing only a few KiB of BSS and no extra per-model heap allocations.
-    _LocType.modelCacheDynamic = lrucache_new(512);
-#else
-    _LocType.modelCacheDynamic = lrucache_new(30*5);
-#endif
+    _LocType.modelCacheDynamic = lrucache_new(30*5); // TODO if dynamic cache size isn't big enough it'll leak in allocator
 
     _LocType.dat = jagfile_to_packet(config, "loc.dat");
     Packet *idx = jagfile_to_packet(config, "loc.idx");

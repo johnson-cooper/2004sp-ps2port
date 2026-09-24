@@ -69,6 +69,28 @@ int bump_allocator_capacity(void) {
 #endif
 }
 
+int bump_allocator_scene_used(void) {
+    return alloc.used;
+}
+
+int bump_allocator_scene_capacity(void) {
+    return alloc.capacity;
+}
+
+int bump_allocator_scene_remaining(void) {
+    int remaining = alloc.capacity - alloc.used;
+    return remaining > 0 ? remaining : 0;
+}
+
+#ifdef __PS2__
+int ps2_heap_headroom_bytes(void) {
+    struct mallinfo info = mallinfo();
+    int free_blocks = info.fordblks > 0 ? info.fordblks : 0;
+    int gap = ps2_ram_gap_bytes();
+    return free_blocks + (gap > 0 ? gap : 0);
+}
+#endif
+
 bool bump_allocator_init(int capacity) {
 #ifdef __3DS__
     rs2_log("Free linear space: %d\n", linearSpaceFree());
