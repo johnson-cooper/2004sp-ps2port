@@ -1357,12 +1357,13 @@ void world_build(World *world, World3D *scene, CollisionMap **collision) {
 #endif
 
 #ifdef __PS2__
-    // A bridge tile must only be shifted once. During an additive strip build, restrict this pass
-    // to the new rectangle so already-live bridge columns are never shifted down a second time.
-    int bridgeMinX = world->ps2IncrementalBuild ? world->ps2ResidencyMinTileX : 0;
-    int bridgeMaxX = world->ps2IncrementalBuild ? world->ps2ResidencyMaxTileX : world->maxTileX;
-    int bridgeMinZ = world->ps2IncrementalBuild ? world->ps2ResidencyMinTileZ : 0;
-    int bridgeMaxZ = world->ps2IncrementalBuild ? world->ps2ResidencyMaxTileZ : world->maxTileZ;
+    // A bridge tile must only be shifted once. Both the initial 51x51 page and every later additive
+    // strip process only their own materialisation rectangle; already-live bridge columns are never
+    // revisited when residency grows.
+    int bridgeMinX = world->ps2ResidencyMinTileX;
+    int bridgeMaxX = world->ps2ResidencyMaxTileX;
+    int bridgeMinZ = world->ps2ResidencyMinTileZ;
+    int bridgeMaxZ = world->ps2ResidencyMaxTileZ;
 #else
     int bridgeMinX = 0;
     int bridgeMaxX = world->maxTileX;
