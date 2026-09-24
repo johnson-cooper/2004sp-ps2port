@@ -110,6 +110,7 @@
 // until the player has moved at least 8 tiles away from the point where it triggered.
 #define PS2_DECORATIVE_FPS_LIMIT_TRIGGER 15
 #define PS2_DECORATIVE_RELEASE_DISTANCE 8
+#define PS2_DECORATIVE_SCENE_GRACE_FRAMES 30
 // Bit 5 is unused by the scene info encoding (shape uses 0..4, rotation uses 6..7).
 // On PS2 only, tag locs that have a real interaction option so render LOD can distinguish
 // gameplay-relevant objects from examine-only scenery even when LocType.active is true.
