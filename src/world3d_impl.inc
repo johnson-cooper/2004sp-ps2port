@@ -1426,7 +1426,6 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     _World3D.topLevel = topLevel;
 
 #ifdef __PS2__
-    ps2_update_decorative_emergency_recovery();
     ps2_inactive_loc_draw_count = 0;
 
     // Preserve the fixed 104x104 coordinate space, but submit only the nearby

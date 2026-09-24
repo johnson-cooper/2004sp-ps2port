@@ -241,6 +241,10 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
     // overlay after the whole scene, while leaving the rest of the PS2 entity caps unchanged.
     ps2_submit_local_player(world3d, loopCycle);
 
+    // IMPORTANT: this is the real PS2 renderer entry point. world3d_impl.inc's world3d_draw()
+    // is renamed to world3d_draw_desktop above, so PS2 LOD grace/recovery state must advance here.
+    ps2_update_decorative_emergency_recovery();
+
     _World3D.cycle++;
     _World3D.sinEyePitch = _Pix3D.sin_table[eyePitch];
     _World3D.cosEyePitch = _Pix3D.cos_table[eyePitch];
