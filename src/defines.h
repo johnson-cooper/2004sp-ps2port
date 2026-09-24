@@ -137,15 +137,16 @@
 // bypass both limits so Talk-to/combat feedback is never culled by the performance budget.
 #define PS2_NPC_RENDER_RADIUS 8
 #define PS2_NPC_RENDER_BUDGET 8
-// Edge-residency test: match static loc/model residency to the traversal-proven 80x80 terrain
-// bridge window. This should prevent buildings/fences from ending four tiles before terrain when
-// the player approaches a normal scene edge, at the cost of more resident static-world wrappers.
-#define PS2_LOC_MIN_TILE 12
-#define PS2_LOC_MAX_TILE 92
-#define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 12)
-#define PS2_TERRAIN_MAX_X_TILE 92
-#define PS2_TERRAIN_MAX_Z_TILE 92
-#define PS2_TERRAIN_MAX_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MAX_TILE : 92)
+// Fixed PS2 scene residency. Keep one immutable resident scene for the entire server build-area
+// lifetime: no live streaming, no partial World3D rebuilds, and no ownership changes while walking.
+// 96x96 (tiles 4..99) leaves a 12-tile scenery margin when the stock server reaches its normal
+// rebuild boundaries around local tiles 16/87, matching the controller's normal 12-tile view.
+#define PS2_LOC_MIN_TILE 4
+#define PS2_LOC_MAX_TILE 100
+#define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 4)
+#define PS2_TERRAIN_MAX_X_TILE 100
+#define PS2_TERRAIN_MAX_Z_TILE 100
+#define PS2_TERRAIN_MAX_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MAX_TILE : 100)
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
