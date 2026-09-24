@@ -218,15 +218,32 @@ int ps2_world3d_decorative_scene_frames(void) {
 }
 
 static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
-    // Hardware A/B: residency and scene construction stay exactly at the proven 80x80 baseline,
-    // but every loc that reached World3D is allowed through the renderer. This isolates whether the
-    // apparent "missing locs" are actually caused by PS2 distance/emergency LOD rather than by build
-    // failure or residency. The outer World3D camera radius still bounds total per-frame traversal.
-    (void)bitset;
-    (void)info;
-    (void)sceneX;
-    (void)sceneZ;
-    return true;
+    // Normal PS2 rendering no longer applies the old always-on 6/8/10-tile loc-detail culls: if a
+    // loc successfully reached World3D and its tile is inside the normal camera traversal, draw it.
+    // Keep the hardware-proven emergency controller, however. Under sustained <=15 FPS only dense
+    // shape-10/11 centrepieces collapse to the adaptive 2->4->6->8->10 recovery radius.
+    if ((bitset & 0x40000000) == 0) {
+        return true;
+    }
+
+    int emergencyRadius = ps2_live_decorative_radius();
+    int shape = info & 0x1f;
+    if (shape != CENTREPIECE_STRAIGHT && shape != CENTREPIECE_DIAGONAL) {
+        return true;
+    }
+
+    if (emergencyRadius >= PS2_INACTIVE_LOC_RENDER_RADIUS) {
+        return true;
+    }
+
+    int anchorX;
+    int anchorZ;
+    ps2_loc_detail_anchor(&anchorX, &anchorZ);
+    int dx = (sceneX >> 7) - anchorX;
+    int dz = (sceneZ >> 7) - anchorZ;
+    if (dx < 0) dx = -dx;
+    if (dz < 0) dz = -dz;
+    return dx <= emergencyRadius && dz <= emergencyRadius;
 }
 
 static inline int ps2_obj_stack_detail(const GroundObject *objs) {
