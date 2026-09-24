@@ -174,6 +174,18 @@ int ps2_world3d_decorative_radius(void) {
         : PS2_INACTIVE_LOC_RENDER_RADIUS;
 }
 
+int ps2_world3d_decorative_emergency_active(void) {
+    return ps2_decorative_emergency_active ? 1 : 0;
+}
+
+int ps2_world3d_decorative_trigger_armed(void) {
+    return ps2_decorative_trigger_armed ? 1 : 0;
+}
+
+int ps2_world3d_decorative_tiles_travelled(void) {
+    return ps2_decorative_tiles_travelled;
+}
+
 static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
     if ((bitset & 0x40000000) == 0) {
         return true;

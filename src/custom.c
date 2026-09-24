@@ -174,6 +174,12 @@ void draw_info_overlay(Client *c) {
         sprintf(buf, "LocLOD: %d", ps2_world3d_decorative_radius());
         drawStringRight(c->font_plain11, x, y, buf, YELLOW, true);
         y += 13;
+        sprintf(buf, "LocEM:%d Arm:%d Move:%d/8",
+                ps2_world3d_decorative_emergency_active(),
+                ps2_world3d_decorative_trigger_armed(),
+                ps2_world3d_decorative_tiles_travelled());
+        drawStringRight(c->font_plain11, x, y, buf, YELLOW, true);
+        y += 13;
 #endif
 #if defined(__vita__)
 #include <psp2/power.h>
