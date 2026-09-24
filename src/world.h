@@ -26,17 +26,6 @@ typedef struct {
     int *blendLuminance;
     int *blendMagnitude;
     int (*levelOccludemap)[104 + 1][104 + 1];
-#ifdef __PS2__
-    // Runtime-selected materialisation rectangle. The initial scene uses a 51x51 page centred on
-    // the local player; later walking may add non-overlapping strips without resetting World3D.
-    // Keep this heap-owned rather than adding normal-BSS state: real hardware has proven BSS layout
-    // itself can affect networking stability.
-    int ps2ResidencyMinTileX;
-    int ps2ResidencyMaxTileX;
-    int ps2ResidencyMinTileZ;
-    int ps2ResidencyMaxTileZ;
-    bool ps2IncrementalBuild;
-#endif
 } World;
 
 typedef struct {
@@ -67,7 +56,6 @@ void world_add_loc2(World *world, int level, int x, int z, World3D *scene, LinkL
 // client_build_scene(). `c` is used only to reuse client.c's existing on-screen checkpoint drawing
 // (ps2_scene_checkpoint) - passing NULL is safe (falls back to log-only).
 void world_build(World *world, World3D *scene, CollisionMap **collision, Client *c);
-void world_build_residency_rect(World *world, World3D *scene);
 #else
 void world_build(World *world, World3D *scene, CollisionMap **collision);
 #endif
