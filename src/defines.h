@@ -121,8 +121,10 @@
 // Ground-item pile LOD: full three-model pile only very near; top model only farther out.
 #define PS2_OBJ_FULL_DETAIL_RADIUS 3
 #define PS2_OBJ_RENDER_RADIUS 12
-// Dense-scene inactive-loc budget: preserve nearby scenery, cap farther inactive Location draws.
-#define PS2_INACTIVE_LOC_ALWAYS_RADIUS 5
+// Dense-scene inactive-loc budget: guarantee the complete near field, then cap only the outer
+// decorative ring. World3D orders locs farthest-first, so a 5-tile bypass let distant scenery spend
+// the 48-slot budget before closer 6-8 tile buildings/objects were reached.
+#define PS2_INACTIVE_LOC_ALWAYS_RADIUS 8
 #define PS2_INACTIVE_LOC_DRAW_BUDGET 48
 // Aggressive real-PS2 remote-player LOD for crowded areas. Only very nearby ordinary players keep
 // per-frame animated model transforms; mid-distance players use the cached lowmem appearance mesh;
