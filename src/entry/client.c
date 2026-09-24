@@ -5968,10 +5968,6 @@ static void client_ps2_maybe_shift_residency_window(Client *c) {
     c->ps2ResidencyMinTileZ = targetMinZ;
     c->ps2ResidencyMaxTileZ = targetMinZ + PS2_RESIDENCY_TILE_COUNT;
 
-    rs2_log("PS2 residency shift: player=%d,%d window=[%d,%d)x[%d,%d)\n", playerTileX, playerTileZ,
-            c->ps2ResidencyMinTileX, c->ps2ResidencyMaxTileX,
-            c->ps2ResidencyMinTileZ, c->ps2ResidencyMaxTileZ);
-
     // Reuse the normal proven scene-rebuild path with the map squares already resident in
     // sceneMapLandData/sceneMapLocData. world3d_reset() recycles the old scene arena first, so this
     // moves the bounded residency window instead of accumulating another copy of static geometry.
