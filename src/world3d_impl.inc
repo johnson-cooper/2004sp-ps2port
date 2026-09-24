@@ -67,60 +67,59 @@ static inline void ps2_loc_detail_anchor(int *tileX, int *tileZ) {
 
 static int ps2_inactive_loc_draw_count = 0;
 
-// Latched decorative scenery LOD. Activation stays on the exact per-loc path proven on
-// hardware. Release is based on actual tile-to-tile player travel, not displacement from one saved
-// coordinate, so turns/rebases cannot strand the mode. Large coordinate jumps are ignored as scene
-// rebuild/rebase events rather than counted as player movement.
+// Latched decorative scenery LOD. Emergency mode is deliberately NOT armed on login/map-load:
+// the first few world frames are naturally slow and were causing an immediate false trigger.
+// Once the game has demonstrated a healthy frame rate, low FPS can arm the proven 2-tile cull.
+// Release is based on actual rendered player tile travel (x/z >> 7), not the path queue.
 static bool ps2_decorative_emergency_active = false;
-static bool ps2_decorative_trigger_armed = true;
-static bool ps2_decorative_have_last_world_tile = false;
-static int ps2_decorative_last_world_x = 0;
-static int ps2_decorative_last_world_z = 0;
+static bool ps2_decorative_trigger_armed = false;
+static bool ps2_decorative_have_last_tile = false;
+static int ps2_decorative_last_tile_x = 0;
+static int ps2_decorative_last_tile_z = 0;
 static int ps2_decorative_tiles_travelled = 0;
 
-static inline bool ps2_player_world_tile(int *tileX, int *tileZ) {
+static inline bool ps2_player_scene_tile(int *tileX, int *tileZ) {
     Client *c = ps2_crash_client;
     if (!c || !c->local_player) {
         return false;
     }
 
-    // Use the player's path head because it is already expressed in whole scene tiles and is the
-    // coordinate the movement/pathing code itself uses. Add the scene base to make it world-stable.
-    *tileX = c->sceneBaseTileX + c->local_player->pathing_entity.pathTileX[0];
-    *tileZ = c->sceneBaseTileZ + c->local_player->pathing_entity.pathTileZ[0];
+    *tileX = c->local_player->pathing_entity.x >> 7;
+    *tileZ = c->local_player->pathing_entity.z >> 7;
     return true;
 }
 
 static void ps2_update_decorative_emergency_recovery(void) {
+    Client *c = ps2_crash_client;
+    int fps = (c && c->shell) ? c->shell->fps : 0;
+
     int tileX;
     int tileZ;
-    if (!ps2_player_world_tile(&tileX, &tileZ)) {
+    if (!ps2_player_scene_tile(&tileX, &tileZ)) {
         return;
     }
 
-    if (!ps2_decorative_have_last_world_tile) {
-        ps2_decorative_last_world_x = tileX;
-        ps2_decorative_last_world_z = tileZ;
-        ps2_decorative_have_last_world_tile = true;
-        return;
+    if (!ps2_decorative_have_last_tile) {
+        ps2_decorative_last_tile_x = tileX;
+        ps2_decorative_last_tile_z = tileZ;
+        ps2_decorative_have_last_tile = true;
     }
-
-    int dx = tileX - ps2_decorative_last_world_x;
-    int dz = tileZ - ps2_decorative_last_world_z;
-    if (dx < 0) dx = -dx;
-    if (dz < 0) dz = -dz;
-
-    ps2_decorative_last_world_x = tileX;
-    ps2_decorative_last_world_z = tileZ;
 
     if (ps2_decorative_emergency_active) {
-        // A normal RuneScape movement update advances by at most a couple of tiles. A larger jump
-        // means the 104x104 scene was rebased/rebuilt/teleported; ignore it for emergency recovery
-        // so map loading cannot accidentally satisfy the movement condition.
+        int dx = tileX - ps2_decorative_last_tile_x;
+        int dz = tileZ - ps2_decorative_last_tile_z;
+        if (dx < 0) dx = -dx;
+        if (dz < 0) dz = -dz;
+
+        // Normal movement changes scene position by at most a couple of tiles between rendered
+        // frames. Ignore larger jumps as map rebuilds/teleports rather than counting them as walking.
         if (dx <= 2 && dz <= 2) {
             int step = dx > dz ? dx : dz;
             ps2_decorative_tiles_travelled += step;
         }
+
+        ps2_decorative_last_tile_x = tileX;
+        ps2_decorative_last_tile_z = tileZ;
 
         if (ps2_decorative_tiles_travelled >= PS2_DECORATIVE_RELEASE_DISTANCE) {
             ps2_decorative_emergency_active = false;
@@ -130,15 +129,16 @@ static void ps2_update_decorative_emergency_recovery(void) {
         return;
     }
 
-    if (!ps2_decorative_trigger_armed) {
-        Client *c = ps2_crash_client;
-        int fps = (c && c->shell) ? c->shell->fps : 0;
+    // While inactive, continuously refresh the baseline tile so map rebuilds cannot contaminate
+    // the next emergency-mode movement measurement.
+    ps2_decorative_last_tile_x = tileX;
+    ps2_decorative_last_tile_z = tileZ;
 
-        // Do not let a map-load FPS dip immediately relatch emergency mode. Rearm only after the
-        // game loop has genuinely recovered above the trigger threshold.
-        if (fps > PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
-            ps2_decorative_trigger_armed = true;
-        }
+    // Arming is intentionally separate from triggering. Login/map-load slowdown cannot enable
+    // emergency mode until at least one healthy frame has occurred.
+    if (!ps2_decorative_trigger_armed &&
+        fps > PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
+        ps2_decorative_trigger_armed = true;
     }
 }
 
@@ -146,20 +146,20 @@ static inline int ps2_live_decorative_radius(void) {
     Client *c = ps2_crash_client;
     int fps = (c && c->shell) ? c->shell->fps : 0;
 
+    // Activation remains on the exact per-loc path already proven on real hardware.
     if (ps2_decorative_trigger_armed &&
-        fps > 0 && fps <= PS2_DECORATIVE_FPS_LIMIT_TRIGGER &&
-        !ps2_decorative_emergency_active) {
-        // Only initialise the travel latch on the inactive -> active transition. Do not reset
-        // it on every low-FPS loc draw, or movement could never accumulate to the release distance.
+        !ps2_decorative_emergency_active &&
+        fps > 0 && fps <= PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
         ps2_decorative_emergency_active = true;
+        ps2_decorative_trigger_armed = false;
         ps2_decorative_tiles_travelled = 0;
 
         int tileX;
         int tileZ;
-        if (ps2_player_world_tile(&tileX, &tileZ)) {
-            ps2_decorative_last_world_x = tileX;
-            ps2_decorative_last_world_z = tileZ;
-            ps2_decorative_have_last_world_tile = true;
+        if (ps2_player_scene_tile(&tileX, &tileZ)) {
+            ps2_decorative_last_tile_x = tileX;
+            ps2_decorative_last_tile_z = tileZ;
+            ps2_decorative_have_last_tile = true;
         }
     }
 
