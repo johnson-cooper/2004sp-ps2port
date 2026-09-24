@@ -137,16 +137,18 @@
 // bypass both limits so Talk-to/combat feedback is never culled by the performance budget.
 #define PS2_NPC_RENDER_RADIUS 8
 #define PS2_NPC_RENDER_BUDGET 8
-// Maximum legal immutable PS2 scene residency. The map format's usable interior is tiles 1..102;
-// tile 0 and tile 103 are the client's safety border and are already rejected by loc placement.
-// Loading 102x102 therefore covers every terrain/static-loc tile the current REBUILD_NORMAL can
-// legally expose, while retaining the lighting-scratch reclamation that made 96x96 stable.
-#define PS2_LOC_MIN_TILE 1
-#define PS2_LOC_MAX_TILE 103
-#define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 1)
-#define PS2_TERRAIN_MAX_X_TILE 103
-#define PS2_TERRAIN_MAX_Z_TILE 103
-#define PS2_TERRAIN_MAX_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MAX_TILE : 103)
+// Real-hardware-proven scene residency: keep terrain and static loc/model materialisation in the
+// matching 80x80 bridge window (tiles 12..91). The later 1..102 expansion made extreme cities exceed
+// the PS2's 6 MiB scene arena once loc-file loading was correctly aligned to the residency window.
+// REBUILD_NORMAL recentres before normal traversal outruns this bridge window, while the loader in
+// client.c now derives its loc mapsquare coverage from these exact bounds instead of the stale 32..63
+// gate that originally caused missing buildings/objects.
+#define PS2_LOC_MIN_TILE 12
+#define PS2_LOC_MAX_TILE 92
+#define PS2_TERRAIN_MIN_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MIN_TILE : 12)
+#define PS2_TERRAIN_MAX_X_TILE 92
+#define PS2_TERRAIN_MAX_Z_TILE 92
+#define PS2_TERRAIN_MAX_TILE ((__builtin_strcmp(__func__, "world_load_locations") == 0) ? PS2_LOC_MAX_TILE : 92)
 // Keep native projection until the fixed <<9 projection is made resolution-aware. Rendering at a
 // smaller surface without scaling projection was proven to clip almost the entire terrain scene.
 #define PS2_3D_RENDER_WIDTH 512
