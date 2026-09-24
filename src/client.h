@@ -487,13 +487,15 @@ struct Client {
     int midiSize;
     char currentMidi[MAX_STR];
 #ifdef __PS2__
-    // Heap-owned runtime state for the sliding 80x80 scene-residency window. Keep this at the end of
-    // Client so existing field offsets stay unchanged and no new normal-BSS globals are introduced.
+    // Heap-owned runtime state for additive scene residency. A normal region build starts with one
+    // 51x51 page centred on the player; later walking only materialises new strips and never tears
+    // down the live World3D. Keep this at the end of Client so existing field offsets stay unchanged.
     int ps2ResidencyMinTileX;
     int ps2ResidencyMaxTileX;
     int ps2ResidencyMinTileZ;
     int ps2ResidencyMaxTileZ;
     bool ps2ResidencyWindowValid;
+    void *ps2ResidencyWorld;
 #endif
 };
 
