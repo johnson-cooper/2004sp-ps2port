@@ -102,10 +102,9 @@
 #define PS2_ROOF_RENDER_RADIUS 8
 #define PS2_WALL_DECOR_RENDER_RADIUS 8
 #define PS2_GROUND_DECOR_RENDER_RADIUS 6
-// Examine-only shape-10/11 centerpieces are the dense crate/barrel/box/furniture class.
-// Adapt their render radius to measured PS2 World3D cost instead of relying on traversal-order caps.
-// Full-detail areas use the ordinary inactive-loc radius; sustained dense/slow scenes step down
-// toward the proven 2-tile Port Sarim fallback, then recover outward slowly when performance returns.
+// Shape-10/11 centerpieces are the dense crate/barrel/box/furniture class.
+// Keep normal visibility during healthy gameplay. If live FPS falls to 15 or below,
+// switch directly to the hardware-proven 2-tile emergency cull; otherwise use the normal radius.
 #define PS2_DECORATIVE_CENTREPIECE_RENDER_RADIUS 2
 // Emergency scenery LOD: only engage the hardware-proven 2-tile centerpiece cull when
 // the live game loop is genuinely struggling. Otherwise keep normal loc visibility.
