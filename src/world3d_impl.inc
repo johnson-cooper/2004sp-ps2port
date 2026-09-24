@@ -147,7 +147,10 @@ static inline int ps2_live_decorative_radius(void) {
     int fps = (c && c->shell) ? c->shell->fps : 0;
 
     if (ps2_decorative_trigger_armed &&
-        fps > 0 && fps <= PS2_DECORATIVE_FPS_LIMIT_TRIGGER) {
+        fps > 0 && fps <= PS2_DECORATIVE_FPS_LIMIT_TRIGGER &&
+        !ps2_decorative_emergency_active) {
+        // Only initialise the travel latch on the inactive -> active transition. Do not reset
+        // it on every low-FPS loc draw, or movement could never accumulate to the release distance.
         ps2_decorative_emergency_active = true;
         ps2_decorative_tiles_travelled = 0;
 
