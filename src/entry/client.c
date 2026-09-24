@@ -5909,6 +5909,54 @@ static void client_scenemap_free(Client *c) {
     free(c->sceneMapLocDataIndexLength);
 }
 
+#ifdef __PS2__
+__attribute__((section(".ps2_runtime_text"), noinline))
+static void ps2_flush_outbound(Client *c) {
+    if (!c || !c->stream || c->out->pos <= 0) {
+        return;
+    }
+
+    // Never block the EE. clientstream_write() is MSG_DONTWAIT on PS2 and returns 0 when lwIP's
+    // send queue is temporarily full. Preserve packet byte order on partial writes.
+    int sent = clientstream_write(c->stream, c->out->data, c->out->pos, 0);
+    if (sent <= 0) {
+        return;
+    }
+
+    if (sent < c->out->pos) {
+        memmove(c->out->data, c->out->data + sent, c->out->pos - sent);
+    }
+    c->out->pos -= sent;
+    c->heartbeatTimer = 0;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static void ps2_handle_priority_world_click(Client *c) {
+    if (!c || !c->local_player || c->scene_state != 2 || _World3D.clickTileX == -1) {
+        return;
+    }
+
+    int x = _World3D.clickTileX;
+    int z = _World3D.clickTileZ;
+    bool success = client_try_move(c,
+                                   c->local_player->pathing_entity.pathTileX[0],
+                                   c->local_player->pathing_entity.pathTileZ[0],
+                                   x, z, 0, 0, 0, 0, 0, 0, true);
+    _World3D.clickTileX = -1;
+
+    if (success) {
+        c->crossX = c->shell->mouse_click_x;
+        c->crossY = c->shell->mouse_click_y;
+        c->cross_mode = 1;
+        c->cross_cycle = 0;
+
+        // MOVE_GAMECLICK was just appended to c->out. Push it now instead of making it wait behind
+        // entity/audio/camera/UI work until the very end of client_update_game().
+        ps2_flush_outbound(c);
+    }
+}
+#endif
+
 void client_update_game(Client *c) {
 #ifdef __PS2__
     ps2_live_update_count++;
@@ -5947,24 +5995,33 @@ void client_update_game(Client *c) {
     // an EE tick immediately after login.  Keep the game responsive and let the
     // normal 50 Hz update loop drain it progressively on the 32 MiB target.
 #ifdef __PS2__
-    // During map construction one packet at a time prevents a burst of interface/zone work from
-    // monopolising the EE. Once the world is live, use the established three-packet budget, but
-    // keep REBUILD_NORMAL + its immediately-following PLAYER_INFO atomic. A hard teleport shifts
-    // every entity into the new local coordinate base in REBUILD_NORMAL; if that packet occupies
-    // the last normal budget slot, running the rest of a PS2 tick before PLAYER_INFO leaves the
-    // local player temporarily far outside the 104x104 scene. Tutorial-skip is a reproducible case
-    // because its interface/varp traffic can place REBUILD_NORMAL at that boundary. Grant exactly
-    // one extra read only when a live scene changes 2 -> 1 during this drain. Initial login remains
-    // one packet per tick and ordinary live traffic remains capped at three.
-    int packet_budget = c->scene_state == 2 ? 3 : 1;
-    for (int i = 0; i < packet_budget; i++) {
-        int scene_state_before = c->scene_state;
-        if (!client_read(c)) {
-            break;
+    // Fixed "3 packets per tick" protects CPU but creates avoidable queueing: at low presentation
+    // FPS or during a burst, the PLAYER_INFO that confirms a movement command can sit behind many
+    // cheap packets. Drain by wall-clock budget instead. A live tick may consume many tiny packets,
+    // but network decoding gets at most ~2 ms before gameplay/input regains the EE.
+    if (c->scene_state == 2) {
+        const int max_packets = 32;
+        const int64_t packet_deadline = rs2_now() + 2;
+        for (int i = 0; i < max_packets; i++) {
+            int scene_state_before = c->scene_state;
+            if (!client_read(c)) {
+                break;
+            }
+
+            if (scene_state_before == 2 && c->scene_state == 1) {
+                // Preserve the proven REBUILD_NORMAL -> PLAYER_INFO pairing. The follow-up read is
+                // nonblocking; if it has not arrived yet it simply returns false.
+                (void)client_read(c);
+                break;
+            }
+
+            if (rs2_now() >= packet_deadline) {
+                break;
+            }
         }
-        if (scene_state_before == 2 && c->scene_state == 1 && packet_budget == 3) {
-            packet_budget = 4;
-        }
+    } else {
+        // Map construction remains deliberately conservative.
+        (void)client_read(c);
     }
 #else
     const int packet_budget = 5;
@@ -5975,6 +6032,10 @@ void client_update_game(Client *c) {
     ps2_live_stage = 2; // packet handling returned
     ps2_heap_after_packets_kb = mallinfo().fordblks / 1024;
     _TickPhase.packets_ms += rs2_now() - phase_t0;
+
+    // World picking is produced by the previous draw. Consume it before audio/entity/UI work so
+    // click-to-wire latency is bounded by the small packet-drain budget above, not the whole tick.
+    ps2_handle_priority_world_click(c);
 #endif
 
     #ifdef __PS2__
@@ -6150,6 +6211,7 @@ void client_update_game(Client *c) {
             p1(c->out, 50);
         }
 
+#ifndef __PS2__
         if (_World3D.clickTileX != -1) {
             int x = _World3D.clickTileX;
             int z = _World3D.clickTileZ;
@@ -6163,6 +6225,7 @@ void client_update_game(Client *c) {
                 c->cross_cycle = 0;
             }
         }
+#endif
 
         if (c->shell->mouse_click_button == 1 && c->modal_message[0]) {
             c->modal_message[0] = '\0';
@@ -6179,6 +6242,11 @@ void client_update_game(Client *c) {
         handleControllerButtonInput(c);
         handleControllerGridInput(c);
         handleChatSettingsInput(c);
+#ifdef __PS2__
+        // Minimap moves and interaction/menu packets are generated in the handlers above. Give
+        // interactive commands the same low-latency send path as direct world clicks.
+        ps2_flush_outbound(c);
+#endif
 
         if (c->shell->mouse_button == 1 || c->shell->mouse_click_button == 1) {
             c->drag_cycles++;
@@ -6303,12 +6371,12 @@ void client_update_game(Client *c) {
         }
 
         // try {
+#ifdef __PS2__
+        ps2_flush_outbound(c);
+#else
         if (c->stream && c->out->pos > 0) {
             int sent = clientstream_write(c->stream, c->out->data, c->out->pos, 0);
             if (sent > 0) {
-                // A nonblocking socket may only accept a prefix.  Preserve
-                // the unsent tail in order; dropping it would desynchronise
-                // the revision-254 packet stream just as surely as a hang.
                 if (sent < c->out->pos) {
                     memmove(c->out->data, c->out->data + sent, c->out->pos - sent);
                 }
@@ -6316,6 +6384,7 @@ void client_update_game(Client *c) {
                 c->heartbeatTimer = 0;
             }
         }
+#endif
         // NOTE: no catch for logout or reconn
         // } catch (IOException ignored) {
         // client_try_reconnect(c);
