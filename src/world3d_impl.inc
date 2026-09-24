@@ -218,46 +218,15 @@ int ps2_world3d_decorative_scene_frames(void) {
 }
 
 static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
-    if ((bitset & 0x40000000) == 0) {
-        return true;
-    }
-
-    int shape = info & 0x1f;
-    bool gameplayImportant = (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0;
-    int radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
-
-    if (shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL) {
-        // This is deliberately the same distance-culling shape as the old known-good 2-tile build.
-        // The only difference is that live FPS picks 10/8/6/4/2 directly on this draw call.
-        radius = ps2_live_decorative_radius();
-
-        // Healthy scenes preserve interactive centrepieces exactly as before. Under load, interaction
-        // remains available in scene/collision data, but the distant model is allowed to disappear.
-        if (gameplayImportant && radius == PS2_INACTIVE_LOC_RENDER_RADIUS) {
-            return true;
-        }
-    } else {
-        if (gameplayImportant) {
-            return true;
-        }
-
-        if (shape == GROUNDDECOR) {
-            radius = PS2_GROUND_DECOR_RENDER_RADIUS;
-        } else if (shape >= WALLDECOR_STRAIGHT_NOOFFSET && shape <= WALLDECOR_DIAGONAL_BOTH) {
-            radius = PS2_WALL_DECOR_RENDER_RADIUS;
-        } else if (shape >= ROOF_STRAIGHT && shape <= ROOFEDGE_SQUARECORNER) {
-            radius = PS2_ROOF_RENDER_RADIUS;
-        }
-    }
-
-    int anchorX;
-    int anchorZ;
-    ps2_loc_detail_anchor(&anchorX, &anchorZ);
-    int dx = (sceneX >> 7) - anchorX;
-    int dz = (sceneZ >> 7) - anchorZ;
-    if (dx < 0) dx = -dx;
-    if (dz < 0) dz = -dz;
-    return dx <= radius && dz <= radius;
+    // Hardware A/B: residency and scene construction stay exactly at the proven 80x80 baseline,
+    // but every loc that reached World3D is allowed through the renderer. This isolates whether the
+    // apparent "missing locs" are actually caused by PS2 distance/emergency LOD rather than by build
+    // failure or residency. The outer World3D camera radius still bounds total per-frame traversal.
+    (void)bitset;
+    (void)info;
+    (void)sceneX;
+    (void)sceneZ;
+    return true;
 }
 
 static inline int ps2_obj_stack_detail(const GroundObject *objs) {
@@ -274,30 +243,13 @@ static inline int ps2_obj_stack_detail(const GroundObject *objs) {
 }
 
 static inline bool ps2_claim_inactive_loc_budget(int bitset, int8_t info, int sceneX, int sceneZ) {
-    // Only examine-only/decorative map locs consume this budget. Map locs with a real interaction
-    // option and dynamic entities keep their normal render path.
-    if ((bitset & 0x40000000) == 0 || (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0) {
-        return true;
-    }
-
-    int anchorX;
-    int anchorZ;
-    ps2_loc_detail_anchor(&anchorX, &anchorZ);
-    int dx = (sceneX >> 7) - anchorX;
-    int dz = (sceneZ >> 7) - anchorZ;
-    if (dx < 0) dx = -dx;
-    if (dz < 0) dz = -dz;
-    int distance = dx > dz ? dx : dz;
-
-    if (distance <= PS2_INACTIVE_LOC_ALWAYS_RADIUS) {
-        return true;
-    }
-
-    if (ps2_inactive_loc_draw_count >= PS2_INACTIVE_LOC_DRAW_BUDGET) {
-        return false;
-    }
-
-    ps2_inactive_loc_draw_count++;
+    // Hardware A/B: disable the 48-loc decorative budget as well as distance LOD. If a static loc
+    // was successfully inserted into World3D and its tile is inside the normal camera traversal,
+    // let it draw. This deliberately does not increase scene residency or the camera render radius.
+    (void)bitset;
+    (void)info;
+    (void)sceneX;
+    (void)sceneZ;
     return true;
 }
 #endif
