@@ -131,7 +131,8 @@ static void client_scenemap_free(Client *c);
 static void client_build_scene(Client *c);
 #ifdef __PS2__
 static void client_ps2_reset_residency_window(Client *c);
-static void client_ps2_maybe_shift_residency_window(Client *c);
+static bool client_ps2_materialize_residency_rect(Client *c, int minX, int maxX, int minZ, int maxZ);
+static void client_ps2_maybe_expand_residency_window(Client *c);
 #endif
 static void client_clear_caches(void);
 static void client_update_orbit_camera(Client *c);
@@ -5914,77 +5915,133 @@ static void client_scenemap_free(Client *c) {
 }
 
 #ifdef __PS2__
-static int client_ps2_residency_axis_target(int currentMin, int playerTile) {
-    const int centreMin = PS2_LOC_MIN_TILE;
-    const int lowMin = PS2_RESIDENCY_SCENE_MIN_TILE;
-    const int highMin = PS2_RESIDENCY_SCENE_MAX_TILE - PS2_RESIDENCY_TILE_COUNT;
-    const int centreTile = (PS2_RESIDENCY_SCENE_MIN_TILE + PS2_RESIDENCY_SCENE_MAX_TILE) / 2;
-
-    // Edge windows stay latched until the player has crossed back through the scene centre. That
-    // hysteresis prevents rebuild thrash if movement/camera updates hover around a shift threshold.
-    if (currentMin <= lowMin) {
-        return playerTile >= centreTile ? centreMin : lowMin;
-    }
-    if (currentMin >= highMin) {
-        return playerTile <= centreTile ? centreMin : highMin;
-    }
-
-    // The centre window shifts before the player can see its unloaded edge. Use the compiled maximum
-    // render radius plus a small guard so runtime radius changes cannot expose missing locs first.
-    if (playerTile <= PS2_LOC_MIN_TILE + PS2_RESIDENCY_SHIFT_MARGIN) {
-        return lowMin;
-    }
-    if (playerTile >= PS2_LOC_MAX_TILE - PS2_RESIDENCY_SHIFT_MARGIN) {
-        return highMin;
-    }
-    return centreMin;
-}
-
+__attribute__((section(".ps2_runtime_text"), noinline))
 static void client_ps2_reset_residency_window(Client *c) {
-    int minX = PS2_LOC_MIN_TILE;
-    int minZ = PS2_LOC_MIN_TILE;
-
-    // PLAYER_INFO has already placed the local player before a normal scene build. Seed the new
-    // bounded window around that actual local tile so a freshly loaded map cannot immediately
-    // request a second full build just because the player arrived near one edge of the 104x104 scene.
+    int tileX = (PS2_RESIDENCY_SCENE_MIN_TILE + PS2_RESIDENCY_SCENE_MAX_TILE) / 2;
+    int tileZ = tileX;
     if (c->local_player) {
-        minX = client_ps2_residency_axis_target(PS2_LOC_MIN_TILE,
-                                                c->local_player->pathing_entity.pathTileX[0]);
-        minZ = client_ps2_residency_axis_target(PS2_LOC_MIN_TILE,
-                                                c->local_player->pathing_entity.pathTileZ[0]);
+        tileX = c->local_player->pathing_entity.pathTileX[0];
+        tileZ = c->local_player->pathing_entity.pathTileZ[0];
     }
+
+    int minX = tileX - PS2_RESIDENCY_PAGE_HALF;
+    int minZ = tileZ - PS2_RESIDENCY_PAGE_HALF;
+    int maxStart = PS2_RESIDENCY_SCENE_MAX_TILE - PS2_RESIDENCY_PAGE_SIZE;
+    if (minX < PS2_RESIDENCY_SCENE_MIN_TILE) minX = PS2_RESIDENCY_SCENE_MIN_TILE;
+    if (minZ < PS2_RESIDENCY_SCENE_MIN_TILE) minZ = PS2_RESIDENCY_SCENE_MIN_TILE;
+    if (minX > maxStart) minX = maxStart;
+    if (minZ > maxStart) minZ = maxStart;
 
     c->ps2ResidencyMinTileX = minX;
-    c->ps2ResidencyMaxTileX = minX + PS2_RESIDENCY_TILE_COUNT;
+    c->ps2ResidencyMaxTileX = minX + PS2_RESIDENCY_PAGE_SIZE;
     c->ps2ResidencyMinTileZ = minZ;
-    c->ps2ResidencyMaxTileZ = minZ + PS2_RESIDENCY_TILE_COUNT;
+    c->ps2ResidencyMaxTileZ = minZ + PS2_RESIDENCY_PAGE_SIZE;
     c->ps2ResidencyWindowValid = true;
 }
 
-static void client_ps2_maybe_shift_residency_window(Client *c) {
+__attribute__((section(".ps2_runtime_text"), noinline))
+static bool client_ps2_materialize_residency_rect(Client *c, int minX, int maxX, int minZ, int maxZ) {
+    if (!c || !c->ps2ResidencyWorld || minX >= maxX || minZ >= maxZ ||
+        !c->sceneMapLocData || !c->sceneMapLocDataIndexLength) {
+        return false;
+    }
+
+    World *world = (World *)c->ps2ResidencyWorld;
+    int8_t *data = calloc(100000, sizeof(int8_t));
+    if (!data) {
+        return false;
+    }
+
+    world->ps2ResidencyMinTileX = minX;
+    world->ps2ResidencyMaxTileX = maxX;
+    world->ps2ResidencyMinTileZ = minZ;
+    world->ps2ResidencyMaxTileZ = maxZ;
+    world->ps2IncrementalBuild = true;
+
+    p1isaac(c->out, 239);
+    for (int i = 0; i < c->sceneMapIndexLength; i++) {
+        int8_t *src = c->sceneMapLocData[i];
+        if (!src) {
+            continue;
+        }
+
+        Packet *buf = packet_new(src, c->sceneMapLocDataIndexLength[i]);
+        if (!buf) {
+            continue;
+        }
+        int length = g4(buf);
+        free(buf);
+        if (length <= 0 || length > 100000) {
+            continue;
+        }
+
+        bzip_decompress(data, src, c->sceneMapLocDataIndexLength[i] - 4, 4, c, 100000);
+        int x = (c->sceneMapIndex[i] >> 8) * 64 - c->sceneBaseTileX;
+        int z = (c->sceneMapIndex[i] & 0xff) * 64 - c->sceneBaseTileZ;
+        world_load_locations(world, c->scene, c->locList, c->levelCollisionMap, data, length, x, z);
+    }
+    free(data);
+
+    p1isaac(c->out, 239);
+    world_build(world, c->scene, c->levelCollisionMap, c);
+
+    for (int x = minX; x < maxX; x++) {
+        for (int z = minZ; z < maxZ; z++) {
+            sortObjStacks(c, x, z);
+        }
+    }
+
+    for (LocAddEntity *loc = (LocAddEntity *)linklist_head(c->spawned_locations); loc;
+         loc = (LocAddEntity *)linklist_next(c->spawned_locations)) {
+        if (loc->x >= minX && loc->x < maxX && loc->z >= minZ && loc->z < maxZ) {
+            addLoc(c, loc->plane, loc->x, loc->z, loc->locIndex, loc->angle, loc->shape, loc->layer);
+        }
+    }
+
+    world->ps2IncrementalBuild = false;
+    return true;
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
+static void client_ps2_maybe_expand_residency_window(Client *c) {
     if (!c || c->scene_state != 2 || !c->local_player || !c->ps2ResidencyWindowValid ||
-        !c->sceneMapLandData || !c->sceneMapLocData) {
+        !c->ps2ResidencyWorld) {
         return;
     }
 
-    int playerTileX = c->local_player->pathing_entity.pathTileX[0];
-    int playerTileZ = c->local_player->pathing_entity.pathTileZ[0];
-    int targetMinX = client_ps2_residency_axis_target(c->ps2ResidencyMinTileX, playerTileX);
-    int targetMinZ = client_ps2_residency_axis_target(c->ps2ResidencyMinTileZ, playerTileZ);
+    int x = c->local_player->pathing_entity.pathTileX[0];
+    int z = c->local_player->pathing_entity.pathTileZ[0];
+    int minX = c->ps2ResidencyMinTileX;
+    int maxX = c->ps2ResidencyMaxTileX;
+    int minZ = c->ps2ResidencyMinTileZ;
+    int maxZ = c->ps2ResidencyMaxTileZ;
 
-    if (targetMinX == c->ps2ResidencyMinTileX && targetMinZ == c->ps2ResidencyMinTileZ) {
+    // Add at most one non-overlapping strip per tick. The next 50 Hz tick can add the orthogonal
+    // strip for diagonal travel, avoiding duplicate loc insertion while keeping the player several
+    // tiles inside the already-materialised render margin.
+    if (minX > PS2_RESIDENCY_SCENE_MIN_TILE && x - minX <= PS2_RESIDENCY_EXPAND_MARGIN) {
+        if (client_ps2_materialize_residency_rect(c, PS2_RESIDENCY_SCENE_MIN_TILE, minX, minZ, maxZ)) {
+            c->ps2ResidencyMinTileX = PS2_RESIDENCY_SCENE_MIN_TILE;
+        }
         return;
     }
-
-    c->ps2ResidencyMinTileX = targetMinX;
-    c->ps2ResidencyMaxTileX = targetMinX + PS2_RESIDENCY_TILE_COUNT;
-    c->ps2ResidencyMinTileZ = targetMinZ;
-    c->ps2ResidencyMaxTileZ = targetMinZ + PS2_RESIDENCY_TILE_COUNT;
-
-    // Reuse the normal proven scene-rebuild path with the map squares already resident in
-    // sceneMapLandData/sceneMapLocData. world3d_reset() recycles the old scene arena first, so this
-    // moves the bounded residency window instead of accumulating another copy of static geometry.
-    client_build_scene(c);
+    if (maxX < PS2_RESIDENCY_SCENE_MAX_TILE && (maxX - 1) - x <= PS2_RESIDENCY_EXPAND_MARGIN) {
+        if (client_ps2_materialize_residency_rect(c, maxX, PS2_RESIDENCY_SCENE_MAX_TILE, minZ, maxZ)) {
+            c->ps2ResidencyMaxTileX = PS2_RESIDENCY_SCENE_MAX_TILE;
+        }
+        return;
+    }
+    if (minZ > PS2_RESIDENCY_SCENE_MIN_TILE && z - minZ <= PS2_RESIDENCY_EXPAND_MARGIN) {
+        if (client_ps2_materialize_residency_rect(c, minX, maxX, PS2_RESIDENCY_SCENE_MIN_TILE, minZ)) {
+            c->ps2ResidencyMinTileZ = PS2_RESIDENCY_SCENE_MIN_TILE;
+        }
+        return;
+    }
+    if (maxZ < PS2_RESIDENCY_SCENE_MAX_TILE && (maxZ - 1) - z <= PS2_RESIDENCY_EXPAND_MARGIN) {
+        if (client_ps2_materialize_residency_rect(c, minX, maxX, maxZ, PS2_RESIDENCY_SCENE_MAX_TILE)) {
+            c->ps2ResidencyMaxTileZ = PS2_RESIDENCY_SCENE_MAX_TILE;
+        }
+    }
 }
 #endif
 
@@ -6055,10 +6112,9 @@ void client_update_game(Client *c) {
     ps2_heap_after_packets_kb = mallinfo().fordblks / 1024;
     _TickPhase.packets_ms += rs2_now() - phase_t0;
 
-    // Scene rebuilds are safe at this phase boundary: packet processing (including any server-driven
-    // REBUILD_NORMAL/PLAYER_INFO build) is complete, while per-tick player/NPC/merge-loc iteration has
-    // not started yet. Never tear down/rebuild World3D from inside the entity-update sequence.
-    client_ps2_maybe_shift_residency_window(c);
+    // Packet processing is complete and entity iteration has not started. Additive residency can
+    // materialise one new strip here without tearing down the live World3D or invalidating iterators.
+    client_ps2_maybe_expand_residency_window(c);
 #endif
 
     #ifdef __PS2__
@@ -8672,6 +8728,12 @@ static void client_build_scene(Client *c) {
     pix3d_clear_texels();
     client_clear_caches();
     world3d_reset(c->scene);
+#ifdef __PS2__
+    if (c->ps2ResidencyWorld) {
+        world_free((World *)c->ps2ResidencyWorld);
+        c->ps2ResidencyWorld = NULL;
+    }
+#endif
     for (int level = 0; level < 4; level++) {
         collisionmap_reset(c->levelCollisionMap[level]);
     }
@@ -8689,6 +8751,7 @@ static void client_build_scene(Client *c) {
     world->ps2ResidencyMaxTileX = c->ps2ResidencyMaxTileX;
     world->ps2ResidencyMinTileZ = c->ps2ResidencyMinTileZ;
     world->ps2ResidencyMaxTileZ = c->ps2ResidencyMaxTileZ;
+    world->ps2IncrementalBuild = false;
 #endif
     _World.lowMemory = _World3D.lowMemory;
 #ifdef __PS2__
@@ -8913,7 +8976,11 @@ static void client_build_scene(Client *c) {
 
     lrucache_clear(_LocType.modelCacheStatic);
     pix3d_init_pool(PIX3D_POOL_COUNT);
+#ifdef __PS2__
+    c->ps2ResidencyWorld = world;
+#else
     world_free(world);
+#endif
 #ifdef __PS2__
     ps2_scene_checkpoint(c, "scene: build_scene complete");
     ps2_phase_checkpoint(c, "scene: build_scene complete");
@@ -9979,6 +10046,13 @@ void client_logout(Client *c) {
     inputtracking_set_disabled(&_InputTracking);
     client_clear_caches();
     world3d_reset(c->scene);
+#ifdef __PS2__
+    if (c->ps2ResidencyWorld) {
+        world_free((World *)c->ps2ResidencyWorld);
+        c->ps2ResidencyWorld = NULL;
+    }
+    c->ps2ResidencyWindowValid = false;
+#endif
 
     for (int level = 0; level < 4; level++) {
         collisionmap_reset(c->levelCollisionMap[level]);
@@ -14007,6 +14081,12 @@ init:
 
 void client_free(Client *c) {
     free(c->stream);
+#ifdef __PS2__
+    if (c->ps2ResidencyWorld) {
+        world_free((World *)c->ps2ResidencyWorld);
+        c->ps2ResidencyWorld = NULL;
+    }
+#endif
     client_scenemap_free(c);
     gameshell_free(c->shell);
     pixfont_free(c->font_plain11);
