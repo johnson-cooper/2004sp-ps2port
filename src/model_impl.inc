@@ -1259,16 +1259,35 @@ Model *model_copy_faces(Model *src, bool copyVertexY, bool copyFaces, bool use_a
             memcpy(new->face_infos, src->face_infos, new->face_count * sizeof(int));
         }
 
+#ifdef __PS2__
+        new->vertex_normal = use_allocator
+                                 ? calloc(new->vertex_count, sizeof(VertexNormal *))
+                                 : rs2_malloc(use_allocator, new->vertex_count * sizeof(VertexNormal *));
+#else
         new->vertex_normal = rs2_malloc(use_allocator, new->vertex_count * sizeof(VertexNormal *));
+#endif
 #ifdef __PS2__
         if (!ps2_check_model_alloc(new->vertex_normal, "model_copy_faces: vertex_normal")) {
             return NULL;
         }
 #endif
         for (int v = 0; v < new->vertex_count; v++) {
+#ifdef __PS2__
+            new->vertex_normal[v] = use_allocator
+                                        ? malloc(sizeof(VertexNormal))
+                                        : rs2_malloc(use_allocator, sizeof(VertexNormal));
+#else
             new->vertex_normal[v] = rs2_malloc(use_allocator, sizeof(VertexNormal));
+#endif
 #ifdef __PS2__
             if (!ps2_check_model_alloc(new->vertex_normal[v], "model_copy_faces: vertex_normal[v]")) {
+                if (use_allocator) {
+                    for (int cleanup = 0; cleanup < v; cleanup++) {
+                        free(new->vertex_normal[cleanup]);
+                    }
+                    free(new->vertex_normal);
+                    new->vertex_normal = NULL;
+                }
                 return NULL;
             }
 #endif
@@ -1943,6 +1962,13 @@ bool model_point_within_triangle(int x, int y, int ya, int yb, int yc, int xa, i
 }
 
 void model_calculate_normals(Model *m, int light_ambient, int light_attenuation, int lightsrc_x, int lightsrc_y, int lightsrc_z, bool apply_lighting, bool use_allocator) {
+#ifdef __PS2__
+    // Vertex normals are build-time lighting scratch for ordinary static models. When the final
+    // model itself is scene-arena-backed but does not use sharelight, allocate only this scratch on
+    // libc heap so model_apply_lighting() can return it immediately instead of permanently burning
+    // bump-arena space until the next REBUILD_NORMAL.
+    const bool ps2_heap_lighting_normals = apply_lighting && use_allocator;
+#endif
 #ifdef USE_FLOATS
     // 2026-09-14: PS2's EE FPU is single-precision only per the original C client author - every
     // `double`/sqrt() in this file (there's no shortage of them, one or more per face/vertex) was
@@ -1983,7 +2009,13 @@ void model_calculate_normals(Model *m, int light_ambient, int light_attenuation,
     }
 
     if (!m->vertex_normal) {
+#ifdef __PS2__
+        m->vertex_normal = ps2_heap_lighting_normals
+                               ? calloc(m->vertex_count, sizeof(VertexNormal *))
+                               : rs2_calloc(use_allocator, m->vertex_count, sizeof(VertexNormal *));
+#else
         m->vertex_normal = rs2_calloc(use_allocator, m->vertex_count, sizeof(VertexNormal *));
+#endif
 #ifdef __PS2__
         if (!m->vertex_normal) {
             rs2_error("model_calculate_normals: OOM allocating vertex_normal array (vertex_count=%d)\n", m->vertex_count);
@@ -1992,7 +2024,13 @@ void model_calculate_normals(Model *m, int light_ambient, int light_attenuation,
         }
 #endif
         for (int v = 0; v < m->vertex_count; v++) {
+#ifdef __PS2__
+            m->vertex_normal[v] = ps2_heap_lighting_normals
+                                      ? calloc(1, sizeof(VertexNormal))
+                                      : rs2_calloc(use_allocator, 1, sizeof(VertexNormal));
+#else
             m->vertex_normal[v] = rs2_calloc(use_allocator, 1, sizeof(VertexNormal));
+#endif
 #ifdef __PS2__
             // Same OOM hazard as above, one level deeper: this specific write (m->vertex_normal[a]->x
             // += nx; etc., in the per-face loop below and in model_apply_lighting()) is the exact
@@ -2000,6 +2038,13 @@ void model_calculate_normals(Model *m, int light_ambient, int light_attenuation,
             if (!m->vertex_normal[v]) {
                 rs2_error("model_calculate_normals: OOM allocating vertex_normal[%d] (vertex_count=%d)\n", v, m->vertex_count);
                 ps2_scene_checkpoint(ps2_crash_client, "calculate_normals: OOM on vertex_normal[v]");
+                if (ps2_heap_lighting_normals) {
+                    for (int cleanup = 0; cleanup < v; cleanup++) {
+                        free(m->vertex_normal[cleanup]);
+                    }
+                    free(m->vertex_normal);
+                    m->vertex_normal = NULL;
+                }
                 return;
             }
 #endif
@@ -2108,7 +2153,12 @@ void model_calculate_normals(Model *m, int light_ambient, int light_attenuation,
     }
 #endif
     if (apply_lighting) {
+#ifdef __PS2__
+        model_apply_lighting(m, light_ambient, attenuation, lightsrc_x, lightsrc_y, lightsrc_z,
+                             ps2_heap_lighting_normals || !use_allocator);
+#else
         model_apply_lighting(m, light_ambient, attenuation, lightsrc_x, lightsrc_y, lightsrc_z, !use_allocator);
+#endif
     } else {
         m->vertex_normal_original = rs2_malloc(use_allocator, m->vertex_count * sizeof(VertexNormal *));
 #ifdef __PS2__

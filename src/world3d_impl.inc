@@ -1140,6 +1140,13 @@ int world3d_get_info(World3D *world3d, int level, int x, int z, int bitset) {
 }
 
 void world3d_build_models(World3D *world3d, int lightAmbient, int lightAttenuation, int lightSrcX, int lightSrcY, int lightSrcZ) {
+#ifdef __PS2__
+    // sharelight placement copies use libc-heap vertex normals on PS2. They are needed only through
+    // this merge pass, so final lighting can free them immediately instead of retaining dead scratch.
+    const bool freeMergedNormals = true;
+#else
+    const bool freeMergedNormals = false;
+#endif
 #ifdef USE_FLOATS
     int lightMagnitude = (int)sqrtf((float)(lightSrcX * lightSrcX + lightSrcY * lightSrcY + lightSrcZ * lightSrcZ));
 #else
@@ -1161,23 +1168,23 @@ void world3d_build_models(World3D *world3d, int lightAmbient, int lightAttenuati
                     if (wall->modelB && wall->modelB->vertex_normal) {
                         world3d_merge_locnormals(world3d, level, tileX, tileZ, 1, 1, wall->modelB);
                         world3d_merge_normals(world3d, wall->modelA, wall->modelB, 0, 0, 0, false);
-                        model_apply_lighting(wall->modelB, lightAmbient, attenuation, lightSrcX, lightSrcY, lightSrcZ, false);
+                        model_apply_lighting(wall->modelB, lightAmbient, attenuation, lightSrcX, lightSrcY, lightSrcZ, freeMergedNormals);
                     }
-                    model_apply_lighting(wall->modelA, lightAmbient, attenuation, lightSrcX, lightSrcY, lightSrcZ, false);
+                    model_apply_lighting(wall->modelA, lightAmbient, attenuation, lightSrcX, lightSrcY, lightSrcZ, freeMergedNormals);
                 }
 
                 for (int i = 0; i < tile->locCount; i++) {
                     Location *loc = tile->locs[i];
                     if (loc && loc->model && loc->model->vertex_normal) {
                         world3d_merge_locnormals(world3d, level, tileX, tileZ, loc->maxSceneTileX + 1 - loc->minSceneTileX, loc->maxSceneTileZ - loc->minSceneTileZ + 1, loc->model);
-                        model_apply_lighting(loc->model, lightAmbient, attenuation, lightSrcX, lightSrcY, lightSrcZ, false);
+                        model_apply_lighting(loc->model, lightAmbient, attenuation, lightSrcX, lightSrcY, lightSrcZ, freeMergedNormals);
                     }
                 }
 
                 GroundDecor *decor = tile->groundDecor;
                 if (decor && decor->model->vertex_normal) {
                     world3d_merge_grounddecorationnormals(world3d, level, tileX, tileZ, decor->model);
-                    model_apply_lighting(decor->model, lightAmbient, attenuation, lightSrcX, lightSrcY, lightSrcZ, false);
+                    model_apply_lighting(decor->model, lightAmbient, attenuation, lightSrcX, lightSrcY, lightSrcZ, freeMergedNormals);
                 }
             }
         }
@@ -1454,24 +1461,32 @@ void world3d_draw(World3D *world3d, int eyeX, int eyeY, int eyeZ, int topLevel, 
 #endif
 
     _World3D.minDrawTileX = _World3D.eyeTileX - drawRadius;
-    if (_World3D.minDrawTileX < 0) {
-        _World3D.minDrawTileX = 0;
-    }
+#ifdef __PS2__
+    if (_World3D.minDrawTileX < PS2_TERRAIN_MIN_TILE) _World3D.minDrawTileX = PS2_TERRAIN_MIN_TILE;
+#else
+    if (_World3D.minDrawTileX < 0) _World3D.minDrawTileX = 0;
+#endif
 
     _World3D.minDrawTileZ = _World3D.eyeTileZ - drawRadius;
-    if (_World3D.minDrawTileZ < 0) {
-        _World3D.minDrawTileZ = 0;
-    }
+#ifdef __PS2__
+    if (_World3D.minDrawTileZ < PS2_TERRAIN_MIN_TILE) _World3D.minDrawTileZ = PS2_TERRAIN_MIN_TILE;
+#else
+    if (_World3D.minDrawTileZ < 0) _World3D.minDrawTileZ = 0;
+#endif
 
     _World3D.maxDrawTileX = _World3D.eyeTileX + drawRadius;
-    if (_World3D.maxDrawTileX > world3d->maxTileX) {
-        _World3D.maxDrawTileX = world3d->maxTileX;
-    }
+#ifdef __PS2__
+    if (_World3D.maxDrawTileX > PS2_TERRAIN_MAX_X_TILE) _World3D.maxDrawTileX = PS2_TERRAIN_MAX_X_TILE;
+#else
+    if (_World3D.maxDrawTileX > world3d->maxTileX) _World3D.maxDrawTileX = world3d->maxTileX;
+#endif
 
     _World3D.maxDrawTileZ = _World3D.eyeTileZ + drawRadius;
-    if (_World3D.maxDrawTileZ > world3d->maxTileZ) {
-        _World3D.maxDrawTileZ = world3d->maxTileZ;
-    }
+#ifdef __PS2__
+    if (_World3D.maxDrawTileZ > PS2_TERRAIN_MAX_Z_TILE) _World3D.maxDrawTileZ = PS2_TERRAIN_MAX_Z_TILE;
+#else
+    if (_World3D.maxDrawTileZ > world3d->maxTileZ) _World3D.maxDrawTileZ = world3d->maxTileZ;
+#endif
 
     world3d_update_activeoccluders();
     _World3D.tilesRemaining = 0;
