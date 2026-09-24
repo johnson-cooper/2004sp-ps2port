@@ -486,6 +486,15 @@ struct Client {
     int midiCrc;
     int midiSize;
     char currentMidi[MAX_STR];
+#ifdef __PS2__
+    // Heap-owned runtime state for the sliding 80x80 scene-residency window. Keep this at the end of
+    // Client so existing field offsets stay unchanged and no new normal-BSS globals are introduced.
+    int ps2ResidencyMinTileX;
+    int ps2ResidencyMaxTileX;
+    int ps2ResidencyMinTileZ;
+    int ps2ResidencyMaxTileZ;
+    bool ps2ResidencyWindowValid;
+#endif
 };
 
 void client_init_global(void);
