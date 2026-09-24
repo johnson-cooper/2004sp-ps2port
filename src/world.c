@@ -79,6 +79,12 @@ World *world_new(int maxTileX, int maxTileZ, int (*levelHeightmap)[104 + 1][104 
     world->levelTileOverlayRotation = calloc(4, sizeof(*world->levelTileOverlayRotation));
 
     world->levelOccludemap = calloc(4, sizeof(*world->levelOccludemap));
+#ifdef __PS2__
+    world->ps2ResidencyMinTileX = PS2_LOC_MIN_TILE;
+    world->ps2ResidencyMaxTileX = PS2_LOC_MAX_TILE;
+    world->ps2ResidencyMinTileZ = PS2_LOC_MIN_TILE;
+    world->ps2ResidencyMaxTileZ = PS2_LOC_MAX_TILE;
+#endif
 
     world->levelShademap = calloc(4, sizeof(*world->levelShademap));
 
@@ -481,12 +487,13 @@ void world_load_locations(World *world, World3D *scene, LinkList *locs, Collisio
 #endif
 
 #ifdef __PS2__
-    // Match static location placement to the same bounded local traversal window as terrain. The
-    // previous fixed 32x32 block (32..63) left most of the now-traversable 80x80 scene without
-    // walls/objects and made them disappear after normal scene recentres. If this proves too costly,
-    // replace it with a moving/recycled loc window rather than expanding residency further.
-    const int ps2LocMinTile = PS2_TERRAIN_MIN_TILE;
-    const int ps2LocMaxTile = PS2_TERRAIN_MAX_TILE;
+    // Static loc placement follows the same runtime-selected bounded window as terrain. The window
+    // is still only 80x80; client.c moves it before the player reaches a scene edge and rebuilds the
+    // scene from the already-loaded map squares.
+    const int ps2LocMinTileX = world->ps2ResidencyMinTileX;
+    const int ps2LocMaxTileX = world->ps2ResidencyMaxTileX;
+    const int ps2LocMinTileZ = world->ps2ResidencyMinTileZ;
+    const int ps2LocMaxTileZ = world->ps2ResidencyMaxTileZ;
 #endif
 
     while (true) {
@@ -596,7 +603,7 @@ void world_load_locations(World *world, World3D *scene, LinkList *locs, Collisio
 #else
             if (stx > 0 && stz > 0 && stx < 104 - 1 && stz < 104 - 1
 #ifdef __PS2__
-                && stx >= ps2LocMinTile && stx < ps2LocMaxTile && stz >= ps2LocMinTile && stz < ps2LocMaxTile
+                && stx >= ps2LocMinTileX && stx < ps2LocMaxTileX && stz >= ps2LocMinTileZ && stz < ps2LocMaxTileZ
 #endif
             ) {
                 int currentLevel = level;
@@ -1194,11 +1201,11 @@ void world_build(World *world, World3D *scene, CollisionMap **collision) {
 
                     if (z0 >= 1 && z0 < world->maxTileZ - 1
 #ifdef __PS2__
-                        // Only materialise Ground nodes around the local player.
-                        // Height/collision arrays retain the full 104x104 map;
-                        // the outer terrain is intentionally non-resident until
-                        // a normal scene rebuild recentres this window.
-                        && x0 >= PS2_TERRAIN_MIN_TILE && x0 < PS2_TERRAIN_MAX_TILE && z0 >= PS2_TERRAIN_MIN_TILE && z0 < PS2_TERRAIN_MAX_TILE
+                        // Only materialise Ground nodes inside the runtime-selected 80x80 PS2
+                        // residency window. Height/collision arrays retain the full 104x104 map;
+                        // client.c slides this bounded window before the player reaches its edge.
+                        && x0 >= world->ps2ResidencyMinTileX && x0 < world->ps2ResidencyMaxTileX &&
+                           z0 >= world->ps2ResidencyMinTileZ && z0 < world->ps2ResidencyMaxTileZ
 #endif
                         && (!_World.lowMemory || ((world->levelTileFlags[level][x0][z0] & 0x10) == 0 && world_get_drawlevel(world, level, x0, z0) == _World.levelBuilt))) {
                         int underlayId = world->levelTileUnderlayIds[level][x0][z0] & 0xff;
