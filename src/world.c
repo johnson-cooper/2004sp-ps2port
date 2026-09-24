@@ -84,6 +84,7 @@ World *world_new(int maxTileX, int maxTileZ, int (*levelHeightmap)[104 + 1][104 
     world->ps2ResidencyMaxTileX = PS2_LOC_MAX_TILE;
     world->ps2ResidencyMinTileZ = PS2_LOC_MIN_TILE;
     world->ps2ResidencyMaxTileZ = PS2_LOC_MAX_TILE;
+    world->ps2IncrementalBuild = false;
 #endif
 
     world->levelShademap = calloc(4, sizeof(*world->levelShademap));
@@ -1047,19 +1048,27 @@ void world_build(World *world, World3D *scene, CollisionMap **collision) {
     ps2_phase_checkpoint(c, "collision flags done");
 #endif
 
-    _World.randomHueOffset += (int)(jrand() * 5.0) - 2;
-    if (_World.randomHueOffset < -8) {
-        _World.randomHueOffset = -8;
-    } else if (_World.randomHueOffset > 8) {
-        _World.randomHueOffset = 8;
-    }
+#ifdef __PS2__
+    // Incremental residency must match the colours of the already-live page. Do not perturb the
+    // scene-wide random tint a second time when adding a strip to the same server scene.
+    if (!world->ps2IncrementalBuild) {
+#endif
+        _World.randomHueOffset += (int)(jrand() * 5.0) - 2;
+        if (_World.randomHueOffset < -8) {
+            _World.randomHueOffset = -8;
+        } else if (_World.randomHueOffset > 8) {
+            _World.randomHueOffset = 8;
+        }
 
-    _World.randomLightnessOffset += (int)(jrand() * 5.0) - 2;
-    if (_World.randomLightnessOffset < -16) {
-        _World.randomLightnessOffset = -16;
-    } else if (_World.randomLightnessOffset > 16) {
-        _World.randomLightnessOffset = 16;
+        _World.randomLightnessOffset += (int)(jrand() * 5.0) - 2;
+        if (_World.randomLightnessOffset < -16) {
+            _World.randomLightnessOffset = -16;
+        } else if (_World.randomLightnessOffset > 16) {
+            _World.randomLightnessOffset = 16;
+        }
+#ifdef __PS2__
     }
+#endif
 
     for (int level = 0; level < 4; level++) {
 #ifdef __PS2__
@@ -1125,7 +1134,7 @@ void world_build(World *world, World3D *scene, CollisionMap **collision) {
             // 16 rows without the I/O itself becoming a confound (see world_load_locations' own
             // throttling note for why unconditional per-iteration logging was rejected elsewhere in
             // this file).
-            if (x0 >= 0 && x0 % 16 == 0) {
+            if (!world->ps2IncrementalBuild && x0 >= 0 && x0 % 16 == 0) {
                 snprintf(ps2_stage_label, sizeof(ps2_stage_label), "land L=%d X=%d", level, x0);
                 rs2_log("%s\n", ps2_stage_label);
                 ps2_boot_progress((x0 * 100) / (world->maxTileX + 10));
@@ -1347,8 +1356,21 @@ void world_build(World *world, World3D *scene, CollisionMap **collision) {
     ps2_phase_checkpoint(c, "bridges begin");
 #endif
 
-    for (int x = 0; x < world->maxTileX; x++) {
-        for (int z = 0; z < world->maxTileZ; z++) {
+#ifdef __PS2__
+    // A bridge tile must only be shifted once. During an additive strip build, restrict this pass
+    // to the new rectangle so already-live bridge columns are never shifted down a second time.
+    int bridgeMinX = world->ps2IncrementalBuild ? world->ps2ResidencyMinTileX : 0;
+    int bridgeMaxX = world->ps2IncrementalBuild ? world->ps2ResidencyMaxTileX : world->maxTileX;
+    int bridgeMinZ = world->ps2IncrementalBuild ? world->ps2ResidencyMinTileZ : 0;
+    int bridgeMaxZ = world->ps2IncrementalBuild ? world->ps2ResidencyMaxTileZ : world->maxTileZ;
+#else
+    int bridgeMinX = 0;
+    int bridgeMaxX = world->maxTileX;
+    int bridgeMinZ = 0;
+    int bridgeMaxZ = world->maxTileZ;
+#endif
+    for (int x = bridgeMinX; x < bridgeMaxX; x++) {
+        for (int z = bridgeMinZ; z < bridgeMaxZ; z++) {
             if ((world->levelTileFlags[1][x][z] & 0x2) == 2) {
                 world3d_set_bridge(scene, x, z);
             }
@@ -1359,7 +1381,15 @@ void world_build(World *world, World3D *scene, CollisionMap **collision) {
     ps2_phase_checkpoint(c, "bridges done");
 #endif
 
+#ifdef __PS2__
+    // Initial construction generates the normal occluder set. Incremental strips deliberately skip
+    // this destructive bit-consumption pass: rerunning it against the retained World would either
+    // duplicate old occluders or require rebuilding the entire occluder list. Missing occluders only
+    // reduce culling efficiency; they do not hide the newly materialised terrain/locs.
+    if (!_World.fullbright && !world->ps2IncrementalBuild) {
+#else
     if (!_World.fullbright) {
+#endif
         int wall0 = 0x1; // world->flag is set by walls with rotation 0 or 2
         int wall1 = 0x2; // world->flag is set by walls with rotation 1 or 3
         int floor = 0x4; // world->flag is set by floors which are flat
