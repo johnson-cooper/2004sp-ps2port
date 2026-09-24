@@ -21,7 +21,10 @@ extern unsigned int ps2_scene_arena_generation;
 // touches the Model's embedded links or allocates heap memory.
 #define PS2_OBJ_SCENE_CACHE_CAPACITY 50
 #define PS2_LOC_STATIC_CACHE_CAPACITY 500
-#define PS2_LOC_DYNAMIC_CACHE_CAPACITY 150
+// Keep enough same-scene loc variants resident to avoid bump-arena duplication in dense cities.
+// The side cache is BSS-backed and generation-scoped, so this adds only a few KiB and stays safe
+// across bump_allocator_reset().
+#define PS2_LOC_DYNAMIC_CACHE_CAPACITY 512
 
 typedef struct {
     int64_t key;
