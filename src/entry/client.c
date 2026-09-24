@@ -7024,31 +7024,20 @@ bool client_read(Client *c) {
 #endif
                 int locSize = 0;
 #ifdef __PS2__
-                // Keep loc-file loading aligned with the static-loc residency window used by
-                // world_load_locations(). The old fixed 32..63 gate made loaded loc mapsquares
-                // depend on 64-tile mapsquare alignment, leaving holes inside the already-resident
-                // scene until a later REBUILD_NORMAL moved the scene base.
-                const int ps2ActiveLocMin = PS2_LOC_MIN_TILE;
-                const int ps2ActiveLocMax = PS2_LOC_MAX_TILE; // exclusive
-                int squareLocalX = mapsquareX * 64 - c->sceneBaseTileX;
-                int squareLocalZ = mapsquareZ * 64 - c->sceneBaseTileZ;
-                bool ps2LoadLoc = squareLocalX < ps2ActiveLocMax && squareLocalX + 64 > ps2ActiveLocMin &&
-                                  squareLocalZ < ps2ActiveLocMax && squareLocalZ + 64 > ps2ActiveLocMin;
-#if PS2_DEFER_STATIC_LOCATIONS
-                // The location stream is the only remaining work between the
-                // confirmed land-decode checkpoint and the hardware freeze.
-                // Do not read or decompress it in the synchronous rebuild.
-                // Terrain, players, NPCs, and server movement remain live.
-                ps2LoadLoc = false;
-#endif
-                if (ps2LoadLoc) {
-#endif
-                    int8_t *locData = client_load_map_file("l", mapsquareX, mapsquareZ, &locSize);
-                    if (locData) {
-                        c->sceneMapLocDataIndexLength[i] = locSize;
-                        c->sceneMapLocData[i] = locData;
-                    }
-#ifdef __PS2__
+                // Do not retain every compressed loc mapsquare during REBUILD_NORMAL. Full 1..102
+                // coverage remains correct, but holding up to nine lX_Z blobs while the dense static
+                // scene is constructed creates an avoidable EE-heap peak. client_build_scene() loads
+                // one overlapping loc square at a time, decompresses it into the shared scratch
+                // buffer, frees the compressed blob, then builds that square before opening the next.
+                // The pointer arrays stay allocated so protocol/map-data paths and cleanup semantics
+                // remain unchanged; their entries simply stay NULL for local-cache locs on PS2.
+                (void)mapsquareX;
+                (void)mapsquareZ;
+#else
+                int8_t *locData = client_load_map_file("l", mapsquareX, mapsquareZ, &locSize);
+                if (locData) {
+                    c->sceneMapLocDataIndexLength[i] = locSize;
+                    c->sceneMapLocData[i] = locData;
                 }
 #endif
 #if defined(__PS2__) && PS2_CHECKPOINTS_ENABLED
@@ -8711,6 +8700,14 @@ static void client_build_scene(Client *c) {
 
         if (src) {
             Packet *buf = packet_new(src, c->sceneMapLandDataIndexLength[i]);
+#ifdef __PS2__
+            if (!buf) {
+                free(src);
+                c->sceneMapLandData[i] = NULL;
+                c->sceneMapLandDataIndexLength[i] = 0;
+                continue;
+            }
+#endif
             int length = g4(buf);
 #ifdef __PS2__
             // bzip_decompress() writes into `data` (the fixed 100000-byte scratch buffer above) with
@@ -8725,6 +8722,9 @@ static void client_build_scene(Client *c) {
                           "100000-byte scratch buffer, skipping to avoid heap corruption\n",
                           c->sceneMapIndex[i] >> 8, c->sceneMapIndex[i] & 0xff, length);
                 free(buf);
+                free(src);
+                c->sceneMapLandData[i] = NULL;
+                c->sceneMapLandDataIndexLength[i] = 0;
                 continue;
             }
 #endif
@@ -8738,6 +8738,13 @@ static void client_build_scene(Client *c) {
             bzip_decompress(data, src, c->sceneMapLandDataIndexLength[i] - 4, 4);
 #endif
             free(buf);
+#ifdef __PS2__
+            // world_load_ground() consumes only the decompressed scratch data. Drop the compressed
+            // source now rather than carrying every land blob through loc/model construction.
+            free(src);
+            c->sceneMapLandData[i] = NULL;
+            c->sceneMapLandDataIndexLength[i] = 0;
+#endif
             world_load_ground(world, (c->sceneCenterZoneX - 6) * 8, (c->sceneCenterZoneZ - 6) * 8, x, z, data, length);
         } else if (c->sceneCenterZoneZ < 800) {
             clearLandscape(world, z, x, 64, 64);
@@ -8808,9 +8815,39 @@ static void client_build_scene(Client *c) {
 #else
         int i = locOrder;
 #endif
+        int locCompressedSize = c->sceneMapLocDataIndexLength[i];
         int8_t *src = c->sceneMapLocData[i];
+#ifdef __PS2__
+        bool ps2LocLoadedOnDemand = false;
+#if !PS2_DEFER_STATIC_LOCATIONS
+        if (!src) {
+            int mapsquareX = c->sceneMapIndex[i] >> 8;
+            int mapsquareZ = c->sceneMapIndex[i] & 0xff;
+            int squareLocalX = mapsquareX * 64 - c->sceneBaseTileX;
+            int squareLocalZ = mapsquareZ * 64 - c->sceneBaseTileZ;
+            bool ps2LoadLoc = squareLocalX < PS2_LOC_MAX_TILE && squareLocalX + 64 > PS2_LOC_MIN_TILE &&
+                              squareLocalZ < PS2_LOC_MAX_TILE && squareLocalZ + 64 > PS2_LOC_MIN_TILE;
+            if (ps2LoadLoc) {
+                src = client_load_map_file("l", mapsquareX, mapsquareZ, &locCompressedSize);
+                ps2LocLoadedOnDemand = src != NULL;
+            }
+        }
+#endif
+#endif
         if (src) {
-            Packet *buf = packet_new(src, c->sceneMapLocDataIndexLength[i]);
+            Packet *buf = packet_new(src, locCompressedSize);
+#ifdef __PS2__
+            if (!buf) {
+                if (ps2LocLoadedOnDemand) {
+                    free(src);
+                } else if (c->sceneMapLocData[i] == src) {
+                    free(src);
+                    c->sceneMapLocData[i] = NULL;
+                    c->sceneMapLocDataIndexLength[i] = 0;
+                }
+                continue;
+            }
+#endif
             int length = g4(buf);
 #ifdef __PS2__
             // Same overflow guard as the land loop above, and the prime suspect for THIS specific
@@ -8822,6 +8859,13 @@ static void client_build_scene(Client *c) {
                           "100000-byte scratch buffer, skipping to avoid heap corruption\n",
                           c->sceneMapIndex[i] >> 8, c->sceneMapIndex[i] & 0xff, length);
                 free(buf);
+                if (ps2LocLoadedOnDemand) {
+                    free(src);
+                } else if (c->sceneMapLocData[i] == src) {
+                    free(src);
+                    c->sceneMapLocData[i] = NULL;
+                    c->sceneMapLocDataIndexLength[i] = 0;
+                }
                 continue;
             }
             // Real-hardware testing narrowed a hang to somewhere between "scene: land decode done"
@@ -8838,17 +8882,28 @@ static void client_build_scene(Client *c) {
             snprintf(loc_pre_msg, sizeof(loc_pre_msg), "loc #%d/%d %d_%d pre-decompress (len=%d)", i + 1, maps,
                      c->sceneMapIndex[i] >> 8, c->sceneMapIndex[i] & 0xff, length);
             ps2_scene_checkpoint(c, loc_pre_msg);
-            bzip_decompress(data, src, c->sceneMapLocDataIndexLength[i] - 4, 4, c, 100000);
+            bzip_decompress(data, src, locCompressedSize - 4, 4, c, 100000);
             {
                 char loc_bzip_done_msg[72];
                 snprintf(loc_bzip_done_msg, sizeof(loc_bzip_done_msg), "loc #%d/%d bzip returned", i + 1, maps);
                 ps2_scene_checkpoint(c, loc_bzip_done_msg);
             }
 #else
-            bzip_decompress(data, src, c->sceneMapLocDataIndexLength[i] - 4, 4);
+            bzip_decompress(data, src, locCompressedSize - 4, 4);
 #endif
             free(buf);
 #ifdef __PS2__
+            // The decompressed loc stream now lives in `data`; release the compressed mapsquare
+            // before loctype/model construction, which is the dense-city memory peak.
+            if (ps2LocLoadedOnDemand) {
+                free(src);
+                src = NULL;
+            } else if (c->sceneMapLocData[i] == src) {
+                free(src);
+                c->sceneMapLocData[i] = NULL;
+                c->sceneMapLocDataIndexLength[i] = 0;
+                src = NULL;
+            }
             {
                 char loc_buf_free_msg[72];
                 snprintf(loc_buf_free_msg, sizeof(loc_buf_free_msg), "loc #%d/%d packet freed", i + 1, maps);
