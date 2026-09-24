@@ -7024,12 +7024,12 @@ bool client_read(Client *c) {
 #endif
                 int locSize = 0;
 #ifdef __PS2__
-                // PS2 streaming mode: retain only the mapsquares that overlap
-                // the 32x32 local-player window.  Do this before the file read
-                // and bzip pass, rather than merely ignoring distant locs after
-                // decoding them.  The 104x104 terrain grid is still loaded.
-                const int ps2ActiveLocMin = 32;
-                const int ps2ActiveLocMax = 64; // exclusive
+                // Keep loc-file loading aligned with the static-loc residency window used by
+                // world_load_locations(). The old fixed 32..63 gate made loaded loc mapsquares
+                // depend on 64-tile mapsquare alignment, leaving holes inside the already-resident
+                // scene until a later REBUILD_NORMAL moved the scene base.
+                const int ps2ActiveLocMin = PS2_LOC_MIN_TILE;
+                const int ps2ActiveLocMax = PS2_LOC_MAX_TILE; // exclusive
                 int squareLocalX = mapsquareX * 64 - c->sceneBaseTileX;
                 int squareLocalZ = mapsquareZ * 64 - c->sceneBaseTileZ;
                 bool ps2LoadLoc = squareLocalX < ps2ActiveLocMax && squareLocalX + 64 > ps2ActiveLocMin &&
