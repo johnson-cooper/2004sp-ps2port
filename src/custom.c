@@ -180,6 +180,9 @@ void draw_info_overlay(Client *c) {
                 ps2_world3d_decorative_tiles_travelled());
         drawStringRight(c->font_plain11, x, y, buf, YELLOW, true);
         y += 13;
+        sprintf(buf, "Grace:%d/30", ps2_world3d_decorative_scene_frames());
+        drawStringRight(c->font_plain11, x, y, buf, YELLOW, true);
+        y += 13;
 #endif
 #if defined(__vita__)
 #include <psp2/power.h>

@@ -120,6 +120,7 @@ int ps2_world3d_decorative_radius(void);
 int ps2_world3d_decorative_emergency_active(void);
 int ps2_world3d_decorative_trigger_armed(void);
 int ps2_world3d_decorative_tiles_travelled(void);
+int ps2_world3d_decorative_scene_frames(void);
 #endif
 void world3d_draw_tile(World3D *world3d, Ground *next, bool checkAdjacent, int loopCycle);
 void world3d_draw_tileunderlay(World3D *world3d, TileUnderlay *underlay, int level, int tileX, int tileZ, int sinEyePitch, int cosEyePitch, int sinEyeYaw, int cosEyeYaw);

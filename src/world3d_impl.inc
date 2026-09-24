@@ -196,6 +196,10 @@ int ps2_world3d_decorative_tiles_travelled(void) {
     return ps2_decorative_tiles_travelled;
 }
 
+int ps2_world3d_decorative_scene_frames(void) {
+    return ps2_decorative_scene_frames;
+}
+
 static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
     if ((bitset & 0x40000000) == 0) {
         return true;
