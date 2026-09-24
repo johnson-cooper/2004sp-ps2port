@@ -218,22 +218,30 @@ int ps2_world3d_decorative_scene_frames(void) {
 }
 
 static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int sceneX, int sceneZ) {
-    // Normal PS2 rendering no longer applies the old always-on 6/8/10-tile loc-detail culls: if a
-    // loc successfully reached World3D and its tile is inside the normal camera traversal, draw it.
-    // Keep the hardware-proven emergency controller, however. Under sustained <=15 FPS only dense
-    // shape-10/11 centrepieces collapse to the adaptive 2->4->6->8->10 recovery radius.
     if ((bitset & 0x40000000) == 0) {
         return true;
     }
 
-    int emergencyRadius = ps2_live_decorative_radius();
     int shape = info & 0x1f;
-    if (shape != CENTREPIECE_STRAIGHT && shape != CENTREPIECE_DIAGONAL) {
+    bool gameplayImportant = (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0;
+    int radius = PS2_INACTIVE_LOC_RENDER_RADIUS;
+
+    // Keep gameplay-relevant map locs visible at the full camera traversal radius. Ordinary walls
+    // are handled by the wall path and are not subject to this helper, preserving building shells.
+    if (gameplayImportant) {
         return true;
     }
 
-    if (emergencyRadius >= PS2_INACTIVE_LOC_RENDER_RADIUS) {
-        return true;
+    if (shape == CENTREPIECE_STRAIGHT || shape == CENTREPIECE_DIAGONAL) {
+        // Healthy mode uses the normal 10-tile decorative radius. Emergency mode retains the
+        // hardware-proven 2->4->6->8->10 adaptive recovery behavior.
+        radius = ps2_live_decorative_radius();
+    } else if (shape == GROUNDDECOR) {
+        radius = PS2_GROUND_DECOR_RENDER_RADIUS;
+    } else if (shape >= WALLDECOR_STRAIGHT_NOOFFSET && shape <= WALLDECOR_DIAGONAL_BOTH) {
+        radius = PS2_WALL_DECOR_RENDER_RADIUS;
+    } else if (shape >= ROOF_STRAIGHT && shape <= ROOFEDGE_SQUARECORNER) {
+        radius = PS2_ROOF_RENDER_RADIUS;
     }
 
     int anchorX;
@@ -243,7 +251,7 @@ static inline bool ps2_should_draw_loc_detail(int bitset, int8_t info, int scene
     int dz = (sceneZ >> 7) - anchorZ;
     if (dx < 0) dx = -dx;
     if (dz < 0) dz = -dz;
-    return dx <= emergencyRadius && dz <= emergencyRadius;
+    return dx <= radius && dz <= radius;
 }
 
 static inline int ps2_obj_stack_detail(const GroundObject *objs) {
@@ -260,13 +268,35 @@ static inline int ps2_obj_stack_detail(const GroundObject *objs) {
 }
 
 static inline bool ps2_claim_inactive_loc_budget(int bitset, int8_t info, int sceneX, int sceneZ) {
-    // Hardware A/B: disable the 48-loc decorative budget as well as distance LOD. If a static loc
-    // was successfully inserted into World3D and its tile is inside the normal camera traversal,
-    // let it draw. This deliberately does not increase scene residency or the camera render radius.
-    (void)bitset;
-    (void)info;
-    (void)sceneX;
-    (void)sceneZ;
+    // Dynamic entities and actionable map locs never consume the decorative budget.
+    if ((bitset & 0x40000000) == 0 || (info & PS2_LOC_GAMEPLAY_IMPORTANT_FLAG) != 0) {
+        return true;
+    }
+
+    int anchorX;
+    int anchorZ;
+    ps2_loc_detail_anchor(&anchorX, &anchorZ);
+    int dx = (sceneX >> 7) - anchorX;
+    int dz = (sceneZ >> 7) - anchorZ;
+    if (dx < 0) dx = -dx;
+    if (dz < 0) dz = -dz;
+    int distance = dx > dz ? dx : dz;
+
+    // World3D's loc buffer is intentionally processed farthest-first for correct scene ordering.
+    // The old budget therefore let distant decorative locs consume all 48 slots before nearby
+    // scenery was reached. Reserve the entire near field first: anything within 8 tiles of the
+    // player bypasses the budget, while only the outer 9-10 tile decorative ring competes for the
+    // 48 capped submissions. This keeps the proven cap without starving buildings/scenery near the
+    // player as they traverse toward a normal scene transition.
+    if (distance <= PS2_INACTIVE_LOC_ALWAYS_RADIUS) {
+        return true;
+    }
+
+    if (ps2_inactive_loc_draw_count >= PS2_INACTIVE_LOC_DRAW_BUDGET) {
+        return false;
+    }
+
+    ps2_inactive_loc_draw_count++;
     return true;
 }
 #endif
