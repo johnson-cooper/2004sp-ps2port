@@ -784,7 +784,10 @@ bool platform_init(void) {
 
         hid_keyboard_ret = init_keyboard_driver(false);
         if (hid_keyboard_ret >= 0) {
-            PS2KbdSetReadmode(PS2KBD_READMODE_NORMAL);
+            // Match the desktop event model: raw USB HID make/break packets become explicit
+            // key_pressed()/key_released() calls below. Normal mode only provides translated
+            // characters and cannot represent a held arrow key continuously.
+            PS2KbdSetReadmode(PS2KBD_READMODE_RAW);
             PS2KbdSetBlockingMode(PS2KBD_NONBLOCKING);
             PS2KbdFlushBuffer();
             ps2_usb_keyboard_ready = true;
@@ -1208,7 +1211,9 @@ static void ps2_poll_usb_mouse(Client *c) {
         }
     }
 
-    bool left = (mouse.buttons & PS2MOUSE_BTN1) != 0;
+    // SDL desktop treats any non-right mouse button as the primary button. Match that here,
+    // including a physical middle-button click.
+    bool left = (mouse.buttons & (PS2MOUSE_BTN1 | PS2MOUSE_BTN3)) != 0;
     bool right = (mouse.buttons & PS2MOUSE_BTN2) != 0;
 
     if (left && !left_was_down) {
@@ -1259,90 +1264,180 @@ static void ps2_usb_keyboard_activate(Client *c) {
     }
 }
 
-static int ps2_keyboard_release_code;
+static bool ps2_keyboard_held[256];
+static int ps2_keyboard_down_code[256];
+static int ps2_keyboard_down_ch[256];
 
-static void ps2_usb_keyboard_special(Client *c, uint8_t special) {
-    int code = 0;
-    switch (special) {
-        case 41: code = 39; break; // Right
-        case 42: code = 37; break; // Left
-        case 43: code = 40; break; // Down
-        case 44: code = 38; break; // Up
-        case 38:                   // Delete: RuneScape's text editor has Backspace, not forward delete.
-            key_pressed(c->shell, 8, 8);
-            return;
-        case 0x1b:
-            key_pressed(c->shell, 27, 27);
-            return;
-        default:
-            return;
+static bool ps2_keyboard_shift_held(void) {
+    // USB HID modifier usages: 225=LShift, 229=RShift.
+    return ps2_keyboard_held[225] || ps2_keyboard_held[229];
+}
+
+static char ps2_keyboard_shifted_digit(uint8_t key) {
+    // HID 30..39 == 1..9,0. Match desktop SDL's shifted number-row mapping.
+    static const char shifted[10] = {'!', '@', '#', '$', '%', '^', '&', '*', '(', ')'};
+    if (key >= 30 && key <= 38) return shifted[key - 30];
+    if (key == 39) return shifted[9];
+    return 0;
+}
+
+static bool ps2_keyboard_translate(uint8_t key, int *code, int *ch) {
+    const bool shift = ps2_keyboard_shift_held();
+    *code = -1;
+    *ch = -1;
+
+    // Standard USB HID keyboard usages.
+    if (key >= 4 && key <= 29) {
+        char base = (char)('a' + (key - 4));
+        *code = base;
+        *ch = shift ? (base - ('a' - 'A')) : base;
+        return true;
+    }
+    if (key >= 30 && key <= 38) {
+        char base = (char)('1' + (key - 30));
+        *code = base;
+        *ch = shift ? ps2_keyboard_shifted_digit(key) : base;
+        return true;
+    }
+    if (key == 39) {
+        *code = K_0;
+        *ch = shift ? ')' : '0';
+        return true;
     }
 
-    // Normal-mode ps2kbd emits special keys as ESC + one byte. Pulse arrows for one game tick;
-    // the driver's own repeat buffer generates later pulses while the physical key stays held.
-    key_pressed(c->shell, code, 0);
-    ps2_keyboard_release_code = code;
+    switch (key) {
+        case 40: *code = K_ENTER; *ch = K_ENTER; return true;
+        case 41: *code = K_ESCAPE; return true;
+        case 42: *code = K_BACKSPACE; *ch = K_BACKSPACE; return true;
+        case 43: *code = K_TAB; *ch = K_TAB; return true;
+        case 44: *code = ' '; *ch = ' '; return true;
+        case 45: *code = K_MINUS; *ch = shift ? '_' : '-'; return true;
+        case 46: *code = '='; *ch = shift ? '+' : '='; return true;
+        case 47: *code = '['; *ch = shift ? '{' : '['; return true;
+        case 48: *code = ']'; *ch = shift ? '}' : ']'; return true;
+        case 49: *code = '\\'; *ch = shift ? '|' : '\\'; return true;
+        case 51: *code = ';'; *ch = shift ? ':' : ';'; return true;
+        case 52: *code = '\''; *ch = shift ? '"' : '\''; return true;
+        case 53: *code = '`'; *ch = shift ? '~' : '`'; return true;
+        case 54: *code = ','; *ch = shift ? '<' : ','; return true;
+        case 55: *code = K_PERIOD; *ch = shift ? '>' : '.'; return true;
+        case 56: *code = K_FWD_SLASH; *ch = shift ? '?' : '/'; return true;
+
+        case 58: *code = K_F1; return true;
+        case 59: *code = K_F2; return true;
+        case 60: *code = K_F3; return true;
+        case 61: *code = K_F4; return true;
+        case 62: *code = K_F5; return true;
+        case 63: *code = K_F6; return true;
+        case 64: *code = K_F7; return true;
+        case 65: *code = K_F8; return true;
+        case 66: *code = K_F9; return true;
+        case 67: *code = K_F10; return true;
+        case 68: *code = K_F11; return true;
+        case 69: *code = K_F12; return true;
+
+        case 74: *code = K_HOME; return true;
+        case 75: *code = K_PAGE_UP; return true;
+        case 76: *code = 127; return true; // Desktop client treats Delete as Backspace.
+        case 77: *code = K_END; return true;
+        case 78: *code = K_PAGE_DOWN; return true;
+        case 79: *code = K_RIGHT; return true;
+        case 80: *code = K_LEFT; return true;
+        case 81: *code = K_DOWN; return true;
+        case 82: *code = K_UP; return true;
+
+        case 84: *code = K_FWD_SLASH; *ch = K_FWD_SLASH; return true;
+        case 85: *code = K_ASTERISK; *ch = K_ASTERISK; return true;
+        case 86: *code = K_MINUS; *ch = K_MINUS; return true;
+        case 87: *code = K_PLUS; *ch = K_PLUS; return true;
+        case 88: *code = K_ENTER; *ch = K_ENTER; return true;
+        case 89: *code = K_1; *ch = K_1; return true;
+        case 90: *code = K_2; *ch = K_2; return true;
+        case 91: *code = K_3; *ch = K_3; return true;
+        case 92: *code = K_4; *ch = K_4; return true;
+        case 93: *code = K_5; *ch = K_5; return true;
+        case 94: *code = K_6; *ch = K_6; return true;
+        case 95: *code = K_7; *ch = K_7; return true;
+        case 96: *code = K_8; *ch = K_8; return true;
+        case 97: *code = K_9; *ch = K_9; return true;
+        case 98: *code = K_0; *ch = K_0; return true;
+        case 99: *code = K_PERIOD; *ch = K_PERIOD; return true;
+
+        // Modifier usages. gameshell.c already understands these browser/AWT-style codes.
+        case 224:
+        case 228: *code = K_CONTROL; return true;
+        case 225:
+        case 229: *code = 16; return true; // Shift
+        case 226:
+        case 230: *code = 18; return true; // Alt
+        default: return false;
+    }
+}
+
+static void ps2_keyboard_apply_held_camera(Client *c) {
+    // Desktop camera control is action_key level state, not a repeat event. OR physical keyboard
+    // arrows into whatever the DualShock right stick contributed earlier this frame.
+    if (ps2_keyboard_held[80]) c->shell->action_key[1] = 1; // Left
+    if (ps2_keyboard_held[79]) c->shell->action_key[2] = 1; // Right
+    if (ps2_keyboard_held[82]) c->shell->action_key[3] = 1; // Up
+    if (ps2_keyboard_held[81]) c->shell->action_key[4] = 1; // Down
 }
 
 static void ps2_poll_usb_keyboard(Client *c) {
-    static int poll_divider = 0;
-    static bool escape_pending = false;
-
     if (!ps2_usb_keyboard_ready) {
         return;
     }
 
-    if (ps2_keyboard_release_code) {
-        key_released(c->shell, ps2_keyboard_release_code, 0);
-        ps2_keyboard_release_code = 0;
-    }
-
-    // Keyboard input is buffered on the IOP, so a 1-in-3 frame nonblocking read cuts FILEIO RPC
-    // traffic substantially without losing keystrokes or making text entry feel sluggish.
-    poll_divider++;
-    if (poll_divider < 3) {
-        return;
-    }
-    poll_divider = 0;
-
+    // Raw mode is the same event model SDL uses: one DOWN and one UP event per physical key.
+    // Drain a small bounded batch each frame; held camera state below does not depend on repeats.
     for (int i = 0; i < 16; i++) {
-        char raw = 0;
-        if (PS2KbdRead(&raw) <= 0) {
+        PS2KbdRawKey raw = {0};
+        if (PS2KbdReadRaw(&raw) <= 0 || raw.key == 0) {
             break;
+        }
+
+        const uint8_t key = raw.key;
+        const bool down = raw.state == PS2KBD_RAWKEY_DOWN;
+        const bool up = raw.state == PS2KBD_RAWKEY_UP;
+        if (!down && !up) {
+            continue;
         }
 
         ps2_usb_keyboard_activate(c);
         c->shell->idle_cycles = 0;
-        uint8_t ch = (uint8_t)raw;
 
-        if (escape_pending) {
-            escape_pending = false;
-            ps2_usb_keyboard_special(c, ch);
-            continue;
-        }
-        if (ch == PS2KBD_ESCAPE_KEY) {
-            escape_pending = true;
-            continue;
-        }
+        if (down) {
+            // Ignore duplicate make packets for held-state purposes, but still allow the driver
+            // to deliver repeated printable key-down events if it chooses to.
+            ps2_keyboard_held[key] = true;
 
-        switch (ch) {
-            case 8:
-                key_pressed(c->shell, 8, 8);
-                break;
-            case 9:
-                key_pressed(c->shell, 9, 9);
-                break;
-            case 10:
-            case 13:
-                key_pressed(c->shell, 10, 10);
-                break;
-            default:
-                if (ch >= 32) {
-                    key_pressed(c->shell, 0, ch);
-                }
-                break;
+            int code = -1;
+            int ch = -1;
+            if (ps2_keyboard_translate(key, &code, &ch)) {
+                ps2_keyboard_down_code[key] = code;
+                ps2_keyboard_down_ch[key] = ch;
+                key_pressed(c->shell, code, ch);
+            }
+        } else {
+            int code = ps2_keyboard_down_code[key];
+            int ch = ps2_keyboard_down_ch[key];
+
+            // If this key's DOWN predated our state table (hotplug/recovery), translate it now.
+            if (code == 0 && ch == 0) {
+                ps2_keyboard_translate(key, &code, &ch);
+            }
+
+            ps2_keyboard_held[key] = false;
+            ps2_keyboard_down_code[key] = 0;
+            ps2_keyboard_down_ch[key] = 0;
+
+            if (code != -1 || ch != -1) {
+                key_released(c->shell, code, ch);
+            }
         }
     }
+
+    ps2_keyboard_apply_held_camera(c);
 }
 
 void platform_poll_events(Client *c) {
@@ -1353,6 +1448,10 @@ void platform_poll_events(Client *c) {
 
     int state = padGetState(0, 0);
     if (state != PAD_STATE_STABLE && state != PAD_STATE_FINDCTP1) {
+        c->shell->action_key[1] = 0;
+        c->shell->action_key[2] = 0;
+        c->shell->action_key[3] = 0;
+        c->shell->action_key[4] = 0;
         ps2_poll_usb_keyboard(c);
         return;
     }

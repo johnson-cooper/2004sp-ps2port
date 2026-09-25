@@ -10638,7 +10638,13 @@ void client_draw(Client *c) {
         virtual_keyboard_draw(c);
     }
 
-#if !defined(__PS2__) || (!PS2_NULL_UI && !PS2_SAFE_INTERFACE)
+#if defined(__PS2__)
+    // PS2 has no host OS cursor. Keep the software pointer visible even when a physical USB
+    // keyboard sets has_keyboard=true; USB mouse movement already feeds shell->mouse_x/mouse_y.
+    if (!PS2_NULL_UI && !PS2_SAFE_INTERFACE && !c->controller_settings_visible) {
+        virtual_cursor_draw(c);
+    }
+#else
     if (!c->shell->has_keyboard && !c->controller_settings_visible) {
         virtual_cursor_draw(c);
     }
