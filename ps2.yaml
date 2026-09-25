@@ -23,6 +23,56 @@ targets:
       - libsd
     imports_lst: src/iop/rs2midi/imports.lst
 
+  # Local subset of fjtrujy/ps2_drivers. Built in-tree because the current
+  # PS2Build SDK has no release artifact for the custom ps2_drivers package.
+  - name: ps2_drivers_local
+    type: ee_lib
+    opt: -O1
+    sources:
+      - src/thirdparty/ps2_drivers/src/*.c
+    include_dirs:
+      - src/thirdparty/ps2_drivers/include
+    headers:
+      - kernel
+      - mouse
+      - kbd
+    defines:
+      - F_internals_ps2_sio2man_driver
+      - F_init_ps2_sio2man_driver
+      - F_deinit_ps2_sio2man_driver
+      - F_internals_ps2_fileXio_driver
+      - F_init_ps2_fileXio_driver
+      - F_deinit_ps2_fileXio_driver
+      - F_internals_ps2_memcard_driver
+      - F_init_ps2_memcard_driver
+      - F_deinit_ps2_memcard_driver
+      - F_internals_ps2_bdm_driver
+      - F_init_ps2_bdm_driver
+      - F_deinit_ps2_bdm_driver
+      - F_internals_ps2_usbd_driver
+      - F_init_ps2_usbd_driver
+      - F_deinit_ps2_usbd_driver
+      - F_internals_ps2_usb_driver
+      - F_init_ps2_usb_driver
+      - F_deinit_ps2_usb_driver
+      - F_internals_ps2_mx4sio_driver
+      - F_init_ps2_mx4sio_driver
+      - F_deinit_ps2_mx4sio_driver
+      - F_internals_ps2_cdfs_driver
+      - F_init_ps2_cdfs_driver
+      - F_deinit_ps2_cdfs_driver
+      - F___internal_deinit_only_boot_ps2_filesystem_driver
+      - F_deinit_only_boot_ps2_filesystem_driver
+      - F_init_only_boot_ps2_filesystem_driver
+      - F_waitUntilDeviceIsReady_ps2_filesystem_driver
+      - F_getBootDeviceID_ps2_filesystem_driver
+      - F_internals_ps2_mouse_driver
+      - F_init_ps2_mouse_driver
+      - F_deinit_ps2_mouse_driver
+      - F_internals_ps2_keyboard_driver
+      - F_init_ps2_keyboard_driver
+      - F_deinit_ps2_keyboard_driver
+
   - name: client
     type: ee
     opt: -O1
@@ -37,6 +87,8 @@ targets:
       - src/datastruct/*.c
       - src/sound/*.c
       - src/wordenc/*.c
+    include_dirs:
+      - src/thirdparty/ps2_drivers/include
     defines:
       - client
       - __PS2__
@@ -54,8 +106,6 @@ targets:
       # world_add_loc2()'s subtree, not decoding/Packet/world_build(). Removed so this build now
       # exercises the real, full path again, with new one-shot entry checkpoints in world_add_loc2()
       # and loctype_get_model() (world.c/loctype.c) to find exactly where in that subtree it dies.
-    # ps2_drivers is a PS2Build world package. Keep the SDK current with
-    # "ps2build update"; PS2Build then resolves its headers/library automatically.
     headers:
       - mouse
       - kbd
@@ -65,9 +115,11 @@ targets:
       - ps2ip
       - netman
       - patches
-      # PS2Build world package; supplied by the SDK package set.
-      # Provides the boot-filesystem abstraction plus optional USB mouse/keyboard helpers.
-      - ps2_drivers
+      # Vendored ps2_drivers subset, followed by the SDK EE client libraries it calls.
+      - ps2_drivers_local
+      - filexio
+      - mouse
+      - kbd
       - pad
       # Standalone PS2Build world package installed by install-audsrv-package.bat.
       # Keep audio off the EE software-mixing path: the first hardware milestone uses
@@ -98,6 +150,21 @@ targets:
       - dev9:dev9_embed
       - netman:netman_embed
       - smap:smap_embed
+      # IRXs expected by the vendored ps2_drivers sources. Aliases deliberately
+      # match their EXTERN_IRX(...) symbol names.
+      - sio2man:sio2man
+      - iomanx:iomanX
+      - filexio:fileXio
+      - mcman:mcman
+      - mcserv:mcserv
+      - bdm:bdm
+      - bdmfs_fatfs:bdmfs_fatfs
+      - usbd:usbd
+      - usbmass_bd:usbmass_bd
+      - mx4sio_bd:mx4sio_bd
+      - cdfs:cdfs
+      - mouse:ps2mouse
+      - kbd:ps2kbd
       # MMCE is the one boot filesystem not recognized by ps2_drivers' boot-only helper.
       # Embed the full filesystem-capable world driver so an mmce0:/ or mmce1:/ launch can
       # restore its own boot filesystem after the mandatory clean IOP reset.
