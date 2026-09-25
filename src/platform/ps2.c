@@ -229,9 +229,9 @@ static bool ps2_init_proven_usb_boot_filesystem(void) {
     return ready;
 }
 
-// MMCE uses the same filesystem sequence that previously reached the game successfully.
-// platform_init() prepares ROM SIO2MAN + PADMAN first, then MMCEMAN attaches to that already-live
-// controller transport. Do not preload a second PS2SDK SIO2MAN here; real hardware stalled there.
+// MMCE uses the exact filesystem sequence that previously reached the game successfully.
+// Do not preload SIO2MAN/PADMAN before MMCEMAN here; real hardware stalls during the first
+// loading bar when that ordering is used. Controller setup remains after filesystem restore.
 static bool ps2_init_mmce_boot_filesystem(void) {
     extern unsigned char mmceman_embed_irx[];
     extern unsigned int size_mmceman_embed_irx;
@@ -777,21 +777,13 @@ bool platform_init(void) {
 
     const bool usb_mass_boot = ps2_is_usb_mass_boot();
     const bool mmce_boot = ps2_is_mmce_boot();
-    int mmce_sio2man_ret = 0;
-    int mmce_padman_ret = 0;
 
     if (usb_mass_boot) {
         // Strict USB path: only the hardware-proven BDM stack above. Do not invoke MMCEMAN,
         // ps2_drivers' generic filesystem helper, or any ps2_drivers USB/HID wrapper.
         ps2_filesystem_ready = ps2_init_proven_usb_boot_filesystem();
     } else if (mmce_boot) {
-        // The previous MMCE filesystem sequence reached the game, but PAD was dead. Keep that
-        // filesystem sequence and instead establish the proven ROM controller stack BEFORE
-        // MMCEMAN attaches to SIO2MAN. Do not swap SIO2MAN underneath PADMAN afterward.
-        mmce_sio2man_ret = SifLoadModule("rom0:SIO2MAN", 0, NULL);
-        mmce_padman_ret = SifLoadModule("rom0:PADMAN", 0, NULL);
-        rs2_log("mmce: pre-pad SIO2MAN=%d PADMAN=%d\n",
-                mmce_sio2man_ret, mmce_padman_ret);
+        // Exact MMCE filesystem ordering from the last real-hardware build that reached the game.
         ps2_filesystem_ready = ps2_init_mmce_boot_filesystem();
     } else {
         init_only_boot_ps2_filesystem_driver();
@@ -805,16 +797,13 @@ bool platform_init(void) {
     rs2_log("fs: boot filesystem restored cwd=%s\n", ready_cwd);
     ps2_boot_progress(88);
 
-    // MMCE already established ROM SIO2MAN + PADMAN before MMCEMAN. Every other boot path
-    // keeps the existing proven post-filesystem ROM pad initialization.
-    int pad_sio2man_ret = mmce_boot ? mmce_sio2man_ret
-                                    : SifLoadModule("rom0:SIO2MAN", 0, NULL);
-    int padman_ret = mmce_boot ? mmce_padman_ret
-                               : SifLoadModule("rom0:PADMAN", 0, NULL);
+    // Keep controller initialization AFTER filesystem restore. This is the exact ordering
+    // used by the last MMCE build that successfully reached the game.
+    int pad_sio2man_ret = SifLoadModule("rom0:SIO2MAN", 0, NULL);
+    int padman_ret = SifLoadModule("rom0:PADMAN", 0, NULL);
     int pad_init_ret = padInit(0);
     int pad_open_ret = padPortOpen(0, 0, padDmaBuf);
-    rs2_log("pad: source=%s SIO2MAN=%d PADMAN=%d padInit=%d padOpen=%d\n",
-            mmce_boot ? "rom-pre-mmce" : "rom",
+    rs2_log("pad: source=rom-post-fs SIO2MAN=%d PADMAN=%d padInit=%d padOpen=%d\n",
             pad_sio2man_ret, padman_ret, pad_init_ret, pad_open_ret);
 
     // Force DualShock2 analog mode, locked so the player can't toggle it back off with the
