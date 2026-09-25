@@ -27,6 +27,8 @@
 #include <string.h>
 
 #include <kernel.h>
+#include <sifrpc.h>
+#include <loadfile.h>
 
 #include <ps2_filesystem_driver.h>
 #include <irx_common_macros.h>
