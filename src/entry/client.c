@@ -164,9 +164,9 @@ static void virtual_cursor_draw(Client *c);
 void platform_save_region(int x, int y, int w, int h, uint16_t *out);
 void platform_restore_region(int x, int y, int w, int h, const uint16_t *in);
 
-// See platform/ps2.c - returns "mass:/" once a USB mass-storage device carrying the game's own
-// rom/cache/client/... tree is detected (real hardware / a USB-stick boot), or "" to keep using
-// today's plain relative paths (which PCSX2's host: dev shortcut transparently redirects).
+// See platform/ps2.c - resolves the cache beside client.elf on whichever filesystem booted the
+// game. ps2_drivers restores only that boot filesystem after the IOP reset; "" means the boot cwd
+// itself is already the correct asset root.
 const char *ps2_cache_prefix(void);
 static void ps2_draw_large_status(Client *c, const char *status);
 static void ps2_runtime_checkpoint(Client *c, const char *status);
@@ -14002,8 +14002,8 @@ static bool secured = false;
 
 int main(int argc, char **argv) {
 #ifdef __PS2__
-    // Preserve the launcher-supplied ELF path before platform/USB initialization. The PS2 asset
-    // resolver later validates this directory and uses it for config.ini + the complete rom tree.
+    // Preserve the launcher-supplied ELF path before the IOP reset. The PS2 boot-filesystem
+    // resolver later restores that device and uses this directory for config.ini + the rom tree.
     ps2_set_launch_path((argc > 0 && argv) ? argv[0] : NULL);
 #endif
     // init screen before logging is required for some platforms

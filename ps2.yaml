@@ -60,6 +60,9 @@ targets:
       - ps2ip
       - netman
       - patches
+      # Tech's ps2_drivers supplies init_only_boot_ps2_filesystem_driver() and the device-specific
+      # storage/HID modules selected by that abstraction.
+      - ps2_drivers
       - pad
       # Standalone PS2Build world package installed by install-audsrv-package.bat.
       # Keep audio off the EE software-mixing path: the first hardware milestone uses
@@ -87,27 +90,9 @@ targets:
       # this stays at the original, proven-stable sequence (see ps2.c's platform_init()): netman/smap
       # load and bring up networking completely first, USB loads only once that's done.
       #
-      # The BDM stack itself (usbd+iomanx+bdm+bdmfs_fatfs+usbmass_bd, ~97KB across 5 modules)
-      # replaced an earlier, lighter usbhdfsd attempt for an unrelated, still-valid reason: usbhdfsd
-      # had a real reliability problem under sustained I/O on real hardware, confirmed via two
-      # independent hangs in different code paths (opening ~830 separate small map files one at a
-      # time; separately, seeking through ~8929 entries inside a single already-combined
-      # ondemand.zip archive - the second case rules out "too many separate files" as the
-      # explanation, since that archive was never many files). Neither hang ever reproduced on
-      # PCSX2. BDM is what this project's own boot loader already uses successfully to read
-      # client.elf itself, and what a separate, more mature PS2 homebrew project
-      # (OptiJuegos/ReleasePlusPlus) uses in its own shipped real-hardware builds - real, working
-      # precedent, not a guess. None of these 5 have a real-hardware-safe non-embedded alternative:
-      # none are ROM-resident, and they are themselves the modules that provide file access in the
-      # first place - loading them from a file would require file access that doesn't exist yet.
-      - dev9:dev9_embed
-      - netman:netman_embed
-      - smap:smap_embed
-      - usbd:usbd_embed
-      - iomanx:iomanx_embed
-      - bdm:bdm_embed
-      - bdmfs_fatfs:bdmfs_fatfs_embed
-      - usbmass_bd:usbmass_bd_embed
-      # Audio is deliberately loaded only after network + USB + PAD bring-up in
+      # Storage IRXs are no longer hard-coded here. ps2_drivers restores only the filesystem the
+      # ELF was launched from, at the same post-DHCP point where the hardware-proven BDM stack used
+      # to load. Keep DEV9/NETMAN/SMAP embedded above; their ordering remains unchanged.
+      # Audio is deliberately loaded only after network + filesystem + PAD bring-up in
       # platform_init(); embedding avoids adding runtime filesystem dependency.
       - audsrv:audsrv_embed
