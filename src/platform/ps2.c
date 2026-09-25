@@ -1146,6 +1146,8 @@ static void ps2_release_grid_focus(Client *c) {
 }
 
 
+static bool ps2_usb_mouse_owns_pointer = false;
+
 static void ps2_usb_mouse_release(Client *c, bool *left_was_down, bool *right_was_down) {
     if (*left_was_down) {
         if (c->shell->mouse_button == 1) c->shell->mouse_button = 0;
@@ -1193,12 +1195,18 @@ static void ps2_poll_usb_mouse(Client *c) {
         return;
     }
 
+    // Mouse coordinates are the complete RuneScape fixed-mode logical canvas, not the
+    // 512x334 3D viewport or 640x480 TV framebuffer. This lets the physical mouse reach the
+    // backpack/equipment/sidebar tabs, chatbox, minimap and every modal interface exactly like SDL.
     int x = MAX(0, MIN(SCREEN_WIDTH - 1, mouse.x));
     int y = MAX(0, MIN(SCREEN_HEIGHT - 1, mouse.y));
     if (x != c->shell->mouse_x || y != c->shell->mouse_y) {
-        if (c->controller_grid_component >= 0) {
-            ps2_release_grid_focus(c);
-        }
+        // A real mouse move immediately takes pointer ownership away from controller grid focus.
+        // ps2_release_grid_focus() is safe even when no grid is currently selected and also
+        // clears any pending D-pad snap state.
+        ps2_usb_mouse_owns_pointer = true;
+        ps2_release_grid_focus(c);
+
         c->shell->mouse_x = x;
         c->shell->mouse_y = y;
         c->controller_free_cursor_x = x;
@@ -1217,6 +1225,8 @@ static void ps2_poll_usb_mouse(Client *c) {
     bool right = (mouse.buttons & PS2MOUSE_BTN2) != 0;
 
     if (left && !left_was_down) {
+        ps2_usb_mouse_owns_pointer = true;
+        ps2_release_grid_focus(c);
         c->shell->mouse_click_x = c->shell->mouse_x;
         c->shell->mouse_click_y = c->shell->mouse_y;
         c->shell->mouse_click_button = 1;
@@ -1231,6 +1241,8 @@ static void ps2_poll_usb_mouse(Client *c) {
     }
 
     if (right && !right_was_down) {
+        ps2_usb_mouse_owns_pointer = true;
+        ps2_release_grid_focus(c);
         c->shell->mouse_click_x = c->shell->mouse_x;
         c->shell->mouse_click_y = c->shell->mouse_y;
         c->shell->mouse_click_button = 2;
@@ -1476,18 +1488,36 @@ void platform_poll_events(Client *c) {
     // able to break grid capture, even if cursor scaling/deadzone logic changes later.
     int raw_lx = padData.ljoy_h - 128;
     int raw_ly = padData.ljoy_v - 128;
+
+    // While a USB mouse owns the pointer, require a clearly intentional left-stick deflection to
+    // take it back. This prevents normal DualShock center drift from overwriting mouse_x/mouse_y
+    // every frame just because a controller is plugged in.
+    int takeover_deadzone = c->controller_cursor_deadzone;
+    if (takeover_deadzone < 40) takeover_deadzone = 40;
+    bool controller_takeover = !c->controller_settings_visible &&
+                               (abs(raw_lx) > takeover_deadzone ||
+                                abs(raw_ly) > takeover_deadzone);
+    if (ps2_usb_mouse_owns_pointer && controller_takeover) {
+        ps2_usb_mouse_owns_pointer = false;
+        c->controller_free_cursor_x = c->shell->mouse_x;
+        c->controller_free_cursor_y = c->shell->mouse_y;
+        c->controller_free_cursor_valid = true;
+    }
+
     bool left_stick_active = !c->controller_settings_visible &&
+                             !ps2_usb_mouse_owns_pointer &&
                              (abs(raw_lx) > c->controller_cursor_deadzone ||
                               abs(raw_ly) > c->controller_cursor_deadzone);
     // Only the pointer-owning left stick exits grid mode. The right stick remains free to rotate
     // and tilt the camera while a D-pad-selected inventory/bank/shop slot stays focused.
-    bool analog_override_active = left_stick_active;
+    bool analog_override_active = left_stick_active || ps2_usb_mouse_owns_pointer;
 
-    if (left_stick_active && c->controller_grid_component >= 0) {
+    if (left_stick_active) {
         ps2_release_grid_focus(c);
     }
 
-    // Left stick moves the virtual pointer; right stick remains independent camera control.
+    // Left stick moves the virtual pointer only when it owns it; right stick camera remains
+    // independent and can still be used while the physical mouse owns the pointer.
     int dx = 0;
     int dy = 0;
     if (left_stick_active) {
@@ -1645,6 +1675,15 @@ void platform_poll_events(Client *c) {
     bool l2 = !(padData.btns & PAD_L2);
     bool r2 = !(padData.btns & PAD_R2);
     c->controller_zoom_bias = c->controller_settings_visible ? 0 : (r2 ? 1 : (l2 ? -1 : 0));
+
+    // A physical mouse is desktop-style free-pointer input. Do not let stale controller
+    // grid-navigation state snap it back into inventory/bank/chat grids while the mouse owns it.
+    if (ps2_usb_mouse_owns_pointer && !c->virtual_keyboard_visible &&
+        !c->controller_settings_visible && !c->menu_visible) {
+        c->controller_grid_analog_override = true;
+        c->controller_dpad_x = 0;
+        c->controller_dpad_y = 0;
+    }
 
     // D-pad is routed contextually by the client: virtual keyboard, context menus, and PS2
     // controller settings all use the same one-shot direction fields.
