@@ -67,16 +67,16 @@ SECTIONS {
 
     .data ALIGN(128): {
         _fdata = . ;
-        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .data)
-        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .data.*)
-        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .gnu.linkonce.d*)
+        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *mmceman_embed_irx.o) .data)
+        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *mmceman_embed_irx.o) .data.*)
+        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *mmceman_embed_irx.o) .gnu.linkonce.d*)
         SORT(CONSTRUCTORS)
     }
 
     .rodata ALIGN(128): {
-        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o *platform/ps2.o) .rodata)
-        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o *platform/ps2.o) .rodata.*)
-        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o *platform/ps2.o) .gnu.linkonce.r*)
+        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *mmceman_embed_irx.o *platform/ps2.o) .rodata)
+        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *mmceman_embed_irx.o *platform/ps2.o) .rodata.*)
+        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *mmceman_embed_irx.o *platform/ps2.o) .gnu.linkonce.r*)
 
         /*
          * Preserve the exact hardware-good .rodata extent. If real content grows
@@ -99,9 +99,9 @@ SECTIONS {
     .lit8 ALIGN(128): { *(.lit8) }
 
     .sdata ALIGN(128): {
-        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .sdata)
-        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .sdata.*)
-        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .gnu.linkonce.s*)
+        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *mmceman_embed_irx.o) .sdata)
+        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *mmceman_embed_irx.o) .sdata.*)
+        *(EXCLUDE_FILE (*ps2_*_driver.o *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *mmceman_embed_irx.o) .gnu.linkonce.s*)
     }
 
     _edata = .;
@@ -127,9 +127,9 @@ SECTIONS {
     PROVIDE(end = .);
 
     /*
-     * Vendored ps2_drivers objects, only the NEW filesystem/HID IRX byte arrays, and platform/ps2.o
+     * Vendored ps2_drivers objects, only the new filesystem IRX byte arrays, and platform/ps2.o
      * read-only constants live in a dedicated high-memory PT_LOAD. Moving ps2.o rodata here keeps
-     * new boot/HID diagnostics from consuming the hardware-proven low .rodata budget while its
+     * new boot diagnostics from consuming the hardware-proven low .rodata budget while its
      * executable code/data remain in their original placement. DEV9/NETMAN/SMAP, the proven
      * USBD/IOMANX/BDM/BDMFS/USBMASS stack, and audsrv remain in their proven low placement.
      *
@@ -150,8 +150,6 @@ SECTIONS {
         *mcserv_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
         *mx4sio_bd_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
         *cdfs_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
-        *ps2mouse_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
-        *ps2kbd_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
         *mmceman_embed_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
     } :audio
 

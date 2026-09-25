@@ -12,11 +12,6 @@
 #include <sbv_patches.h>
 #include <ps2_filesystem_driver.h>
 #include <ps2_fileXio_driver.h>
-#include <ps2_usbd_driver.h>
-#include <ps2_mouse_driver.h>
-#include <ps2_keyboard_driver.h>
-#include <libmouse.h>
-#include <libkbd.h>
 #include <string.h>
 #include <unistd.h>
 #include <timer.h>
@@ -142,8 +137,6 @@ static void SleepMsApprox()
 // Assets stay beside client.elf instead of probing unrelated devices.
 static char ps2_launch_dir[256];
 static bool ps2_filesystem_ready;
-static bool ps2_usb_mouse_ready;
-static bool ps2_usb_keyboard_ready;
 
 static bool ps2_is_mmce_boot(void) {
     return !strncmp(ps2_launch_dir, "mmce:", 5) ||
@@ -766,35 +759,8 @@ bool platform_init(void) {
     rs2_log("pad: final_state=%d setMainMode=%d\n", pad_final_state, pad_mode_ret);
     ps2_boot_progress(90);
 
-    // Optional USB HID. This is deliberately post-DHCP and post-filesystem so USBD activity cannot
-    // interfere with the hardware-proven DEV9/SMAP bring-up. init_usbd_driver() is shared with the
-    // boot-filesystem helper: USB boots reuse its existing USBD instance, while MMCE/HDD/CD boots
-    // get only the USB core needed for a mouse/keyboard. Every failure is non-fatal.
-    int hid_usbd_ret = init_usbd_driver();
-    int hid_mouse_ret = -1;
-    int hid_keyboard_ret = -1;
-    if (hid_usbd_ret >= 0) {
-        hid_mouse_ret = init_mouse_driver(false);
-        if (hid_mouse_ret >= 0) {
-            PS2MouseSetReadMode(PS2MOUSE_READMODE_ABS);
-            PS2MouseSetBoundary(0, SCREEN_WIDTH - 1, 0, SCREEN_HEIGHT - 1);
-            PS2MouseSetPosition(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
-            ps2_usb_mouse_ready = true;
-        }
-
-        hid_keyboard_ret = init_keyboard_driver(false);
-        if (hid_keyboard_ret >= 0) {
-            // Keep boot-time keyboard setup on the hardware-proven NORMAL path.
-            // Switching libkbd to RAW performs a FileXio ioctl; doing that during MMCE's first
-            // loading phase regressed real hardware. Runtime polling switches to RAW lazily.
-            PS2KbdSetReadmode(PS2KBD_READMODE_NORMAL);
-            PS2KbdSetBlockingMode(PS2KBD_NONBLOCKING);
-            PS2KbdFlushBuffer();
-            ps2_usb_keyboard_ready = true;
-        }
-    }
-    rs2_log("hid: usbd=%d mouse=%d keyboard=%d\n",
-            hid_usbd_ret, hid_mouse_ret, hid_keyboard_ret);
+    // Mouse/keyboard HID support intentionally removed. Keep USB available only where a
+    // boot/storage driver requires it; controller input remains the sole PS2 gameplay input path.
     ps2_boot_progress(91);
 
     // Audio comes LAST. Real-hardware testing already proved that unrelated IOP activity
@@ -906,48 +872,6 @@ void platform_clear_surface(void) {
 // Keep this substantially-expanded experimental presenter out of normal .text. The branch's
 // hardware workflow has already proven normal section placement sensitive on real PS2 hardware.
 __attribute__((section(".ps2_runtime_text"), noinline))
-static void ps2_draw_final_cursor_overlay(void) {
-#if PS2_NULL_UI || PS2_SAFE_INTERFACE
-    return;
-#else
-    Client *c = ps2_crash_client;
-    if (!c || !c->shell || c->controller_settings_visible) {
-        return;
-    }
-
-    int cursor_x = c->shell->mouse_x;
-    int cursor_y = c->shell->mouse_y;
-    if (!c->controller_grid_analog_override &&
-        c->controller_grid_screen_valid && c->controller_grid_component >= 0) {
-        cursor_x = c->controller_grid_screen_x;
-        cursor_y = c->controller_grid_screen_y;
-    }
-
-    if (cursor_x < 0) cursor_x = 0;
-    if (cursor_x >= SCREEN_WIDTH) cursor_x = SCREEN_WIDTH - 1;
-    if (cursor_y < 0) cursor_y = 0;
-    if (cursor_y >= SCREEN_HEIGHT) cursor_y = SCREEN_HEIGHT - 1;
-
-    const float scale_x = (float)SCREEN_DST_WIDTH / (float)SCREEN_LOGICAL_WIDTH;
-    const float scale_y = (float)SCREEN_DST_HEIGHT / (float)SCREEN_LOGICAL_HEIGHT;
-    const float x = (float)SCREEN_DST_X + (float)cursor_x * scale_x;
-    const float y = (float)SCREEN_DST_Y + (float)cursor_y * scale_y;
-
-    // True final-frame cursor: queued after the completed world/UI composite so sidebar tabs,
-    // inventory/equipment, chatbox, context menus and modal interfaces can never cover it.
-    const float outer = 6.0f;
-    const float inner = 4.0f;
-    const u64 black = GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x80, 0x00);
-    const u64 white = GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00);
-
-    gsKit_prim_sprite(gsGlobal, x - outer, y - 1.5f, x + outer + 1.0f, y + 1.5f, 1, black);
-    gsKit_prim_sprite(gsGlobal, x - 1.5f, y - outer, x + 1.5f, y + outer + 1.0f, 1, black);
-    gsKit_prim_sprite(gsGlobal, x - inner, y - 0.5f, x + inner + 1.0f, y + 0.5f, 2, white);
-    gsKit_prim_sprite(gsGlobal, x - 0.5f, y - inner, x + 0.5f, y + inner + 1.0f, 2, white);
-#endif
-}
-
-__attribute__((section(".ps2_runtime_text"), noinline))
 void platform_update_surface(void) {
     // Each of the two double-buffered surfaces still needs its own margin cleared before it's
     // first displayed, not just whichever was active at startup, hence the per-frame clear.
@@ -1036,7 +960,6 @@ void platform_update_surface(void) {
         gsKit_set_primalpha(gsGlobal, saved_alpha_mode, saved_pabe);
     }
 #endif
-    ps2_draw_final_cursor_overlay();
     gsKit_queue_exec(gsGlobal);
     gsKit_sync_flip(gsGlobal);
 }
@@ -1189,342 +1112,12 @@ static void ps2_release_grid_focus(Client *c) {
 }
 
 
-static bool ps2_usb_mouse_connected = false;
-
-static void ps2_usb_mouse_release(Client *c, bool *left_was_down, bool *right_was_down) {
-    if (*left_was_down) {
-        if (c->shell->mouse_button == 1) c->shell->mouse_button = 0;
-        if (_InputTracking.enabled) inputtracking_mouse_released(&_InputTracking, 0);
-        *left_was_down = false;
-    }
-    if (*right_was_down) {
-        if (c->shell->mouse_button == 2) c->shell->mouse_button = 0;
-        if (_InputTracking.enabled) inputtracking_mouse_released(&_InputTracking, 1);
-        *right_was_down = false;
-    }
-}
-
-static void ps2_poll_usb_mouse(Client *c) {
-    static int enum_delay = 0;
-    static bool left_was_down = false;
-    static bool right_was_down = false;
-
-    if (!ps2_usb_mouse_ready) {
-        return;
-    }
-
-    // PS2MouseEnum() is itself an RPC. Do not pay for it every frame: poll connection state about
-    // once per second, then use one MouseRead RPC per frame only while an actual mouse is present.
-    if (enum_delay <= 0) {
-        u32 count = PS2MouseEnum();
-        ps2_usb_mouse_connected = count != 0 && count != 0xffffffffu;
-        enum_delay = 50;
-        if (!ps2_usb_mouse_connected) {
-            ps2_usb_mouse_release(c, &left_was_down, &right_was_down);
-        }
-    } else {
-        enum_delay--;
-    }
-    if (!ps2_usb_mouse_connected) {
-        return;
-    }
-
-    PS2MouseData mouse;
-    if (PS2MouseRead(&mouse) <= 0) {
-        ps2_usb_mouse_connected = false;
-        enum_delay = 0;
-        ps2_usb_mouse_release(c, &left_was_down, &right_was_down);
-        return;
-    }
-
-    // Mouse coordinates are the complete RuneScape fixed-mode logical canvas, not the
-    // 512x334 3D viewport or 640x480 TV framebuffer. This lets the physical mouse reach the
-    // backpack/equipment/sidebar tabs, chatbox, minimap and every modal interface exactly like SDL.
-    // A connected physical mouse is the authoritative pointer source. Keep controller inventory/
-    // bank/chat grid snapping disabled for the entire time it is attached, even on frames where the
-    // mouse itself did not move.
-    ps2_release_grid_focus(c);
-    c->controller_grid_analog_override = true;
-    c->controller_dpad_x = 0;
-    c->controller_dpad_y = 0;
-
-    int x = MAX(0, MIN(SCREEN_WIDTH - 1, mouse.x));
-    int y = MAX(0, MIN(SCREEN_HEIGHT - 1, mouse.y));
-    if (x != c->shell->mouse_x || y != c->shell->mouse_y) {
-        // A real mouse move immediately takes pointer ownership away from controller grid focus.
-        // ps2_release_grid_focus() is safe even when no grid is currently selected and also
-        // clears any pending D-pad snap state.
-        ps2_release_grid_focus(c);
-
-        c->shell->mouse_x = x;
-        c->shell->mouse_y = y;
-        c->controller_free_cursor_x = x;
-        c->controller_free_cursor_y = y;
-        c->controller_free_cursor_valid = true;
-        c->shell->idle_cycles = 0;
-        if (c->menu_visible) c->controller_menu_index = -1;
-        if (_InputTracking.enabled) {
-            inputtracking_mouse_moved(&_InputTracking, x, y);
-        }
-    }
-
-    // SDL desktop treats any non-right mouse button as the primary button. Match that here,
-    // including a physical middle-button click.
-    bool left = (mouse.buttons & (PS2MOUSE_BTN1 | PS2MOUSE_BTN3)) != 0;
-    bool right = (mouse.buttons & PS2MOUSE_BTN2) != 0;
-
-    if (left && !left_was_down) {
-        ps2_release_grid_focus(c);
-        c->shell->mouse_click_x = c->shell->mouse_x;
-        c->shell->mouse_click_y = c->shell->mouse_y;
-        c->shell->mouse_click_button = 1;
-        c->shell->mouse_button = 1;
-        c->shell->idle_cycles = 0;
-        if (_InputTracking.enabled) {
-            inputtracking_mouse_pressed(&_InputTracking, c->shell->mouse_x, c->shell->mouse_y, 0);
-        }
-    } else if (!left && left_was_down) {
-        if (c->shell->mouse_button == 1) c->shell->mouse_button = 0;
-        if (_InputTracking.enabled) inputtracking_mouse_released(&_InputTracking, 0);
-    }
-
-    if (right && !right_was_down) {
-        ps2_release_grid_focus(c);
-        c->shell->mouse_click_x = c->shell->mouse_x;
-        c->shell->mouse_click_y = c->shell->mouse_y;
-        c->shell->mouse_click_button = 2;
-        c->shell->mouse_button = 2;
-        c->shell->idle_cycles = 0;
-        if (_InputTracking.enabled) {
-            inputtracking_mouse_pressed(&_InputTracking, c->shell->mouse_x, c->shell->mouse_y, 1);
-        }
-    } else if (!right && right_was_down) {
-        if (c->shell->mouse_button == 2) c->shell->mouse_button = 0;
-        if (_InputTracking.enabled) inputtracking_mouse_released(&_InputTracking, 1);
-    }
-
-    left_was_down = left;
-    right_was_down = right;
-}
-
-static void ps2_usb_keyboard_activate(Client *c) {
-    if (c->shell->has_keyboard) {
-        return;
-    }
-
-    c->shell->has_keyboard = true;
-    // If the controller keyboard was already opened for this field, dismiss only the overlay.
-    // Leave the underlying username/password/chat/social input state alive for the real keyboard.
-    if (c->virtual_keyboard_visible) {
-        c->virtual_keyboard_visible = false;
-        c->virtual_keyboard_shift = false;
-        c->controller_keyboard_confirm_pressed = false;
-        c->redraw_background = true;
-    }
-}
-
-static bool ps2_keyboard_held[256];
-static int ps2_keyboard_down_code[256];
-static int ps2_keyboard_down_ch[256];
-
-static bool ps2_keyboard_shift_held(void) {
-    // USB HID modifier usages: 225=LShift, 229=RShift.
-    return ps2_keyboard_held[225] || ps2_keyboard_held[229];
-}
-
-static char ps2_keyboard_shifted_digit(uint8_t key) {
-    // HID 30..39 == 1..9,0. Match desktop SDL's shifted number-row mapping.
-    static const char shifted[10] = {'!', '@', '#', '$', '%', '^', '&', '*', '(', ')'};
-    if (key >= 30 && key <= 38) return shifted[key - 30];
-    if (key == 39) return shifted[9];
-    return 0;
-}
-
-static bool ps2_keyboard_translate(uint8_t key, int *code, int *ch) {
-    const bool shift = ps2_keyboard_shift_held();
-    *code = -1;
-    *ch = -1;
-
-    // Standard USB HID keyboard usages.
-    if (key >= 4 && key <= 29) {
-        char base = (char)('a' + (key - 4));
-        *code = base;
-        *ch = shift ? (base - ('a' - 'A')) : base;
-        return true;
-    }
-    if (key >= 30 && key <= 38) {
-        char base = (char)('1' + (key - 30));
-        *code = base;
-        *ch = shift ? ps2_keyboard_shifted_digit(key) : base;
-        return true;
-    }
-    if (key == 39) {
-        *code = K_0;
-        *ch = shift ? ')' : '0';
-        return true;
-    }
-
-    switch (key) {
-        case 40: *code = K_ENTER; *ch = K_ENTER; return true;
-        case 41: *code = K_ESCAPE; return true;
-        case 42: *code = K_BACKSPACE; *ch = K_BACKSPACE; return true;
-        case 43: *code = K_TAB; *ch = K_TAB; return true;
-        case 44: *code = ' '; *ch = ' '; return true;
-        case 45: *code = K_MINUS; *ch = shift ? '_' : '-'; return true;
-        case 46: *code = '='; *ch = shift ? '+' : '='; return true;
-        case 47: *code = '['; *ch = shift ? '{' : '['; return true;
-        case 48: *code = ']'; *ch = shift ? '}' : ']'; return true;
-        case 49: *code = '\\'; *ch = shift ? '|' : '\\'; return true;
-        case 51: *code = ';'; *ch = shift ? ':' : ';'; return true;
-        case 52: *code = '\''; *ch = shift ? '"' : '\''; return true;
-        case 53: *code = '`'; *ch = shift ? '~' : '`'; return true;
-        case 54: *code = ','; *ch = shift ? '<' : ','; return true;
-        case 55: *code = K_PERIOD; *ch = shift ? '>' : '.'; return true;
-        case 56: *code = K_FWD_SLASH; *ch = shift ? '?' : '/'; return true;
-
-        case 58: *code = K_F1; return true;
-        case 59: *code = K_F2; return true;
-        case 60: *code = K_F3; return true;
-        case 61: *code = K_F4; return true;
-        case 62: *code = K_F5; return true;
-        case 63: *code = K_F6; return true;
-        case 64: *code = K_F7; return true;
-        case 65: *code = K_F8; return true;
-        case 66: *code = K_F9; return true;
-        case 67: *code = K_F10; return true;
-        case 68: *code = K_F11; return true;
-        case 69: *code = K_F12; return true;
-
-        case 74: *code = K_HOME; return true;
-        case 75: *code = K_PAGE_UP; return true;
-        case 76: *code = 127; return true; // Desktop client treats Delete as Backspace.
-        case 77: *code = K_END; return true;
-        case 78: *code = K_PAGE_DOWN; return true;
-        case 79: *code = K_RIGHT; return true;
-        case 80: *code = K_LEFT; return true;
-        case 81: *code = K_DOWN; return true;
-        case 82: *code = K_UP; return true;
-
-        case 84: *code = K_FWD_SLASH; *ch = K_FWD_SLASH; return true;
-        case 85: *code = K_ASTERISK; *ch = K_ASTERISK; return true;
-        case 86: *code = K_MINUS; *ch = K_MINUS; return true;
-        case 87: *code = K_PLUS; *ch = K_PLUS; return true;
-        case 88: *code = K_ENTER; *ch = K_ENTER; return true;
-        case 89: *code = K_1; *ch = K_1; return true;
-        case 90: *code = K_2; *ch = K_2; return true;
-        case 91: *code = K_3; *ch = K_3; return true;
-        case 92: *code = K_4; *ch = K_4; return true;
-        case 93: *code = K_5; *ch = K_5; return true;
-        case 94: *code = K_6; *ch = K_6; return true;
-        case 95: *code = K_7; *ch = K_7; return true;
-        case 96: *code = K_8; *ch = K_8; return true;
-        case 97: *code = K_9; *ch = K_9; return true;
-        case 98: *code = K_0; *ch = K_0; return true;
-        case 99: *code = K_PERIOD; *ch = K_PERIOD; return true;
-
-        // Modifier usages. gameshell.c already understands these browser/AWT-style codes.
-        case 224:
-        case 228: *code = K_CONTROL; return true;
-        case 225:
-        case 229: *code = 16; return true; // Shift
-        case 226:
-        case 230: *code = 18; return true; // Alt
-        default: return false;
-    }
-}
-
-static void ps2_keyboard_apply_held_camera(Client *c) {
-    // Desktop camera control is action_key level state, not a repeat event. OR physical keyboard
-    // arrows into whatever the DualShock right stick contributed earlier this frame.
-    if (ps2_keyboard_held[80]) c->shell->action_key[1] = 1; // Left
-    if (ps2_keyboard_held[79]) c->shell->action_key[2] = 1; // Right
-    if (ps2_keyboard_held[82]) c->shell->action_key[3] = 1; // Up
-    if (ps2_keyboard_held[81]) c->shell->action_key[4] = 1; // Down
-}
-
-static void ps2_poll_usb_keyboard(Client *c) {
-    static bool raw_mode_ready = false;
-
-    if (!ps2_usb_keyboard_ready) {
-        return;
-    }
-
-    // Do not touch the keyboard read mode during platform_init/MMCE's first filesystem burst.
-    // The first normal game-loop poll is a safe point to perform the FileXio ioctl and flush.
-    if (!raw_mode_ready) {
-        int raw_ret = PS2KbdSetReadmode(PS2KBD_READMODE_RAW);
-        int block_ret = PS2KbdSetBlockingMode(PS2KBD_NONBLOCKING);
-        int flush_ret = PS2KbdFlushBuffer();
-        raw_mode_ready = true;
-        rs2_log("kbd: runtime raw mode ret=%d block=%d flush=%d\n",
-                raw_ret, block_ret, flush_ret);
-    }
-
-    // Raw mode is the same event model SDL uses: one DOWN and one UP event per physical key.
-    // Drain a small bounded batch each frame; held camera state below does not depend on repeats.
-    for (int i = 0; i < 16; i++) {
-        PS2KbdRawKey raw = {0};
-        if (PS2KbdReadRaw(&raw) <= 0 || raw.key == 0) {
-            break;
-        }
-
-        const uint8_t key = raw.key;
-        const bool down = raw.state == PS2KBD_RAWKEY_DOWN;
-        const bool up = raw.state == PS2KBD_RAWKEY_UP;
-        if (!down && !up) {
-            continue;
-        }
-
-        ps2_usb_keyboard_activate(c);
-        c->shell->idle_cycles = 0;
-
-        if (down) {
-            // Ignore duplicate make packets for held-state purposes, but still allow the driver
-            // to deliver repeated printable key-down events if it chooses to.
-            ps2_keyboard_held[key] = true;
-
-            int code = -1;
-            int ch = -1;
-            if (ps2_keyboard_translate(key, &code, &ch)) {
-                ps2_keyboard_down_code[key] = code;
-                ps2_keyboard_down_ch[key] = ch;
-                key_pressed(c->shell, code, ch);
-            }
-        } else {
-            int code = ps2_keyboard_down_code[key];
-            int ch = ps2_keyboard_down_ch[key];
-
-            // If this key's DOWN predated our state table (hotplug/recovery), translate it now.
-            if (code == 0 && ch == 0) {
-                ps2_keyboard_translate(key, &code, &ch);
-            }
-
-            ps2_keyboard_held[key] = false;
-            ps2_keyboard_down_code[key] = 0;
-            ps2_keyboard_down_ch[key] = 0;
-
-            if (code != -1 || ch != -1) {
-                key_released(c->shell, code, ch);
-            }
-        }
-    }
-
-    ps2_keyboard_apply_held_camera(c);
-}
-
 void platform_poll_events(Client *c) {
-    // The MIDI clock and optional USB mouse must advance even when no DualShock is connected.
-    // This is sequencing only; all sample playback, pitching and mixing stays on SPU2.
+    // MIDI timing advances independently of controller presence.
     ps2_music_update();
-    ps2_poll_usb_mouse(c);
 
     int state = padGetState(0, 0);
     if (state != PAD_STATE_STABLE && state != PAD_STATE_FINDCTP1) {
-        c->shell->action_key[1] = 0;
-        c->shell->action_key[2] = 0;
-        c->shell->action_key[3] = 0;
-        c->shell->action_key[4] = 0;
-        ps2_poll_usb_keyboard(c);
         return;
     }
 
@@ -1535,24 +1128,18 @@ void platform_poll_events(Client *c) {
     // able to break grid capture, even if cursor scaling/deadzone logic changes later.
     int raw_lx = padData.ljoy_h - 128;
     int raw_ly = padData.ljoy_v - 128;
-
-    // A real USB mouse wins pointer ownership completely while connected. This makes mouse +
-    // controller coexistence deterministic on hardware: the pad's left stick and D-pad grid logic
-    // cannot move/snap shell->mouse_x/y until the mouse is physically disconnected.
     bool left_stick_active = !c->controller_settings_visible &&
-                             !ps2_usb_mouse_connected &&
                              (abs(raw_lx) > c->controller_cursor_deadzone ||
                               abs(raw_ly) > c->controller_cursor_deadzone);
     // Only the pointer-owning left stick exits grid mode. The right stick remains free to rotate
     // and tilt the camera while a D-pad-selected inventory/bank/shop slot stays focused.
-    bool analog_override_active = left_stick_active || ps2_usb_mouse_connected;
+    bool analog_override_active = left_stick_active;
 
-    if (left_stick_active) {
+    if (left_stick_active && c->controller_grid_component >= 0) {
         ps2_release_grid_focus(c);
     }
 
-    // Left stick moves the virtual pointer only when it owns it; right stick camera remains
-    // independent and can still be used while the physical mouse owns the pointer.
+    // Left stick moves the virtual pointer; right stick remains independent camera control.
     int dx = 0;
     int dy = 0;
     if (left_stick_active) {
@@ -1711,15 +1298,6 @@ void platform_poll_events(Client *c) {
     bool r2 = !(padData.btns & PAD_R2);
     c->controller_zoom_bias = c->controller_settings_visible ? 0 : (r2 ? 1 : (l2 ? -1 : 0));
 
-    // A physical mouse is desktop-style free-pointer input. Do not let stale controller
-    // grid-navigation state snap it back into inventory/bank/chat grids while the mouse owns it.
-    if (ps2_usb_mouse_connected && !c->virtual_keyboard_visible &&
-        !c->controller_settings_visible && !c->menu_visible) {
-        c->controller_grid_analog_override = true;
-        c->controller_dpad_x = 0;
-        c->controller_dpad_y = 0;
-    }
-
     // D-pad is routed contextually by the client: virtual keyboard, context menus, and PS2
     // controller settings all use the same one-shot direction fields.
     bool dpad_up = !(padData.btns & PAD_UP);
@@ -1748,9 +1326,6 @@ void platform_poll_events(Client *c) {
     dpad_left_was_down = dpad_left;
     dpad_right_was_down = dpad_right;
 
-    // Do this last when a pad is present so centered right-stick camera state cannot erase a
-    // one-tick physical-keyboard arrow pulse in the same frame.
-    ps2_poll_usb_keyboard(c);
 }
 
 uint64_t rs2_now(void) {

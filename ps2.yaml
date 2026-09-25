@@ -74,12 +74,6 @@ targets:
       - F_init_only_boot_ps2_filesystem_driver
       - F_waitUntilDeviceIsReady_ps2_filesystem_driver
       - F_getBootDeviceID_ps2_filesystem_driver
-      - F_internals_ps2_mouse_driver
-      - F_init_ps2_mouse_driver
-      - F_deinit_ps2_mouse_driver
-      - F_internals_ps2_keyboard_driver
-      - F_init_ps2_keyboard_driver
-      - F_deinit_ps2_keyboard_driver
       # Modern PS2 UI milestone 1 stays outside the legacy Client renderer. Intercept only
       # prebuilt PS2SDK calls: the gsKit sprite wrapper reorganizes the final uploaded canvas,
       # while the padRead wrapper remaps the physical cursor back to the old viewport/sidebar
@@ -92,9 +86,6 @@ targets:
       # world_add_loc2()'s subtree, not decoding/Packet/world_build(). Removed so this build now
       # exercises the real, full path again, with new one-shot entry checkpoints in world_add_loc2()
       # and loctype_get_model() (world.c/loctype.c) to find exactly where in that subtree it dies.
-    headers:
-      - mouse
-      - kbd
     libs:
       - gskit
       - dmakit
@@ -103,8 +94,6 @@ targets:
       - patches
       # Vendored ps2_drivers sources are compiled directly into this target.
       - filexio
-      - mouse
-      - kbd
       - pad
       # Standalone PS2Build world package installed by install-audsrv-package.bat.
       # Keep audio off the EE software-mixing path: the first hardware milestone uses
@@ -143,15 +132,13 @@ targets:
       - bdm:bdm
       - bdmfs_fatfs:bdmfs_fatfs
       - usbmass_bd:usbmass_bd
-      # New boot-device/HID support lives in the high-memory driver overlay.
+      # New boot-device support lives in the high-memory driver overlay.
       - sio2man:sio2man
       - filexio:fileXio
       - mcman:mcman
       - mcserv:mcserv
       - mx4sio_bd:mx4sio_bd
       - cdfs:cdfs
-      - mouse:ps2mouse
-      - kbd:ps2kbd
       # MMCE is the one boot filesystem not recognized by ps2_drivers' boot-only helper.
       # Embed the full filesystem-capable world driver so an mmce0:/ or mmce1:/ launch can
       # restore its own boot filesystem after the mandatory clean IOP reset.
