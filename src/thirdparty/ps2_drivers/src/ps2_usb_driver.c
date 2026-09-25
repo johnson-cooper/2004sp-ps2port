@@ -1,3 +1,10 @@
+/* PS2Build names the main executable target "client", which injects -Dclient.
+ * PS2SDK uses 'client' as a struct member name in sifrpc-common.h, so remove
+ * that target-name macro before any SDK headers are parsed in vendored code. */
+#ifdef client
+#undef client
+#endif
+
 /*
 # _____     ___ ____     ___ ____
 #  ____|   |    ____|   |        | |____|
