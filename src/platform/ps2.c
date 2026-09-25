@@ -11,6 +11,7 @@
 #include <iopheap.h>
 #include <sbv_patches.h>
 #include <ps2_filesystem_driver.h>
+#include <ps2_fileXio_driver.h>
 #include <ps2_usbd_driver.h>
 #include <ps2_mouse_driver.h>
 #include <ps2_keyboard_driver.h>
@@ -143,6 +144,49 @@ static char ps2_launch_dir[256];
 static bool ps2_filesystem_ready;
 static bool ps2_usb_mouse_ready;
 static bool ps2_usb_keyboard_ready;
+
+static bool ps2_is_mmce_boot(void) {
+    return !strncmp(ps2_launch_dir, "mmce:", 5) ||
+           !strncmp(ps2_launch_dir, "mmce0:", 6) ||
+           !strncmp(ps2_launch_dir, "mmce1:", 6);
+}
+
+// ps2_drivers' boot-only filesystem helper does not currently recognize MMCE device prefixes.
+// MMCE therefore needs the SDK's full mmceman IOP module after the clean IOP reset. fileXio's
+// ps2_drivers wrapper also restores its required SIO2MAN dependency, which keeps this path on the
+// same PS2Build driver stack rather than depending on an arbitrary ROM SIO2MAN revision.
+static bool ps2_init_mmce_boot_filesystem(void) {
+    extern unsigned char mmceman_embed_irx[];
+    extern unsigned int size_mmceman_embed_irx;
+
+    int filexio_ret = init_fileXio_driver();
+    int mmceman_modres = -1;
+    int mmceman_ret = -1;
+
+    if (filexio_ret >= 0) {
+        mmceman_ret = SifExecModuleBuffer(
+            mmceman_embed_irx, size_mmceman_embed_irx, 0, NULL, &mmceman_modres);
+    }
+
+    rs2_log("fs: MMCE fileXio=%d mmceman=%d/%d\n",
+            filexio_ret, mmceman_ret, mmceman_modres);
+
+    if (filexio_ret < 0 || mmceman_ret < 0 || mmceman_modres < 0) {
+        return false;
+    }
+
+    char ready_path[FILENAME_MAX];
+    if (ps2_launch_dir[0]) {
+        snprintf(ready_path, sizeof(ready_path), "%s", ps2_launch_dir);
+    } else {
+        snprintf(ready_path, sizeof(ready_path), "mmce0:/");
+    }
+
+    bool ready = waitUntilDeviceIsReady(ready_path);
+    rs2_log("fs: MMCE boot path %s ready=%d\n", ready_path, ready ? 1 : 0);
+    return ready;
+}
+
 
 // main() calls this before platform_init(), while argv[0] still contains the launcher's device
 // spelling. No I/O happens here; it only remembers the directory for asset/log paths after the
@@ -654,8 +698,12 @@ bool platform_init(void) {
     rs2_log("fs: restoring boot filesystem cwd=%s\n", boot_cwd);
     ps2_boot_progress(82);
 
-    init_only_boot_ps2_filesystem_driver();
-    ps2_filesystem_ready = true;
+    if (ps2_is_mmce_boot()) {
+        ps2_filesystem_ready = ps2_init_mmce_boot_filesystem();
+    } else {
+        init_only_boot_ps2_filesystem_driver();
+        ps2_filesystem_ready = true;
+    }
 
     char ready_cwd[FILENAME_MAX];
     if (!getcwd(ready_cwd, sizeof(ready_cwd))) {

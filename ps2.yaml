@@ -93,6 +93,10 @@ targets:
       - dev9:dev9_embed
       - netman:netman_embed
       - smap:smap_embed
+      # MMCE is the one boot filesystem not recognized by ps2_drivers' boot-only helper.
+      # Embed the full filesystem-capable world driver so an mmce0:/ or mmce1:/ launch can
+      # restore its own boot filesystem after the mandatory clean IOP reset.
+      - mmceman:mmceman_embed
       #
       # Storage IRXs are no longer hard-coded here. ps2_drivers restores only the filesystem the
       # ELF was launched from, at the same post-DHCP point where the hardware-proven BDM stack used
