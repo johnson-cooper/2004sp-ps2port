@@ -12,6 +12,7 @@
 #include <sbv_patches.h>
 #include <ps2_filesystem_driver.h>
 #include <ps2_fileXio_driver.h>
+#include <ps2_sio2man_driver.h>
 #include <ps2_usbd_driver.h>
 #include <ps2_mouse_driver.h>
 #include <ps2_keyboard_driver.h>
@@ -712,14 +713,23 @@ bool platform_init(void) {
     rs2_log("fs: boot filesystem restored cwd=%s\n", ready_cwd);
     ps2_boot_progress(88);
 
-    // Keep the proven ROM pad stack. A boot device such as MX4SIO/MMCE may already have SIO2MAN
-    // resident; loading the ROM copy can then report "already loaded", but the existing service is
-    // left intact and PADMAN/libpad bind to it normally.
-    int sio2man_ret = SifLoadModule("rom0:SIO2MAN", 0, NULL);
+    // MMCE installs a loadcore hook waiting for a SIO2MAN implementation it knows how to wrap.
+    // Keep the filesystem sequence untouched, then satisfy that hook with the embedded PS2SDK
+    // SIO2MAN. This is intentionally AFTER MMCEMAN has initialized; preloading PS2SDK SIO2MAN
+    // before MMCEMAN was tested on real hardware and stalled the first loading bar.
+    //
+    // All non-MMCE boots retain the proven ROM SIO2MAN path.
+    const bool mmce_pad_path = ps2_is_mmce_boot();
+    int sio2man_ret = mmce_pad_path
+        ? (int)init_sio2man_driver()
+        : SifLoadModule("rom0:SIO2MAN", 0, NULL);
     int padman_ret = SifLoadModule("rom0:PADMAN", 0, NULL);
-    rs2_log("pad: SIO2MAN ret=%d PADMAN ret=%d\n", sio2man_ret, padman_ret);
-    padInit(0);
-    padPortOpen(0, 0, padDmaBuf);
+    int pad_init_ret = padInit(0);
+    int pad_open_ret = padPortOpen(0, 0, padDmaBuf);
+    int pad_state_after_open = padGetState(0, 0);
+    rs2_log("pad: source=%s SIO2MAN=%d PADMAN=%d padInit=%d padOpen=%d state=%d\n",
+            mmce_pad_path ? "ps2sdk-post-mmce" : "rom",
+            sio2man_ret, padman_ret, pad_init_ret, pad_open_ret, pad_state_after_open);
 
     // Force DualShock2 analog mode, locked so the player can't toggle it back off with the
     // physical Analog button. Without this the pad boots in digital mode (confirmed via a real
@@ -729,14 +739,16 @@ bool platform_init(void) {
     // infinite loop) so a real disconnected-controller boot can't hang here - if it times out,
     // padSetMainMode is still called (harmless no-op on a pad that was never present) and
     // platform_poll_events() already tolerates a pad that never reaches PAD_STATE_STABLE.
+    int pad_final_state = pad_state_after_open;
     for (int i = 0; i < 100; i++) {
-        int state = padGetState(0, 0);
-        if (state == PAD_STATE_STABLE || state == PAD_STATE_FINDCTP1) {
+        pad_final_state = padGetState(0, 0);
+        if (pad_final_state == PAD_STATE_STABLE || pad_final_state == PAD_STATE_FINDCTP1) {
             break;
         }
         SleepMsApprox();
     }
-    padSetMainMode(0, 0, PAD_MMODE_DUALSHOCK, PAD_MMODE_LOCK);
+    int pad_mode_ret = padSetMainMode(0, 0, PAD_MMODE_DUALSHOCK, PAD_MMODE_LOCK);
+    rs2_log("pad: final_state=%d setMainMode=%d\n", pad_final_state, pad_mode_ret);
     ps2_boot_progress(90);
 
     // Optional USB HID. This is deliberately post-DHCP and post-filesystem so USBD activity cannot
