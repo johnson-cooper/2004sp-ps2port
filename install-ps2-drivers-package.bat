@@ -121,7 +121,10 @@ cmake -S "!SRCDIR!" -B "%BUILDDIR%" -G Ninja ^
   -DCMAKE_TOOLCHAIN_FILE="%TOOLCHAIN%" ^
   -DCMAKE_BUILD_TYPE=Release ^
   -DBUILD_SAMPLES=OFF ^
-  -DCMAKE_INSTALL_PREFIX="%DEST%"
+  -DCMAKE_INSTALL_PREFIX="%DEST%" ^
+  -DINSTALL_LIB_DIR="%DEST%/lib" ^
+  -DINSTALL_INC_DIR="%DEST%/include" ^
+  -DINSTALL_PKGCONFIG_DIR="%DEST%/lib/pkgconfig"
 if errorlevel 1 (
     echo ERROR: CMake configure failed.
     goto :fail
@@ -136,6 +139,17 @@ if errorlevel 1 (
 )
 
 echo.
+echo Built ps2_drivers archives:
+set "FOUND_ARCHIVE=0"
+for /r "%BUILDDIR%" %%P in (*ps2_drivers*.a) do (
+    echo   %%~fP
+    set "FOUND_ARCHIVE=1"
+)
+if "!FOUND_ARCHIVE!"=="0" (
+    echo   WARNING: no *ps2_drivers*.a archive was found under the CMake build directory.
+)
+
+echo.
 echo Installing ps2_drivers into the PS2Build world package tree...
 cmake --install "%BUILDDIR%"
 if errorlevel 1 (
@@ -143,8 +157,10 @@ if errorlevel 1 (
     goto :fail
 )
 
-rem PS2Build's custom-package contract is packages\world\<name> with the normal
-rem CMake install prefix set to that package root. Keep two defensive fallbacks:
+rem PS2Build's custom-package contract is packages\world\<name>. Upstream
+rem ps2_drivers still installs through its INSTALL_LIB_DIR / INSTALL_INC_DIR cache
+rem variables, so set those explicitly in addition to CMAKE_INSTALL_PREFIX.
+rem Keep two defensive fallbacks:
 rem upstream revisions have changed their CMake install details more than once,
 rem but the public headers and the built archive are stable inputs we can place
 rem into the package deterministically if an install rule omits them.
@@ -163,18 +179,27 @@ if not exist "%DEST%\include\ps2_filesystem_driver.h" (
 
 if not exist "%DEST%\lib\libps2_drivers.a" (
     set "BUILT_LIB="
-    for /f "delims=" %%P in ('dir /s /b "%BUILDDIR%\libps2_drivers.a" 2^>nul') do (
-        if not defined BUILT_LIB set "BUILT_LIB=%%P"
+    rem Prefer the final combined archive and deliberately ignore the implementation-only archive.
+    for /r "%BUILDDIR%" %%P in (*ps2_drivers*.a) do (
+        if /i not "%%~nxP"=="libps2_drivers_impl.a" (
+            if not defined BUILT_LIB set "BUILT_LIB=%%~fP"
+        )
     )
     if defined BUILT_LIB (
         echo.
-        echo CMake did not install libps2_drivers.a; copying the built archive...
+        echo CMake did not install libps2_drivers.a; copying:
+        echo   !BUILT_LIB!
         if not exist "%DEST%\lib" mkdir "%DEST%\lib"
         copy /Y "!BUILT_LIB!" "%DEST%\lib\libps2_drivers.a" >nul
         if errorlevel 1 (
             echo ERROR: Failed to copy libps2_drivers.a.
             goto :fail
         )
+    ) else (
+        echo.
+        echo ERROR: CMake reported a successful ps2_drivers build but no final combined
+        echo        ps2_drivers archive could be found. The archive listing above is authoritative.
+        goto :fail
     )
 )
 
