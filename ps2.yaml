@@ -23,20 +23,28 @@ targets:
       - libsd
     imports_lst: src/iop/rs2midi/imports.lst
 
-  # Local subset of fjtrujy/ps2_drivers. Built in-tree because the current
-  # PS2Build SDK has no release artifact for the custom ps2_drivers package.
-  - name: ps2_drivers_local
-    type: ee_lib
+  - name: client
+    type: ee
     opt: -O1
+    # Milestone 3J: keep the normal client/BSS layout hardware-good and place
+    # new rs2midi EE loader code/data in an isolated high-memory PT_LOAD.
+    linkfile: ps2_audio_linkfile.ld
     sources:
+      - src/*.c
+      - src/entry/*.c
+      - src/platform/*.c
+      - src/thirdparty/*.c
       - src/thirdparty/ps2_drivers/src/*.c
+      - src/datastruct/*.c
+      - src/sound/*.c
+      - src/wordenc/*.c
     include_dirs:
       - src/thirdparty/ps2_drivers/include
-    headers:
-      - kernel
-      - mouse
-      - kbd
     defines:
+      - client
+      - __PS2__
+      - WITH_RSA_LIBTOM
+      - PS2IP_DNS
       - F_internals_ps2_sio2man_driver
       - F_init_ps2_sio2man_driver
       - F_deinit_ps2_sio2man_driver
@@ -72,28 +80,6 @@ targets:
       - F_internals_ps2_keyboard_driver
       - F_init_ps2_keyboard_driver
       - F_deinit_ps2_keyboard_driver
-
-  - name: client
-    type: ee
-    opt: -O1
-    # Milestone 3J: keep the normal client/BSS layout hardware-good and place
-    # new rs2midi EE loader code/data in an isolated high-memory PT_LOAD.
-    linkfile: ps2_audio_linkfile.ld
-    sources:
-      - src/*.c
-      - src/entry/*.c
-      - src/platform/*.c
-      - src/thirdparty/*.c
-      - src/datastruct/*.c
-      - src/sound/*.c
-      - src/wordenc/*.c
-    include_dirs:
-      - src/thirdparty/ps2_drivers/include
-    defines:
-      - client
-      - __PS2__
-      - WITH_RSA_LIBTOM
-      - PS2IP_DNS
       # Modern PS2 UI milestone 1 stays outside the legacy Client renderer. Intercept only
       # prebuilt PS2SDK calls: the gsKit sprite wrapper reorganizes the final uploaded canvas,
       # while the padRead wrapper remaps the physical cursor back to the old viewport/sidebar
@@ -115,8 +101,7 @@ targets:
       - ps2ip
       - netman
       - patches
-      # Vendored ps2_drivers subset, followed by the SDK EE client libraries it calls.
-      - ps2_drivers_local
+      # Vendored ps2_drivers sources are compiled directly into this target.
       - filexio
       - mouse
       - kbd
