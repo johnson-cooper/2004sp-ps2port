@@ -12,6 +12,7 @@
 #include <sbv_patches.h>
 #include <ps2_filesystem_driver.h>
 #include <ps2_fileXio_driver.h>
+#include <ps2_sio2man_driver.h>
 #include <ps2_usbd_driver.h>
 #include <ps2_mouse_driver.h>
 #include <ps2_keyboard_driver.h>
@@ -151,27 +152,97 @@ static bool ps2_is_mmce_boot(void) {
            !strncmp(ps2_launch_dir, "mmce1:", 6);
 }
 
+static bool ps2_is_usb_mass_boot(void) {
+    return !strncmp(ps2_launch_dir, "mass:", 5) ||
+           !strncmp(ps2_launch_dir, "mass0:", 6) ||
+           !strncmp(ps2_launch_dir, "mass1:", 6);
+}
+
+// USB boot deliberately does NOT use ps2_drivers' generic filesystem helper.
+// Real hardware already proved this exact BDM sequence reliable and fast:
+// IOMANX -> BDM -> BDMFS_FATFS -> USBD -> USBMASS_BD.
+// Keep the receiving filesystem/block stack ready before USBD discovers the drive.
+static bool ps2_init_proven_usb_boot_filesystem(void) {
+    extern unsigned char iomanX_irx[];
+    extern unsigned int size_iomanX_irx;
+    extern unsigned char bdm_irx[];
+    extern unsigned int size_bdm_irx;
+    extern unsigned char bdmfs_fatfs_irx[];
+    extern unsigned int size_bdmfs_fatfs_irx;
+    extern unsigned char usbd_irx[];
+    extern unsigned int size_usbd_irx;
+    extern unsigned char usbmass_bd_irx[];
+    extern unsigned int size_usbmass_bd_irx;
+
+    int iomanx_modres = -1;
+    int iomanx_ret = SifExecModuleBuffer(
+        iomanX_irx, size_iomanX_irx, 0, NULL, &iomanx_modres);
+    rs2_log("usb: proven iomanX ret=%d/%d\n", iomanx_ret, iomanx_modres);
+
+    int bdm_modres = -1;
+    int bdm_ret = SifExecModuleBuffer(
+        bdm_irx, size_bdm_irx, 0, NULL, &bdm_modres);
+    rs2_log("usb: proven bdm ret=%d/%d\n", bdm_ret, bdm_modres);
+
+    int bdmfs_modres = -1;
+    int bdmfs_ret = SifExecModuleBuffer(
+        bdmfs_fatfs_irx, size_bdmfs_fatfs_irx, 0, NULL, &bdmfs_modres);
+    rs2_log("usb: proven bdmfs_fatfs ret=%d/%d\n", bdmfs_ret, bdmfs_modres);
+
+    int usbd_modres = -1;
+    int usbd_ret = SifExecModuleBuffer(
+        usbd_irx, size_usbd_irx, 0, NULL, &usbd_modres);
+    rs2_log("usb: proven usbd ret=%d/%d\n", usbd_ret, usbd_modres);
+
+    int usbmass_modres = -1;
+    int usbmass_ret = SifExecModuleBuffer(
+        usbmass_bd_irx, size_usbmass_bd_irx, 0, NULL, &usbmass_modres);
+    rs2_log("usb: proven usbmass_bd ret=%d/%d\n", usbmass_ret, usbmass_modres);
+
+    bool modules_ok =
+        iomanx_ret >= 0 && iomanx_modres >= 0 &&
+        bdm_ret >= 0 && bdm_modres >= 0 &&
+        bdmfs_ret >= 0 && bdmfs_modres >= 0 &&
+        usbd_ret >= 0 && usbd_modres >= 0 &&
+        usbmass_ret >= 0 && usbmass_modres >= 0;
+
+    char ready_path[FILENAME_MAX];
+    if (ps2_launch_dir[0]) {
+        snprintf(ready_path, sizeof(ready_path), "%s", ps2_launch_dir);
+    } else {
+        snprintf(ready_path, sizeof(ready_path), "mass0:/");
+    }
+
+    bool ready = modules_ok && waitUntilDeviceIsReady(ready_path);
+    rs2_log("usb: proven boot path %s ready=%d\n", ready_path, ready ? 1 : 0);
+    return ready;
+}
+
 // ps2_drivers' boot-only filesystem helper does not currently recognize MMCE device prefixes.
-// MMCE therefore needs the SDK's full mmceman IOP module after the clean IOP reset. fileXio's
-// ps2_drivers wrapper also restores its required SIO2MAN dependency, which keeps this path on the
-// same PS2Build driver stack rather than depending on an arbitrary ROM SIO2MAN revision.
+// MMCEMAN hooks SIO2MAN and specifically supports the PS2SDK implementation. Establish that
+// implementation first, then IOMANX/FileXio, then MMCEMAN. PADMAN later binds to this same
+// SIO2MAN instance instead of mixing MMCEMAN with a late-loaded ROM SIO2MAN.
 static bool ps2_init_mmce_boot_filesystem(void) {
     extern unsigned char mmceman_embed_irx[];
     extern unsigned int size_mmceman_embed_irx;
 
-    int filexio_ret = init_fileXio_driver();
+    int sio2man_ret = init_sio2man_driver();
+    int filexio_ret = -1;
     int mmceman_modres = -1;
     int mmceman_ret = -1;
 
+    if (sio2man_ret >= 0) {
+        filexio_ret = init_fileXio_driver();
+    }
     if (filexio_ret >= 0) {
         mmceman_ret = SifExecModuleBuffer(
             mmceman_embed_irx, size_mmceman_embed_irx, 0, NULL, &mmceman_modres);
     }
 
-    rs2_log("fs: MMCE fileXio=%d mmceman=%d/%d\n",
-            filexio_ret, mmceman_ret, mmceman_modres);
+    rs2_log("fs: MMCE sio2man=%d fileXio=%d mmceman=%d/%d\n",
+            sio2man_ret, filexio_ret, mmceman_ret, mmceman_modres);
 
-    if (filexio_ret < 0 || mmceman_ret < 0 || mmceman_modres < 0) {
+    if (sio2man_ret < 0 || filexio_ret < 0 || mmceman_ret < 0 || mmceman_modres < 0) {
         return false;
     }
 
@@ -698,7 +769,13 @@ bool platform_init(void) {
     rs2_log("fs: restoring boot filesystem cwd=%s\n", boot_cwd);
     ps2_boot_progress(82);
 
-    if (ps2_is_mmce_boot()) {
+    const bool usb_mass_boot = ps2_is_usb_mass_boot();
+    const bool mmce_boot = ps2_is_mmce_boot();
+
+    if (usb_mass_boot) {
+        // Preserve the exact real-hardware-proven USB storage stack and ordering.
+        ps2_filesystem_ready = ps2_init_proven_usb_boot_filesystem();
+    } else if (mmce_boot) {
         ps2_filesystem_ready = ps2_init_mmce_boot_filesystem();
     } else {
         init_only_boot_ps2_filesystem_driver();
@@ -712,14 +789,19 @@ bool platform_init(void) {
     rs2_log("fs: boot filesystem restored cwd=%s\n", ready_cwd);
     ps2_boot_progress(88);
 
-    // Keep the proven ROM pad stack. A boot device such as MX4SIO/MMCE may already have SIO2MAN
-    // resident; loading the ROM copy can then report "already loaded", but the existing service is
-    // left intact and PADMAN/libpad bind to it normally.
-    int sio2man_ret = SifLoadModule("rom0:SIO2MAN", 0, NULL);
+    // Keep the hardware-proven ROM pad path everywhere except MMCE. MMCEMAN hooks SIO2MAN,
+    // so MMCE deliberately keeps the already-loaded PS2SDK SIO2MAN instance that MMCEMAN supports.
+    // Loading ROM SIO2MAN after MMCEMAN can leave pad communication bound to an incompatible hook.
+    int pad_sio2man_ret = 0;
+    if (!mmce_boot) {
+        pad_sio2man_ret = SifLoadModule("rom0:SIO2MAN", 0, NULL);
+    }
     int padman_ret = SifLoadModule("rom0:PADMAN", 0, NULL);
-    rs2_log("pad: SIO2MAN ret=%d PADMAN ret=%d\n", sio2man_ret, padman_ret);
-    padInit(0);
-    padPortOpen(0, 0, padDmaBuf);
+    int pad_init_ret = padInit(0);
+    int pad_open_ret = padPortOpen(0, 0, padDmaBuf);
+    rs2_log("pad: source=%s SIO2MAN=%d PADMAN=%d padInit=%d padOpen=%d\n",
+            mmce_boot ? "ps2sdk/mmce" : "rom",
+            pad_sio2man_ret, padman_ret, pad_init_ret, pad_open_ret);
 
     // Force DualShock2 analog mode, locked so the player can't toggle it back off with the
     // physical Analog button. Without this the pad boots in digital mode (confirmed via a real
@@ -743,7 +825,9 @@ bool platform_init(void) {
     // interfere with the hardware-proven DEV9/SMAP bring-up. init_usbd_driver() is shared with the
     // boot-filesystem helper: USB boots reuse its existing USBD instance, while MMCE/HDD/CD boots
     // get only the USB core needed for a mouse/keyboard. Every failure is non-fatal.
-    int hid_usbd_ret = init_usbd_driver();
+    // A mass:/ boot already loaded USBD through the proven BDM sequence above. Do not ask the
+    // generic wrapper to execute USBD a second time; mouse/keyboard IRXs can bind to the live module.
+    int hid_usbd_ret = usb_mass_boot ? 0 : init_usbd_driver();
     int hid_mouse_ret = -1;
     int hid_keyboard_ret = -1;
     if (hid_usbd_ret >= 0) {
