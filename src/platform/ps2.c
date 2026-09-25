@@ -906,6 +906,48 @@ void platform_clear_surface(void) {
 // Keep this substantially-expanded experimental presenter out of normal .text. The branch's
 // hardware workflow has already proven normal section placement sensitive on real PS2 hardware.
 __attribute__((section(".ps2_runtime_text"), noinline))
+static void ps2_draw_final_cursor_overlay(void) {
+#if PS2_NULL_UI || PS2_SAFE_INTERFACE
+    return;
+#else
+    Client *c = ps2_crash_client;
+    if (!c || !c->shell || c->controller_settings_visible) {
+        return;
+    }
+
+    int cursor_x = c->shell->mouse_x;
+    int cursor_y = c->shell->mouse_y;
+    if (!c->controller_grid_analog_override &&
+        c->controller_grid_screen_valid && c->controller_grid_component >= 0) {
+        cursor_x = c->controller_grid_screen_x;
+        cursor_y = c->controller_grid_screen_y;
+    }
+
+    if (cursor_x < 0) cursor_x = 0;
+    if (cursor_x >= SCREEN_WIDTH) cursor_x = SCREEN_WIDTH - 1;
+    if (cursor_y < 0) cursor_y = 0;
+    if (cursor_y >= SCREEN_HEIGHT) cursor_y = SCREEN_HEIGHT - 1;
+
+    const float scale_x = (float)SCREEN_DST_WIDTH / (float)SCREEN_LOGICAL_WIDTH;
+    const float scale_y = (float)SCREEN_DST_HEIGHT / (float)SCREEN_LOGICAL_HEIGHT;
+    const float x = (float)SCREEN_DST_X + (float)cursor_x * scale_x;
+    const float y = (float)SCREEN_DST_Y + (float)cursor_y * scale_y;
+
+    // True final-frame cursor: queued after the completed world/UI composite so sidebar tabs,
+    // inventory/equipment, chatbox, context menus and modal interfaces can never cover it.
+    const float outer = 6.0f;
+    const float inner = 4.0f;
+    const u64 black = GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x80, 0x00);
+    const u64 white = GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00);
+
+    gsKit_prim_sprite(gsGlobal, x - outer, y - 1.5f, x + outer + 1.0f, y + 1.5f, 1, black);
+    gsKit_prim_sprite(gsGlobal, x - 1.5f, y - outer, x + 1.5f, y + outer + 1.0f, 1, black);
+    gsKit_prim_sprite(gsGlobal, x - inner, y - 0.5f, x + inner + 1.0f, y + 0.5f, 2, white);
+    gsKit_prim_sprite(gsGlobal, x - 0.5f, y - inner, x + 0.5f, y + inner + 1.0f, 2, white);
+#endif
+}
+
+__attribute__((section(".ps2_runtime_text"), noinline))
 void platform_update_surface(void) {
     // Each of the two double-buffered surfaces still needs its own margin cleared before it's
     // first displayed, not just whichever was active at startup, hence the per-frame clear.
@@ -994,6 +1036,7 @@ void platform_update_surface(void) {
         gsKit_set_primalpha(gsGlobal, saved_alpha_mode, saved_pabe);
     }
 #endif
+    ps2_draw_final_cursor_overlay();
     gsKit_queue_exec(gsGlobal);
     gsKit_sync_flip(gsGlobal);
 }
@@ -1146,7 +1189,7 @@ static void ps2_release_grid_focus(Client *c) {
 }
 
 
-static bool ps2_usb_mouse_owns_pointer = false;
+static bool ps2_usb_mouse_connected = false;
 
 static void ps2_usb_mouse_release(Client *c, bool *left_was_down, bool *right_was_down) {
     if (*left_was_down) {
@@ -1163,7 +1206,6 @@ static void ps2_usb_mouse_release(Client *c, bool *left_was_down, bool *right_wa
 
 static void ps2_poll_usb_mouse(Client *c) {
     static int enum_delay = 0;
-    static bool connected = false;
     static bool left_was_down = false;
     static bool right_was_down = false;
 
@@ -1175,21 +1217,21 @@ static void ps2_poll_usb_mouse(Client *c) {
     // once per second, then use one MouseRead RPC per frame only while an actual mouse is present.
     if (enum_delay <= 0) {
         u32 count = PS2MouseEnum();
-        connected = count != 0 && count != 0xffffffffu;
+        ps2_usb_mouse_connected = count != 0 && count != 0xffffffffu;
         enum_delay = 50;
-        if (!connected) {
+        if (!ps2_usb_mouse_connected) {
             ps2_usb_mouse_release(c, &left_was_down, &right_was_down);
         }
     } else {
         enum_delay--;
     }
-    if (!connected) {
+    if (!ps2_usb_mouse_connected) {
         return;
     }
 
     PS2MouseData mouse;
     if (PS2MouseRead(&mouse) <= 0) {
-        connected = false;
+        ps2_usb_mouse_connected = false;
         enum_delay = 0;
         ps2_usb_mouse_release(c, &left_was_down, &right_was_down);
         return;
@@ -1198,13 +1240,20 @@ static void ps2_poll_usb_mouse(Client *c) {
     // Mouse coordinates are the complete RuneScape fixed-mode logical canvas, not the
     // 512x334 3D viewport or 640x480 TV framebuffer. This lets the physical mouse reach the
     // backpack/equipment/sidebar tabs, chatbox, minimap and every modal interface exactly like SDL.
+    // A connected physical mouse is the authoritative pointer source. Keep controller inventory/
+    // bank/chat grid snapping disabled for the entire time it is attached, even on frames where the
+    // mouse itself did not move.
+    ps2_release_grid_focus(c);
+    c->controller_grid_analog_override = true;
+    c->controller_dpad_x = 0;
+    c->controller_dpad_y = 0;
+
     int x = MAX(0, MIN(SCREEN_WIDTH - 1, mouse.x));
     int y = MAX(0, MIN(SCREEN_HEIGHT - 1, mouse.y));
     if (x != c->shell->mouse_x || y != c->shell->mouse_y) {
         // A real mouse move immediately takes pointer ownership away from controller grid focus.
         // ps2_release_grid_focus() is safe even when no grid is currently selected and also
         // clears any pending D-pad snap state.
-        ps2_usb_mouse_owns_pointer = true;
         ps2_release_grid_focus(c);
 
         c->shell->mouse_x = x;
@@ -1225,7 +1274,6 @@ static void ps2_poll_usb_mouse(Client *c) {
     bool right = (mouse.buttons & PS2MOUSE_BTN2) != 0;
 
     if (left && !left_was_down) {
-        ps2_usb_mouse_owns_pointer = true;
         ps2_release_grid_focus(c);
         c->shell->mouse_click_x = c->shell->mouse_x;
         c->shell->mouse_click_y = c->shell->mouse_y;
@@ -1241,7 +1289,6 @@ static void ps2_poll_usb_mouse(Client *c) {
     }
 
     if (right && !right_was_down) {
-        ps2_usb_mouse_owns_pointer = true;
         ps2_release_grid_focus(c);
         c->shell->mouse_click_x = c->shell->mouse_x;
         c->shell->mouse_click_y = c->shell->mouse_y;
@@ -1489,28 +1536,16 @@ void platform_poll_events(Client *c) {
     int raw_lx = padData.ljoy_h - 128;
     int raw_ly = padData.ljoy_v - 128;
 
-    // While a USB mouse owns the pointer, require a clearly intentional left-stick deflection to
-    // take it back. This prevents normal DualShock center drift from overwriting mouse_x/mouse_y
-    // every frame just because a controller is plugged in.
-    int takeover_deadzone = c->controller_cursor_deadzone;
-    if (takeover_deadzone < 40) takeover_deadzone = 40;
-    bool controller_takeover = !c->controller_settings_visible &&
-                               (abs(raw_lx) > takeover_deadzone ||
-                                abs(raw_ly) > takeover_deadzone);
-    if (ps2_usb_mouse_owns_pointer && controller_takeover) {
-        ps2_usb_mouse_owns_pointer = false;
-        c->controller_free_cursor_x = c->shell->mouse_x;
-        c->controller_free_cursor_y = c->shell->mouse_y;
-        c->controller_free_cursor_valid = true;
-    }
-
+    // A real USB mouse wins pointer ownership completely while connected. This makes mouse +
+    // controller coexistence deterministic on hardware: the pad's left stick and D-pad grid logic
+    // cannot move/snap shell->mouse_x/y until the mouse is physically disconnected.
     bool left_stick_active = !c->controller_settings_visible &&
-                             !ps2_usb_mouse_owns_pointer &&
+                             !ps2_usb_mouse_connected &&
                              (abs(raw_lx) > c->controller_cursor_deadzone ||
                               abs(raw_ly) > c->controller_cursor_deadzone);
     // Only the pointer-owning left stick exits grid mode. The right stick remains free to rotate
     // and tilt the camera while a D-pad-selected inventory/bank/shop slot stays focused.
-    bool analog_override_active = left_stick_active || ps2_usb_mouse_owns_pointer;
+    bool analog_override_active = left_stick_active || ps2_usb_mouse_connected;
 
     if (left_stick_active) {
         ps2_release_grid_focus(c);
@@ -1678,7 +1713,7 @@ void platform_poll_events(Client *c) {
 
     // A physical mouse is desktop-style free-pointer input. Do not let stale controller
     // grid-navigation state snap it back into inventory/bank/chat grids while the mouse owns it.
-    if (ps2_usb_mouse_owns_pointer && !c->virtual_keyboard_visible &&
+    if (ps2_usb_mouse_connected && !c->virtual_keyboard_visible &&
         !c->controller_settings_visible && !c->menu_visible) {
         c->controller_grid_analog_override = true;
         c->controller_dpad_x = 0;
