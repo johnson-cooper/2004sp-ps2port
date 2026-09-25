@@ -11,6 +11,11 @@
 #include <iopheap.h>
 #include <sbv_patches.h>
 #include <ps2_filesystem_driver.h>
+#include <ps2_usbd_driver.h>
+#include <ps2_mouse_driver.h>
+#include <ps2_keyboard_driver.h>
+#include <libmouse.h>
+#include <libkbd.h>
 #include <string.h>
 #include <unistd.h>
 #include <timer.h>
@@ -136,6 +141,8 @@ static void SleepMsApprox()
 // Assets stay beside client.elf instead of probing unrelated devices.
 static char ps2_launch_dir[256];
 static bool ps2_filesystem_ready;
+static bool ps2_usb_mouse_ready;
+static bool ps2_usb_keyboard_ready;
 
 // main() calls this before platform_init(), while argv[0] still contains the launcher's device
 // spelling. No I/O happens here; it only remembers the directory for asset/log paths after the
@@ -684,6 +691,34 @@ bool platform_init(void) {
     padSetMainMode(0, 0, PAD_MMODE_DUALSHOCK, PAD_MMODE_LOCK);
     ps2_boot_progress(90);
 
+    // Optional USB HID. This is deliberately post-DHCP and post-filesystem so USBD activity cannot
+    // interfere with the hardware-proven DEV9/SMAP bring-up. init_usbd_driver() is shared with the
+    // boot-filesystem helper: USB boots reuse its existing USBD instance, while MMCE/HDD/CD boots
+    // get only the USB core needed for a mouse/keyboard. Every failure is non-fatal.
+    int hid_usbd_ret = init_usbd_driver();
+    int hid_mouse_ret = -1;
+    int hid_keyboard_ret = -1;
+    if (hid_usbd_ret >= 0) {
+        hid_mouse_ret = init_mouse_driver(false);
+        if (hid_mouse_ret >= 0) {
+            PS2MouseSetReadMode(PS2MOUSE_READMODE_ABS);
+            PS2MouseSetBoundary(0, SCREEN_WIDTH - 1, 0, SCREEN_HEIGHT - 1);
+            PS2MouseSetPosition(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
+            ps2_usb_mouse_ready = true;
+        }
+
+        hid_keyboard_ret = init_keyboard_driver(false);
+        if (hid_keyboard_ret >= 0) {
+            PS2KbdSetReadmode(PS2KBD_READMODE_NORMAL);
+            PS2KbdSetBlockingMode(PS2KBD_NONBLOCKING);
+            PS2KbdFlushBuffer();
+            ps2_usb_keyboard_ready = true;
+        }
+    }
+    rs2_log("hid: usbd=%d mouse=%d keyboard=%d\n",
+            hid_usbd_ret, hid_mouse_ret, hid_keyboard_ret);
+    ps2_boot_progress(91);
+
     // Audio comes LAST. Real-hardware testing already proved that unrelated IOP activity
     // interleaved with DEV9/SMAP bring-up can stall the machine, so do not move this above
     // networking, USB or pad initialization without a new isolated hardware test.
@@ -727,10 +762,9 @@ bool platform_init(void) {
 }
 
 void platform_new(GameShell *shell) {
-    // TODO lowmem/audio bring-up (ps2snd/audsrv) - video/input/networking come first per the
-    // project's phasing, matches how sdl2.c also skips audio init entirely under _Client.lowmem.
-    // No physical keyboard exists on PS2 - this drives entry/client.c's on-screen virtual keyboard
-    // to auto-open at text-entry focus points instead (see client.h's virtual_keyboard_* fields).
+    // Keep the controller virtual keyboard as the default/fallback. The optional USB keyboard
+    // flips this true on its first real key event, so users without a keyboard never lose the
+    // on-screen keyboard just because the keyboard IRX itself initialized successfully.
     shell->has_keyboard = false;
     // Full logical canvas height (SCREEN_HEIGHT, 503 - no alignment requirement), padded width
     // (SCREEN_SRC_WIDTH, 768 - see the comment above platform_init()) - holds the whole 765x503
@@ -1033,13 +1067,218 @@ static void ps2_release_grid_focus(Client *c) {
     c->controller_dpad_y = 0;
 }
 
+
+static void ps2_usb_mouse_release(Client *c, bool *left_was_down, bool *right_was_down) {
+    if (*left_was_down) {
+        if (c->shell->mouse_button == 1) c->shell->mouse_button = 0;
+        if (_InputTracking.enabled) inputtracking_mouse_released(&_InputTracking, 0);
+        *left_was_down = false;
+    }
+    if (*right_was_down) {
+        if (c->shell->mouse_button == 2) c->shell->mouse_button = 0;
+        if (_InputTracking.enabled) inputtracking_mouse_released(&_InputTracking, 1);
+        *right_was_down = false;
+    }
+}
+
+static void ps2_poll_usb_mouse(Client *c) {
+    static int enum_delay = 0;
+    static bool connected = false;
+    static bool left_was_down = false;
+    static bool right_was_down = false;
+
+    if (!ps2_usb_mouse_ready) {
+        return;
+    }
+
+    // PS2MouseEnum() is itself an RPC. Do not pay for it every frame: poll connection state about
+    // once per second, then use one MouseRead RPC per frame only while an actual mouse is present.
+    if (enum_delay <= 0) {
+        u32 count = PS2MouseEnum();
+        connected = count != 0 && count != 0xffffffffu;
+        enum_delay = 50;
+        if (!connected) {
+            ps2_usb_mouse_release(c, &left_was_down, &right_was_down);
+        }
+    } else {
+        enum_delay--;
+    }
+    if (!connected) {
+        return;
+    }
+
+    PS2MouseData mouse;
+    if (PS2MouseRead(&mouse) <= 0) {
+        connected = false;
+        enum_delay = 0;
+        ps2_usb_mouse_release(c, &left_was_down, &right_was_down);
+        return;
+    }
+
+    int x = MAX(0, MIN(SCREEN_WIDTH - 1, mouse.x));
+    int y = MAX(0, MIN(SCREEN_HEIGHT - 1, mouse.y));
+    if (x != c->shell->mouse_x || y != c->shell->mouse_y) {
+        if (c->controller_grid_component >= 0) {
+            ps2_release_grid_focus(c);
+        }
+        c->shell->mouse_x = x;
+        c->shell->mouse_y = y;
+        c->controller_free_cursor_x = x;
+        c->controller_free_cursor_y = y;
+        c->controller_free_cursor_valid = true;
+        c->shell->idle_cycles = 0;
+        if (c->menu_visible) c->controller_menu_index = -1;
+        if (_InputTracking.enabled) {
+            inputtracking_mouse_moved(&_InputTracking, x, y);
+        }
+    }
+
+    bool left = (mouse.buttons & PS2MOUSE_BTN1) != 0;
+    bool right = (mouse.buttons & PS2MOUSE_BTN2) != 0;
+
+    if (left && !left_was_down) {
+        c->shell->mouse_click_x = c->shell->mouse_x;
+        c->shell->mouse_click_y = c->shell->mouse_y;
+        c->shell->mouse_click_button = 1;
+        c->shell->mouse_button = 1;
+        c->shell->idle_cycles = 0;
+        if (_InputTracking.enabled) {
+            inputtracking_mouse_pressed(&_InputTracking, c->shell->mouse_x, c->shell->mouse_y, 0);
+        }
+    } else if (!left && left_was_down) {
+        if (c->shell->mouse_button == 1) c->shell->mouse_button = 0;
+        if (_InputTracking.enabled) inputtracking_mouse_released(&_InputTracking, 0);
+    }
+
+    if (right && !right_was_down) {
+        c->shell->mouse_click_x = c->shell->mouse_x;
+        c->shell->mouse_click_y = c->shell->mouse_y;
+        c->shell->mouse_click_button = 2;
+        c->shell->mouse_button = 2;
+        c->shell->idle_cycles = 0;
+        if (_InputTracking.enabled) {
+            inputtracking_mouse_pressed(&_InputTracking, c->shell->mouse_x, c->shell->mouse_y, 1);
+        }
+    } else if (!right && right_was_down) {
+        if (c->shell->mouse_button == 2) c->shell->mouse_button = 0;
+        if (_InputTracking.enabled) inputtracking_mouse_released(&_InputTracking, 1);
+    }
+
+    left_was_down = left;
+    right_was_down = right;
+}
+
+static void ps2_usb_keyboard_activate(Client *c) {
+    if (c->shell->has_keyboard) {
+        return;
+    }
+
+    c->shell->has_keyboard = true;
+    // If the controller keyboard was already opened for this field, dismiss only the overlay.
+    // Leave the underlying username/password/chat/social input state alive for the real keyboard.
+    if (c->virtual_keyboard_visible) {
+        c->virtual_keyboard_visible = false;
+        c->virtual_keyboard_shift = false;
+        c->controller_keyboard_confirm_pressed = false;
+        c->redraw_background = true;
+    }
+}
+
+static int ps2_keyboard_release_code;
+
+static void ps2_usb_keyboard_special(Client *c, uint8_t special) {
+    int code = 0;
+    switch (special) {
+        case 41: code = 39; break; // Right
+        case 42: code = 37; break; // Left
+        case 43: code = 40; break; // Down
+        case 44: code = 38; break; // Up
+        case 38:                   // Delete: RuneScape's text editor has Backspace, not forward delete.
+            key_pressed(c->shell, 8, 8);
+            return;
+        case 0x1b:
+            key_pressed(c->shell, 27, 27);
+            return;
+        default:
+            return;
+    }
+
+    // Normal-mode ps2kbd emits special keys as ESC + one byte. Pulse arrows for one game tick;
+    // the driver's own repeat buffer generates later pulses while the physical key stays held.
+    key_pressed(c->shell, code, 0);
+    ps2_keyboard_release_code = code;
+}
+
+static void ps2_poll_usb_keyboard(Client *c) {
+    static int poll_divider = 0;
+    static bool escape_pending = false;
+
+    if (!ps2_usb_keyboard_ready) {
+        return;
+    }
+
+    if (ps2_keyboard_release_code) {
+        key_released(c->shell, ps2_keyboard_release_code, 0);
+        ps2_keyboard_release_code = 0;
+    }
+
+    // Keyboard input is buffered on the IOP, so a 1-in-3 frame nonblocking read cuts FILEIO RPC
+    // traffic substantially without losing keystrokes or making text entry feel sluggish.
+    poll_divider++;
+    if (poll_divider < 3) {
+        return;
+    }
+    poll_divider = 0;
+
+    for (int i = 0; i < 16; i++) {
+        char raw = 0;
+        if (PS2KbdRead(&raw) <= 0) {
+            break;
+        }
+
+        ps2_usb_keyboard_activate(c);
+        c->shell->idle_cycles = 0;
+        uint8_t ch = (uint8_t)raw;
+
+        if (escape_pending) {
+            escape_pending = false;
+            ps2_usb_keyboard_special(c, ch);
+            continue;
+        }
+        if (ch == PS2KBD_ESCAPE_KEY) {
+            escape_pending = true;
+            continue;
+        }
+
+        switch (ch) {
+            case 8:
+                key_pressed(c->shell, 8, 8);
+                break;
+            case 9:
+                key_pressed(c->shell, 9, 9);
+                break;
+            case 10:
+            case 13:
+                key_pressed(c->shell, 10, 10);
+                break;
+            default:
+                if (ch >= 32) {
+                    key_pressed(c->shell, 0, ch);
+                }
+                break;
+        }
+    }
+}
+
 void platform_poll_events(Client *c) {
-    // The MIDI clock must advance even when no controller is connected/stable.
+    // The MIDI clock and optional USB mouse must advance even when no DualShock is connected.
     // This is sequencing only; all sample playback, pitching and mixing stays on SPU2.
     ps2_music_update();
+    ps2_poll_usb_mouse(c);
 
     int state = padGetState(0, 0);
     if (state != PAD_STATE_STABLE && state != PAD_STATE_FINDCTP1) {
+        ps2_poll_usb_keyboard(c);
         return;
     }
 
@@ -1247,6 +1486,10 @@ void platform_poll_events(Client *c) {
     dpad_down_was_down = dpad_down;
     dpad_left_was_down = dpad_left;
     dpad_right_was_down = dpad_right;
+
+    // Do this last when a pad is present so centered right-stick camera state cannot erase a
+    // one-tick physical-keyboard arrow pulse in the same frame.
+    ps2_poll_usb_keyboard(c);
 }
 
 uint64_t rs2_now(void) {
