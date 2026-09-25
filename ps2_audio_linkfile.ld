@@ -2,9 +2,10 @@
  * PS2SDK EE default linkfile with one isolated high-memory audio overlay.
  *
  * Normal client sections intentionally retain the stock ordering/addresses.
- * The companion-loader code/data is put in a second PT_LOAD at 0x01fc0000.
+ * PS2 driver assets reserve 0x01f90000..0x01fc0000 and the existing
+ * companion-loader/audio code begins at 0x01fc0000 in the same high PT_LOAD.
  * _end remains the end of the normal BSS, while _heap_size is explicitly
- * capped so the heap can never grow into the overlay. The top 128 KiB remains
+ * capped so the heap can never grow into either overlay. The top 128 KiB remains
  * available for the stock PS2SDK stack reservation.
  */
 ENTRY(__start);
@@ -17,9 +18,9 @@ PHDRS {
 SECTIONS {
     .text 0x00100000: {
         _ftext = . ;
-        *(.text)
-        *(.text.*)
-        *(.gnu.linkonce.t*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:*) .text)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:*) .text.*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:*) .gnu.linkonce.t*)
         KEEP(*(.init))
         KEEP(*(.fini))
         QUAD(0)
@@ -66,16 +67,16 @@ SECTIONS {
 
     .data ALIGN(128): {
         _fdata = . ;
-        *(.data)
-        *(.data.*)
-        *(.gnu.linkonce.d*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .data)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .data.*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .gnu.linkonce.d*)
         SORT(CONSTRUCTORS)
     }
 
     .rodata ALIGN(128): {
-        *(.rodata)
-        *(.rodata.*)
-        *(.gnu.linkonce.r*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .rodata)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .rodata.*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .gnu.linkonce.r*)
 
         /*
          * Preserve the exact hardware-good .rodata extent. If real content grows
@@ -98,9 +99,9 @@ SECTIONS {
     .lit8 ALIGN(128): { *(.lit8) }
 
     .sdata ALIGN(128): {
-        *(.sdata)
-        *(.sdata.*)
-        *(.gnu.linkonce.s*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .sdata)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .sdata.*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .gnu.linkonce.s*)
     }
 
     _edata = .;
@@ -124,6 +125,35 @@ SECTIONS {
     _end_bss = .;
     _end = . ;
     PROVIDE(end = .);
+
+    /*
+     * Vendored ps2_drivers code plus only the NEW driver IRX byte arrays live in a
+     * dedicated high-memory PT_LOAD. The hardware-proven low client layout is intentionally
+     * left untouched. The old USB/network embeds remain in their original low placement.
+     *
+     * 0x01f90000..0x01fc0000 reserves 192 KiB for this overlay. The existing audio overlay
+     * keeps its exact 0x01fc0000 address.
+     */
+    .ps2_driver_overlay 0x01f90000 : {
+        lib/libps2_drivers_local.a:*(.text .text.* .gnu.linkonce.t*)
+        lib/libps2_drivers_local.a:*(.rodata .rodata.* .gnu.linkonce.r*)
+        lib/libps2_drivers_local.a:*(.data .data.* .gnu.linkonce.d*)
+        lib/libps2_drivers_local.a:*(.sdata .sdata.* .gnu.linkonce.s*)
+
+        *sio2man_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+        *fileXio_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+        *mcman_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+        *mcserv_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+        *mx4sio_bd_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+        *cdfs_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+        *ps2mouse_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+        *ps2kbd_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+        *mmceman_embed_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+    } :audio
+
+    _ps2_driver_end = .;
+    ASSERT(_ps2_driver_end <= 0x01fc0000,
+           "PS2 driver overlay exceeded 192 KiB reserved region")
 
     /*
      * Isolated EE shim. Keep this outside the normal client layout entirely.
@@ -176,8 +206,8 @@ SECTIONS {
         *(.spad)
     }
 
-    /* Heap ends at the overlay; stock stack remains the top 128 KiB. */
-    PROVIDE(_heap_size = 0x01fc0000 - _end);
+    /* Heap ends at the driver overlay; stock stack remains the top 128 KiB. */
+    PROVIDE(_heap_size = 0x01f90000 - _end);
     PROVIDE(_stack = -1);
     PROVIDE(_stack_size = 128 * 1024);
 }
