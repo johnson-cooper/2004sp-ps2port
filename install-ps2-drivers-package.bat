@@ -2,7 +2,8 @@
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
-rem Pin Tech Writes Code's PS2Build-native main revision: it resolves dependencies from\nrem %%PS2DEV%%\packages/{core,world} instead of the obsolete flat %%PS2SDK%% tree.
+rem Pin Tech Writes Code's PS2Build-native main revision: it resolves dependencies from
+rem %%PS2DEV%%\packages\{core,world} instead of the obsolete flat %%PS2SDK%% tree.
 set "PS2_DRIVERS_REV=54f0895756890eb8d5af25e1de954357f94bb2b6"
 set "PS2_DRIVERS_SOURCE_URL=https://git.techwritescode.dev/ps2/ps2_drivers/archive/%PS2_DRIVERS_REV%.zip"
 
@@ -120,9 +121,7 @@ cmake -S "!SRCDIR!" -B "%BUILDDIR%" -G Ninja ^
   -DCMAKE_TOOLCHAIN_FILE="%TOOLCHAIN%" ^
   -DCMAKE_BUILD_TYPE=Release ^
   -DBUILD_SAMPLES=OFF ^
-  -DINSTALL_LIB_DIR="%DEST%\lib" ^
-  -DINSTALL_INC_DIR="%DEST%\include" ^
-  -DINSTALL_PKGCONFIG_DIR="%DEST%\lib\pkgconfig"
+  -DCMAKE_INSTALL_PREFIX="%DEST%"
 if errorlevel 1 (
     echo ERROR: CMake configure failed.
     goto :fail
@@ -144,18 +143,63 @@ if errorlevel 1 (
     goto :fail
 )
 
+rem PS2Build's custom-package contract is packages\world\<name> with the normal
+rem CMake install prefix set to that package root. Keep two defensive fallbacks:
+rem upstream revisions have changed their CMake install details more than once,
+rem but the public headers and the built archive are stable inputs we can place
+rem into the package deterministically if an install rule omits them.
+if not exist "%DEST%\include\ps2_filesystem_driver.h" (
+    if exist "!SRCDIR!\include\ps2_filesystem_driver.h" (
+        echo.
+        echo CMake did not install the public headers; copying them from source...
+        if not exist "%DEST%\include" mkdir "%DEST%\include"
+        xcopy /E /I /Y "!SRCDIR!\include\*" "%DEST%\include\" >nul
+        if errorlevel 1 (
+            echo ERROR: Failed to copy ps2_drivers public headers.
+            goto :fail
+        )
+    )
+)
+
+if not exist "%DEST%\lib\libps2_drivers.a" (
+    set "BUILT_LIB="
+    for /f "delims=" %%P in ('dir /s /b "%BUILDDIR%\libps2_drivers.a" 2^>nul') do (
+        if not defined BUILT_LIB set "BUILT_LIB=%%P"
+    )
+    if defined BUILT_LIB (
+        echo.
+        echo CMake did not install libps2_drivers.a; copying the built archive...
+        if not exist "%DEST%\lib" mkdir "%DEST%\lib"
+        copy /Y "!BUILT_LIB!" "%DEST%\lib\libps2_drivers.a" >nul
+        if errorlevel 1 (
+            echo ERROR: Failed to copy libps2_drivers.a.
+            goto :fail
+        )
+    )
+)
+
 echo.
 echo Writing PS2Build package metadata...
-> "%DEST%\package.yaml" echo name: ps2_drivers
->>"%DEST%\package.yaml" echo origin: ps2_drivers
->>"%DEST%\package.yaml" echo tier: world
->>"%DEST%\package.yaml" echo license: LGPL-2.0-only
->>"%DEST%\package.yaml" echo.
->>"%DEST%\package.yaml" echo artifacts:
->>"%DEST%\package.yaml" echo   - kind: library
->>"%DEST%\package.yaml" echo     target: [ee]
->>"%DEST%\package.yaml" echo     include_dirs: [include]
->>"%DEST%\package.yaml" echo     lib: lib/libps2_drivers.a
+if exist "!SRCDIR!\package.yaml" (
+    echo Using upstream PS2Build package metadata...
+    copy /Y "!SRCDIR!\package.yaml" "%DEST%\package.yaml" >nul
+    if errorlevel 1 (
+        echo ERROR: Failed to copy upstream package.yaml.
+        goto :fail
+    )
+) else (
+    echo Upstream package.yaml not present; writing compatible fallback metadata...
+    > "%DEST%\package.yaml" echo name: ps2_drivers
+    >>"%DEST%\package.yaml" echo origin: ps2_drivers
+    >>"%DEST%\package.yaml" echo tier: world
+    >>"%DEST%\package.yaml" echo license: LGPL-2.0-only
+    >>"%DEST%\package.yaml" echo.
+    >>"%DEST%\package.yaml" echo artifacts:
+    >>"%DEST%\package.yaml" echo   - kind: library
+    >>"%DEST%\package.yaml" echo     target: [ee]
+    >>"%DEST%\package.yaml" echo     include_dirs: [include]
+    >>"%DEST%\package.yaml" echo     lib: lib/libps2_drivers.a
+)
 
 > "%DEST%\RS2_PS2_DRIVERS.txt" echo Upstream ps2_drivers revision %PS2_DRIVERS_REV%
 
@@ -177,6 +221,14 @@ if not exist "%DEST%\include\ps2_keyboard_driver.h" (
     echo ERROR: Missing "%DEST%\include\ps2_keyboard_driver.h".
     goto :fail
 )
+if not exist "%DEST%\include\ps2_usbd_driver.h" (
+    echo ERROR: Missing "%DEST%\include\ps2_usbd_driver.h".
+    goto :fail
+)
+if not exist "%DEST%\include\ps2_fileXio_driver.h" (
+    echo ERROR: Missing "%DEST%\include\ps2_fileXio_driver.h".
+    goto :fail
+)
 if not exist "%DEST%\lib\libps2_drivers.a" (
     echo ERROR: Missing "%DEST%\lib\libps2_drivers.a".
     goto :fail
@@ -191,6 +243,8 @@ echo   package.yaml
 echo   include\ps2_filesystem_driver.h
 echo   include\ps2_mouse_driver.h
 echo   include\ps2_keyboard_driver.h
+echo   include\ps2_usbd_driver.h
+echo   include\ps2_fileXio_driver.h
 echo   lib\libps2_drivers.a
 echo.
 echo PS2Build can now resolve:
