@@ -67,16 +67,16 @@ SECTIONS {
 
     .data ALIGN(128): {
         _fdata = . ;
-        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .data)
-        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .data.*)
-        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .gnu.linkonce.d*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .data)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .data.*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .gnu.linkonce.d*)
         SORT(CONSTRUCTORS)
     }
 
     .rodata ALIGN(128): {
-        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .rodata)
-        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .rodata.*)
-        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .gnu.linkonce.r*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .rodata)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .rodata.*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .gnu.linkonce.r*)
 
         /*
          * Preserve the exact hardware-good .rodata extent. If real content grows
@@ -99,9 +99,9 @@ SECTIONS {
     .lit8 ALIGN(128): { *(.lit8) }
 
     .sdata ALIGN(128): {
-        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .sdata)
-        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .sdata.*)
-        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .gnu.linkonce.s*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .sdata)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .sdata.*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .gnu.linkonce.s*)
     }
 
     _edata = .;
@@ -127,9 +127,9 @@ SECTIONS {
     PROVIDE(end = .);
 
     /*
-     * Vendored ps2_drivers code plus only the NEW driver IRX byte arrays live in a
+     * Vendored ps2_drivers code plus all storage/HID IRX byte arrays used by it live in a
      * dedicated high-memory PT_LOAD. The hardware-proven low client layout is intentionally
-     * left untouched. The old USB/network embeds remain in their original low placement.
+     * left untouched. DEV9/NETMAN/SMAP and audsrv remain in their proven placement.
      *
      * 0x01f90000..0x01fc0000 reserves 192 KiB for this overlay. The existing audio overlay
      * keeps its exact 0x01fc0000 address.
@@ -141,9 +141,14 @@ SECTIONS {
         lib/libps2_drivers_local.a:*(.sdata .sdata.* .gnu.linkonce.s*)
 
         *sio2man_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+        *iomanX_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
         *fileXio_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
         *mcman_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
         *mcserv_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+        *bdm_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+        *bdmfs_fatfs_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+        *usbd_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
+        *usbmass_bd_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
         *mx4sio_bd_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
         *cdfs_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
         *ps2mouse_irx.o(.data .data.* .rodata .rodata.* .sdata .sdata.*)
