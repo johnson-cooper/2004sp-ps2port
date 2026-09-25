@@ -70,7 +70,7 @@ targets:
       - audsrv
       - m
     embed_irx:
-      # All 8 modules are embedded, including dev9. dev9 WAS briefly removed from this list on the
+      # DEV9/NETMAN/SMAP remain embedded. dev9 WAS briefly removed from this list on the
       # (real, well-reasoned) theory that it's ROM-resident on real hardware and only ever needed
       # embedding to work around a PCSX2-specific HLE quirk - but the actual real-hardware test
       # regressed badly (the game hung/stalled much earlier, during boot, before even reaching
@@ -89,6 +89,10 @@ targets:
       # SMAP's own worker threads). A boot-time stall is a worse failure than the memory cost, so
       # this stays at the original, proven-stable sequence (see ps2.c's platform_init()): netman/smap
       # load and bring up networking completely first, USB loads only once that's done.
+      #
+      - dev9:dev9_embed
+      - netman:netman_embed
+      - smap:smap_embed
       #
       # Storage IRXs are no longer hard-coded here. ps2_drivers restores only the filesystem the
       # ELF was launched from, at the same post-DHCP point where the hardware-proven BDM stack used

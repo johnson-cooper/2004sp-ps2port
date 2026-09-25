@@ -179,7 +179,7 @@ void ps2_set_launch_path(const char *path) {
     ps2_launch_dir[root_len + 1] = '\0';
 }
 
-static bool ps2_install_prefix_validstatic bool ps2_install_prefix_valid(const char *candidate, bool require_config) {
+static bool ps2_install_prefix_valid(const char *candidate, bool require_config) {
     char path[320];
     snprintf(path, sizeof(path), "%srom/cache/client/crc", candidate);
     FILE *probe = fopen(path, "rb");
@@ -540,7 +540,7 @@ bool platform_init(void) {
     sbv_patch_enable_lmb();
     sbv_patch_disable_prefix_check();
     rs2_log("iop: clean reset; network first, boot filesystem deferred until DHCP\n");
-    ps2_boot_progress(5);    ps2_boot_progress(5);
+    ps2_boot_progress(5);
 
     extern unsigned char dev9_embed_irx[];
     extern unsigned int size_dev9_embed_irx;
