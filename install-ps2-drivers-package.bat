@@ -2,8 +2,8 @@
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
-rem Pin the exact upstream revision reviewed for the MMCE/filesystem/HID integration.
-set "PS2_DRIVERS_REV=3163ae180eb2117d1ebe67bfa01fdda7a76d35ad"
+rem Pin Tech Writes Code's PS2Build-native main revision: it resolves dependencies from\nrem %%PS2DEV%%\packages/{core,world} instead of the obsolete flat %%PS2SDK%% tree.
+set "PS2_DRIVERS_REV=54f0895756890eb8d5af25e1de954357f94bb2b6"
 set "PS2_DRIVERS_SOURCE_URL=https://git.techwritescode.dev/ps2/ps2_drivers/archive/%PS2_DRIVERS_REV%.zip"
 
 if not "%~1"=="" (
