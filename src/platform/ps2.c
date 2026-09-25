@@ -784,10 +784,10 @@ bool platform_init(void) {
 
         hid_keyboard_ret = init_keyboard_driver(false);
         if (hid_keyboard_ret >= 0) {
-            // Match the desktop event model: raw USB HID make/break packets become explicit
-            // key_pressed()/key_released() calls below. Normal mode only provides translated
-            // characters and cannot represent a held arrow key continuously.
-            PS2KbdSetReadmode(PS2KBD_READMODE_RAW);
+            // Keep boot-time keyboard setup on the hardware-proven NORMAL path.
+            // Switching libkbd to RAW performs a FileXio ioctl; doing that during MMCE's first
+            // loading phase regressed real hardware. Runtime polling switches to RAW lazily.
+            PS2KbdSetReadmode(PS2KBD_READMODE_NORMAL);
             PS2KbdSetBlockingMode(PS2KBD_NONBLOCKING);
             PS2KbdFlushBuffer();
             ps2_usb_keyboard_ready = true;
@@ -1384,8 +1384,21 @@ static void ps2_keyboard_apply_held_camera(Client *c) {
 }
 
 static void ps2_poll_usb_keyboard(Client *c) {
+    static bool raw_mode_ready = false;
+
     if (!ps2_usb_keyboard_ready) {
         return;
+    }
+
+    // Do not touch the keyboard read mode during platform_init/MMCE's first filesystem burst.
+    // The first normal game-loop poll is a safe point to perform the FileXio ioctl and flush.
+    if (!raw_mode_ready) {
+        int raw_ret = PS2KbdSetReadmode(PS2KBD_READMODE_RAW);
+        int block_ret = PS2KbdSetBlockingMode(PS2KBD_NONBLOCKING);
+        int flush_ret = PS2KbdFlushBuffer();
+        raw_mode_ready = true;
+        rs2_log("kbd: runtime raw mode ret=%d block=%d flush=%d\n",
+                raw_ret, block_ret, flush_ret);
     }
 
     // Raw mode is the same event model SDL uses: one DOWN and one UP event per physical key.
