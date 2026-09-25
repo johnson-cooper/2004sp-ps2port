@@ -74,9 +74,9 @@ SECTIONS {
     }
 
     .rodata ALIGN(128): {
-        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .rodata)
-        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .rodata.*)
-        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o) .gnu.linkonce.r*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o *platform/ps2.o) .rodata)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o *platform/ps2.o) .rodata.*)
+        *(EXCLUDE_FILE (*libps2_drivers_local.a:* *sio2man_irx.o *iomanX_irx.o *fileXio_irx.o *mcman_irx.o *mcserv_irx.o *bdm_irx.o *bdmfs_fatfs_irx.o *usbd_irx.o *usbmass_bd_irx.o *mx4sio_bd_irx.o *cdfs_irx.o *ps2mouse_irx.o *ps2kbd_irx.o *mmceman_embed_irx.o *platform/ps2.o) .gnu.linkonce.r*)
 
         /*
          * Preserve the exact hardware-good .rodata extent. If real content grows
@@ -127,9 +127,11 @@ SECTIONS {
     PROVIDE(end = .);
 
     /*
-     * Vendored ps2_drivers code plus all storage/HID IRX byte arrays used by it live in a
-     * dedicated high-memory PT_LOAD. The hardware-proven low client layout is intentionally
-     * left untouched. DEV9/NETMAN/SMAP and audsrv remain in their proven placement.
+     * Vendored ps2_drivers code, all storage/HID IRX byte arrays used by it, and platform/ps2.o
+     * read-only constants live in a dedicated high-memory PT_LOAD. Moving ps2.o rodata here keeps
+     * new boot/HID diagnostics from consuming the hardware-proven low .rodata budget while its
+     * executable code/data remain in their original placement. DEV9/NETMAN/SMAP and audsrv remain
+     * in their proven placement.
      *
      * 0x01f90000..0x01fc0000 reserves 192 KiB for this overlay. The existing audio overlay
      * keeps its exact 0x01fc0000 address.
@@ -137,6 +139,7 @@ SECTIONS {
     .ps2_driver_overlay 0x01f90000 : {
         lib/libps2_drivers_local.a:*(.text .text.* .gnu.linkonce.t*)
         lib/libps2_drivers_local.a:*(.rodata .rodata.* .gnu.linkonce.r*)
+        *platform/ps2.o(.rodata .rodata.* .gnu.linkonce.r*)
         lib/libps2_drivers_local.a:*(.data .data.* .gnu.linkonce.d*)
         lib/libps2_drivers_local.a:*(.sdata .sdata.* .gnu.linkonce.s*)
 
