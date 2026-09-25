@@ -10,19 +10,13 @@
 #include <iopcontrol.h>
 #include <iopheap.h>
 #include <sbv_patches.h>
+#include <ps2_filesystem_driver.h>
+#include <ps2_fileXio_driver.h>
+#include <ps2_usbd_driver.h>
+#include <ps2_mouse_driver.h>
+#include <ps2_keyboard_driver.h>
 #include <libmouse.h>
 #include <libkbd.h>
-
-// The current PS2Build ps2_drivers package links correctly but does not expose its upstream
-// include directory to this target's compile command. Keep the dependency through libs:
-// [ps2_drivers], and declare the narrow public ABI surface used here. These signatures mirror
-// ps2_drivers' public headers; mouse/keyboard data structures still come from the core SDK headers.
-void init_only_boot_ps2_filesystem_driver(void);
-int init_fileXio_driver(void);
-int init_usbd_driver(void);
-int init_mouse_driver(bool init_dependencies);
-int init_keyboard_driver(bool init_dependencies);
-bool waitUntilDeviceIsReady(char *path);
 #include <string.h>
 #include <unistd.h>
 #include <timer.h>

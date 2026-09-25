@@ -54,8 +54,9 @@ targets:
       # world_add_loc2()'s subtree, not decoding/Packet/world_build(). Removed so this build now
       # exercises the real, full path again, with new one-shot entry checkpoints in world_add_loc2()
       # and loctype_get_model() (world.c/loctype.c) to find exactly where in that subtree it dies.
-    # ps2_drivers currently does not export its header include directory through this PS2Build
-    # package install. Mouse/keyboard public EE types still come from the normal core packages.
+    # ps2_drivers is a standalone PS2Build world package installed by
+    # install-ps2-drivers-package.bat. Its own headers come from that package; libmouse/libkbd
+    # are core SDK headers used directly by platform/ps2.c.
     headers:
       - mouse
       - kbd
@@ -65,8 +66,8 @@ targets:
       - ps2ip
       - netman
       - patches
-      # Tech's ps2_drivers supplies init_only_boot_ps2_filesystem_driver() and the device-specific
-      # storage/HID modules selected by that abstraction.
+      # Standalone custom world package installed by install-ps2-drivers-package.bat.
+      # Supplies the boot-filesystem abstraction plus optional USB mouse/keyboard helpers.
       - ps2_drivers
       - pad
       # Standalone PS2Build world package installed by install-audsrv-package.bat.
