@@ -21,6 +21,7 @@
 #include <stddef.h>
 #include <ps2_keyboard_driver.h>
 #include <ps2_usbd_driver.h>
+#include <ps2_filesystem_driver.h>
 #include <irx_common_macros.h>
 
 #include <sifrpc.h>
@@ -64,6 +65,13 @@ static enum KEYBOARD_INIT_STATUS initLibraries(void) {
 }
 
 enum KEYBOARD_INIT_STATUS init_keyboard_driver(bool init_dependencies) {
+    extern enum BootDeviceIDs __boot_device_id;
+    if (__boot_device_id == BOOT_DEVICE_MASS ||
+        __boot_device_id == BOOT_DEVICE_MASS0 ||
+        __boot_device_id == BOOT_DEVICE_MASS1) {
+        return KEYBOARD_INIT_STATUS_DEPENDENCY_ERROR;
+    }
+
     __keyboard_init_status = loadIRXs(init_dependencies);
     if (__keyboard_init_status < 0)
         return __keyboard_init_status;

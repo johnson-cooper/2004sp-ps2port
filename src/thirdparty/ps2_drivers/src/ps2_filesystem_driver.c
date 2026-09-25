@@ -29,6 +29,24 @@
 #include <kernel.h>
 
 #include <ps2_filesystem_driver.h>
+#include <irx_common_macros.h>
+
+EXTERN_IRX(iomanX_irx);
+EXTERN_IRX(bdm_irx);
+EXTERN_IRX(bdmfs_fatfs_irx);
+EXTERN_IRX(usbd_irx);
+EXTERN_IRX(usbmass_bd_irx);
+
+extern int32_t __iomanX_id;
+extern int __iomanX_ret;
+extern int32_t __bdm_id;
+extern int __bdm_ret;
+extern int32_t __bdmfs_fatfs_id;
+extern int __bdmfs_fatfs_ret;
+extern int32_t __usbd_id;
+extern int __usbd_ret;
+extern int32_t __usbmass_bd_id;
+extern int __usbmass_bd_ret;
 
 #define DEVICE_SLASH "/"
 
@@ -172,6 +190,55 @@ void init_ps2_filesystem_driver() {
 #endif
 
 #if F_init_only_boot_ps2_filesystem_driver
+static bool init_proven_usb_mass_stack(void) {
+    int modres = -1;
+
+    /* Exact real-hardware-proven order from the pre-ps2_drivers client:
+     * IOMANX -> BDM -> BDMFS_FATFS -> USBD -> USBMASS_BD.
+     * No FileXio, SIO2MAN, MX4SIO, MMCEMAN, mouse or keyboard modules here.
+     */
+    if (__iomanX_id < 0) {
+        __iomanX_id = SifExecModuleBuffer(
+            iomanX_irx, size_iomanX_irx, 0, NULL, &modres);
+        __iomanX_ret = modres;
+        if (__iomanX_id < 0 || modres < 0) return false;
+    }
+
+    modres = -1;
+    if (__bdm_id < 0) {
+        __bdm_id = SifExecModuleBuffer(
+            bdm_irx, size_bdm_irx, 0, NULL, &modres);
+        __bdm_ret = modres;
+        if (__bdm_id < 0 || modres < 0) return false;
+    }
+
+    modres = -1;
+    if (__bdmfs_fatfs_id < 0) {
+        __bdmfs_fatfs_id = SifExecModuleBuffer(
+            bdmfs_fatfs_irx, size_bdmfs_fatfs_irx, 0, NULL, &modres);
+        __bdmfs_fatfs_ret = modres;
+        if (__bdmfs_fatfs_id < 0 || modres < 0) return false;
+    }
+
+    modres = -1;
+    if (__usbd_id < 0) {
+        __usbd_id = SifExecModuleBuffer(
+            usbd_irx, size_usbd_irx, 0, NULL, &modres);
+        __usbd_ret = modres;
+        if (__usbd_id < 0 || modres < 0) return false;
+    }
+
+    modres = -1;
+    if (__usbmass_bd_id < 0) {
+        __usbmass_bd_id = SifExecModuleBuffer(
+            usbmass_bd_irx, size_usbmass_bd_irx, 0, NULL, &modres);
+        __usbmass_bd_ret = modres;
+        if (__usbmass_bd_id < 0 || modres < 0) return false;
+    }
+
+    return true;
+}
+
 void init_only_boot_ps2_filesystem_driver() {
     // get current working directory
     char cwd[FILENAME_MAX];
@@ -179,8 +246,20 @@ void init_only_boot_ps2_filesystem_driver() {
 
     // get current boot device
     enum BootDeviceIDs boot_device_id = getBootDeviceID(cwd);
+    __boot_device_id = boot_device_id;
 
-    // Only init the boot device
+    // MASS is intentionally not handled by the generic ps2_drivers stack. Real hardware was
+    // faster and more reliable with the project's proven BDM sequence, and the generic helper
+    // unnecessarily initialized MX4SIO on USB boots.
+    if (boot_device_id == BOOT_DEVICE_MASS ||
+        boot_device_id == BOOT_DEVICE_MASS0 ||
+        boot_device_id == BOOT_DEVICE_MASS1) {
+        init_proven_usb_mass_stack();
+        waitUntilDeviceIsReady(cwd);
+        return;
+    }
+
+    // Non-USB devices keep the vendored ps2_drivers path.
     init_fileXio_driver();
 
     switch (boot_device_id) {
@@ -192,9 +271,6 @@ void init_only_boot_ps2_filesystem_driver() {
         case BOOT_DEVICE_CDFS:
             init_cdfs_driver();
             break;
-        case BOOT_DEVICE_MASS:
-        case BOOT_DEVICE_MASS0:
-        case BOOT_DEVICE_MASS1:
         case BOOT_DEVICE_MX4SIO:
         case BOOT_DEVICE_MX4SIO0:
         case BOOT_DEVICE_MX4SIO1:

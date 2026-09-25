@@ -18,7 +18,6 @@
 #include <libmouse.h>
 #include <libkbd.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 #include <timer.h>
 #include <delaythread.h>
@@ -152,86 +151,10 @@ static bool ps2_is_mmce_boot(void) {
            !strncmp(ps2_launch_dir, "mmce1:", 6);
 }
 
-static bool ps2_is_usb_mass_boot(void) {
-    return !strncmp(ps2_launch_dir, "mass:", 5) ||
-           !strncmp(ps2_launch_dir, "mass0:", 6) ||
-           !strncmp(ps2_launch_dir, "mass1:", 6);
-}
-
-static bool ps2_wait_path_ready(const char *path) {
-    struct stat buffer;
-    for (int retries = 0; retries < 500; retries++) {
-        if (stat(path, &buffer) == 0) {
-            return true;
-        }
-        nopdelay();
-    }
-    return false;
-}
-
-// USB boot deliberately does NOT use ps2_drivers' generic filesystem helper.
-// Real hardware already proved this exact BDM sequence reliable and fast:
-// IOMANX -> BDM -> BDMFS_FATFS -> USBD -> USBMASS_BD.
-// Keep the receiving filesystem/block stack ready before USBD discovers the drive.
-static bool ps2_init_proven_usb_boot_filesystem(void) {
-    extern unsigned char iomanX_irx[];
-    extern unsigned int size_iomanX_irx;
-    extern unsigned char bdm_irx[];
-    extern unsigned int size_bdm_irx;
-    extern unsigned char bdmfs_fatfs_irx[];
-    extern unsigned int size_bdmfs_fatfs_irx;
-    extern unsigned char usbd_irx[];
-    extern unsigned int size_usbd_irx;
-    extern unsigned char usbmass_bd_irx[];
-    extern unsigned int size_usbmass_bd_irx;
-
-    int iomanx_modres = -1;
-    int iomanx_ret = SifExecModuleBuffer(
-        iomanX_irx, size_iomanX_irx, 0, NULL, &iomanx_modres);
-    rs2_log("usb: proven iomanX ret=%d/%d\n", iomanx_ret, iomanx_modres);
-
-    int bdm_modres = -1;
-    int bdm_ret = SifExecModuleBuffer(
-        bdm_irx, size_bdm_irx, 0, NULL, &bdm_modres);
-    rs2_log("usb: proven bdm ret=%d/%d\n", bdm_ret, bdm_modres);
-
-    int bdmfs_modres = -1;
-    int bdmfs_ret = SifExecModuleBuffer(
-        bdmfs_fatfs_irx, size_bdmfs_fatfs_irx, 0, NULL, &bdmfs_modres);
-    rs2_log("usb: proven bdmfs_fatfs ret=%d/%d\n", bdmfs_ret, bdmfs_modres);
-
-    int usbd_modres = -1;
-    int usbd_ret = SifExecModuleBuffer(
-        usbd_irx, size_usbd_irx, 0, NULL, &usbd_modres);
-    rs2_log("usb: proven usbd ret=%d/%d\n", usbd_ret, usbd_modres);
-
-    int usbmass_modres = -1;
-    int usbmass_ret = SifExecModuleBuffer(
-        usbmass_bd_irx, size_usbmass_bd_irx, 0, NULL, &usbmass_modres);
-    rs2_log("usb: proven usbmass_bd ret=%d/%d\n", usbmass_ret, usbmass_modres);
-
-    bool modules_ok =
-        iomanx_ret >= 0 && iomanx_modres >= 0 &&
-        bdm_ret >= 0 && bdm_modres >= 0 &&
-        bdmfs_ret >= 0 && bdmfs_modres >= 0 &&
-        usbd_ret >= 0 && usbd_modres >= 0 &&
-        usbmass_ret >= 0 && usbmass_modres >= 0;
-
-    char ready_path[FILENAME_MAX];
-    if (ps2_launch_dir[0]) {
-        snprintf(ready_path, sizeof(ready_path), "%s", ps2_launch_dir);
-    } else {
-        snprintf(ready_path, sizeof(ready_path), "mass0:/");
-    }
-
-    bool ready = modules_ok && ps2_wait_path_ready(ready_path);
-    rs2_log("usb: proven boot path %s ready=%d\n", ready_path, ready ? 1 : 0);
-    return ready;
-}
-
-// MMCE uses the exact filesystem sequence that previously reached the game successfully.
-// Do not preload SIO2MAN/PADMAN before MMCEMAN here; real hardware stalls during the first
-// loading bar when that ordering is used. Controller setup remains after filesystem restore.
+// ps2_drivers' boot-only filesystem helper does not currently recognize MMCE device prefixes.
+// MMCE therefore needs the SDK's full mmceman IOP module after the clean IOP reset. fileXio's
+// ps2_drivers wrapper also restores its required SIO2MAN dependency, which keeps this path on the
+// same PS2Build driver stack rather than depending on an arbitrary ROM SIO2MAN revision.
 static bool ps2_init_mmce_boot_filesystem(void) {
     extern unsigned char mmceman_embed_irx[];
     extern unsigned int size_mmceman_embed_irx;
@@ -775,15 +698,7 @@ bool platform_init(void) {
     rs2_log("fs: restoring boot filesystem cwd=%s\n", boot_cwd);
     ps2_boot_progress(82);
 
-    const bool usb_mass_boot = ps2_is_usb_mass_boot();
-    const bool mmce_boot = ps2_is_mmce_boot();
-
-    if (usb_mass_boot) {
-        // Strict USB path: only the hardware-proven BDM stack above. Do not invoke MMCEMAN,
-        // ps2_drivers' generic filesystem helper, or any ps2_drivers USB/HID wrapper.
-        ps2_filesystem_ready = ps2_init_proven_usb_boot_filesystem();
-    } else if (mmce_boot) {
-        // Exact MMCE filesystem ordering from the last real-hardware build that reached the game.
+    if (ps2_is_mmce_boot()) {
         ps2_filesystem_ready = ps2_init_mmce_boot_filesystem();
     } else {
         init_only_boot_ps2_filesystem_driver();
@@ -797,14 +712,14 @@ bool platform_init(void) {
     rs2_log("fs: boot filesystem restored cwd=%s\n", ready_cwd);
     ps2_boot_progress(88);
 
-    // Keep controller initialization AFTER filesystem restore. This is the exact ordering
-    // used by the last MMCE build that successfully reached the game.
-    int pad_sio2man_ret = SifLoadModule("rom0:SIO2MAN", 0, NULL);
+    // Keep the proven ROM pad stack. A boot device such as MX4SIO/MMCE may already have SIO2MAN
+    // resident; loading the ROM copy can then report "already loaded", but the existing service is
+    // left intact and PADMAN/libpad bind to it normally.
+    int sio2man_ret = SifLoadModule("rom0:SIO2MAN", 0, NULL);
     int padman_ret = SifLoadModule("rom0:PADMAN", 0, NULL);
-    int pad_init_ret = padInit(0);
-    int pad_open_ret = padPortOpen(0, 0, padDmaBuf);
-    rs2_log("pad: source=rom-post-fs SIO2MAN=%d PADMAN=%d padInit=%d padOpen=%d\n",
-            pad_sio2man_ret, padman_ret, pad_init_ret, pad_open_ret);
+    rs2_log("pad: SIO2MAN ret=%d PADMAN ret=%d\n", sio2man_ret, padman_ret);
+    padInit(0);
+    padPortOpen(0, 0, padDmaBuf);
 
     // Force DualShock2 analog mode, locked so the player can't toggle it back off with the
     // physical Analog button. Without this the pad boots in digital mode (confirmed via a real
@@ -828,35 +743,28 @@ bool platform_init(void) {
     // interfere with the hardware-proven DEV9/SMAP bring-up. init_usbd_driver() is shared with the
     // boot-filesystem helper: USB boots reuse its existing USBD instance, while MMCE/HDD/CD boots
     // get only the USB core needed for a mouse/keyboard. Every failure is non-fatal.
-    int hid_usbd_ret = -1;
+    int hid_usbd_ret = init_usbd_driver();
     int hid_mouse_ret = -1;
     int hid_keyboard_ret = -1;
-    if (!usb_mass_boot) {
-        // Optional HID is a ps2_drivers feature. Keep it entirely off the USB-boot path so a
-        // mass:/ launch executes only the proven BDM storage stack plus the normal ROM controller.
-        hid_usbd_ret = init_usbd_driver();
-        if (hid_usbd_ret >= 0) {
-            hid_mouse_ret = init_mouse_driver(false);
-            if (hid_mouse_ret >= 0) {
-                PS2MouseSetReadMode(PS2MOUSE_READMODE_ABS);
-                PS2MouseSetBoundary(0, SCREEN_WIDTH - 1, 0, SCREEN_HEIGHT - 1);
-                PS2MouseSetPosition(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
-                ps2_usb_mouse_ready = true;
-            }
-
-            hid_keyboard_ret = init_keyboard_driver(false);
-            if (hid_keyboard_ret >= 0) {
-                PS2KbdSetReadmode(PS2KBD_READMODE_NORMAL);
-                PS2KbdSetBlockingMode(PS2KBD_NONBLOCKING);
-                PS2KbdFlushBuffer();
-                ps2_usb_keyboard_ready = true;
-            }
+    if (hid_usbd_ret >= 0) {
+        hid_mouse_ret = init_mouse_driver(false);
+        if (hid_mouse_ret >= 0) {
+            PS2MouseSetReadMode(PS2MOUSE_READMODE_ABS);
+            PS2MouseSetBoundary(0, SCREEN_WIDTH - 1, 0, SCREEN_HEIGHT - 1);
+            PS2MouseSetPosition(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
+            ps2_usb_mouse_ready = true;
         }
-        rs2_log("hid: usbd=%d mouse=%d keyboard=%d\n",
-                hid_usbd_ret, hid_mouse_ret, hid_keyboard_ret);
-    } else {
-        rs2_log("hid: skipped on proven USB boot path\n");
+
+        hid_keyboard_ret = init_keyboard_driver(false);
+        if (hid_keyboard_ret >= 0) {
+            PS2KbdSetReadmode(PS2KBD_READMODE_NORMAL);
+            PS2KbdSetBlockingMode(PS2KBD_NONBLOCKING);
+            PS2KbdFlushBuffer();
+            ps2_usb_keyboard_ready = true;
+        }
     }
+    rs2_log("hid: usbd=%d mouse=%d keyboard=%d\n",
+            hid_usbd_ret, hid_mouse_ret, hid_keyboard_ret);
     ps2_boot_progress(91);
 
     // Audio comes LAST. Real-hardware testing already proved that unrelated IOP activity
