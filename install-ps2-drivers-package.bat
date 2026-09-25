@@ -2,8 +2,7 @@
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
-rem Pin Tech Writes Code's PS2Build-native main revision: it resolves dependencies from
-rem %%PS2DEV%%\packages\{core,world} instead of the obsolete flat %%PS2SDK%% tree.
+rem Pin Tech Writes Code's PS2Build-native ps2_drivers revision.
 set "PS2_DRIVERS_REV=54f0895756890eb8d5af25e1de954357f94bb2b6"
 set "PS2_DRIVERS_SOURCE_URL=https://git.techwritescode.dev/ps2/ps2_drivers/archive/%PS2_DRIVERS_REV%.zip"
 
@@ -39,19 +38,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-where cmake >nul 2>nul
-if errorlevel 1 (
-    echo ERROR: CMake is required to build the standalone ps2_drivers package.
-    exit /b 1
-)
-
-where ninja >nul 2>nul
-if errorlevel 1 (
-    echo ERROR: Ninja is required to build ps2_drivers.
-    echo Start the PS2Build environment first, then run this script again.
-    exit /b 1
-)
-
 where ps2build >nul 2>nul
 if errorlevel 1 (
     echo ERROR: ps2build is not available on PATH.
@@ -67,13 +53,6 @@ if not exist "%PACKAGES_ROOT%" (
     exit /b 1
 )
 
-if not exist "%TOOLCHAIN%" (
-    echo ERROR: PS2Build CMake toolchain was not found:
-    echo   "%TOOLCHAIN%"
-    echo Run "ps2build update" first, then retry.
-    exit /b 1
-)
-
 if not exist "%WORLD_ROOT%" mkdir "%WORLD_ROOT%"
 if errorlevel 1 (
     echo ERROR: Could not create "%WORLD_ROOT%".
@@ -82,7 +61,6 @@ if errorlevel 1 (
 
 mkdir "%TMPROOT%" >nul 2>nul
 mkdir "%SOURCE_EXPAND%" >nul 2>nul
-mkdir "%BUILDDIR%" >nul 2>nul
 
 echo Downloading pinned ps2_drivers source...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
@@ -92,13 +70,72 @@ if errorlevel 1 (
     goto :fail
 )
 
+rem Prefer the native PS2Build project shipped by Tech's fork.
+set "PS2YAML="
+for /f "delims=" %%P in ('dir /s /b "%SOURCE_EXPAND%\ps2.yaml" 2^>nul') do (
+    if not defined PS2YAML set "PS2YAML=%%P"
+)
+
+if defined PS2YAML (
+    for %%P in ("!PS2YAML!") do set "SRCDIR=%%~dpP"
+    if "!SRCDIR:~-1!"=="\" set "SRCDIR=!SRCDIR:~0,-1!"
+
+    echo.
+    echo Found ps2_drivers source:
+    echo   !SRCDIR!
+    echo.
+    echo Found native PS2Build config:
+    echo   !PS2YAML!
+    echo.
+    echo Installing ps2_drivers with PS2Build...
+
+    if exist "%DEST%" (
+        echo Removing incomplete/old ps2_drivers package...
+        rmdir /s /q "%DEST%"
+    )
+
+    pushd "!SRCDIR!" >nul
+    ps2build install -c ps2.yaml --packages "%PACKAGES_ROOT%"
+    set "INSTALL_RESULT=!ERRORLEVEL!"
+    popd >nul
+
+    if not "!INSTALL_RESULT!"=="0" (
+        echo.
+        echo ERROR: native ps2build install failed with exit code !INSTALL_RESULT!.
+        goto :fail_keep
+    )
+
+    goto :finalize
+)
+
+rem Older upstream layouts do not have ps2.yaml. Keep a CMake fallback, but do
+rem not use it when the native PS2Build project is available.
+echo.
+echo No native ps2.yaml found; falling back to upstream CMake build.
+
+where cmake >nul 2>nul
+if errorlevel 1 (
+    echo ERROR: CMake is required for the legacy fallback.
+    goto :fail_keep
+)
+where ninja >nul 2>nul
+if errorlevel 1 (
+    echo ERROR: Ninja is required for the legacy fallback.
+    goto :fail_keep
+)
+if not exist "%TOOLCHAIN%" (
+    echo ERROR: PS2Build CMake toolchain was not found:
+    echo   "%TOOLCHAIN%"
+    goto :fail_keep
+)
+
 set "CMAKELISTS="
 for /f "delims=" %%P in ('dir /s /b "%SOURCE_EXPAND%\CMakeLists.txt" 2^>nul') do (
     if not defined CMAKELISTS set "CMAKELISTS=%%P"
 )
 if not defined CMAKELISTS (
-    echo ERROR: Extracted ps2_drivers source does not contain CMakeLists.txt.
-    goto :fail
+    echo ERROR: Source contains neither ps2.yaml nor CMakeLists.txt.
+    goto :fail_keep
 )
 for %%P in ("!CMAKELISTS!") do set "SRCDIR=%%~dpP"
 if "!SRCDIR:~-1!"=="\" set "SRCDIR=!SRCDIR:~0,-1!"
@@ -106,17 +143,15 @@ if "!SRCDIR:~-1!"=="\" set "SRCDIR=!SRCDIR:~0,-1!"
 echo.
 echo Found ps2_drivers source:
 echo   !SRCDIR!
-echo.
-echo Configuring with the PS2Build CMake toolchain...
 
-if exist "%DEST%" (
-    echo Removing incomplete/old ps2_drivers package...
-    rmdir /s /q "%DEST%"
-)
+if exist "%DEST%" rmdir /s /q "%DEST%"
 mkdir "%DEST%\lib" >nul 2>nul
 mkdir "%DEST%\include" >nul 2>nul
 mkdir "%DEST%\lib\pkgconfig" >nul 2>nul
+mkdir "%BUILDDIR%" >nul 2>nul
 
+echo.
+echo Configuring legacy CMake fallback...
 cmake -S "!SRCDIR!" -B "%BUILDDIR%" -G Ninja ^
   -DCMAKE_TOOLCHAIN_FILE="%TOOLCHAIN%" ^
   -DCMAKE_BUILD_TYPE=Release ^
@@ -127,93 +162,74 @@ cmake -S "!SRCDIR!" -B "%BUILDDIR%" -G Ninja ^
   -DINSTALL_PKGCONFIG_DIR="%DEST%/lib/pkgconfig"
 if errorlevel 1 (
     echo ERROR: CMake configure failed.
-    goto :fail
+    goto :fail_keep
 )
 
 echo.
-echo Building ps2_drivers...
-cmake --build "%BUILDDIR%" --target ps2_drivers
+echo Building ps2_drivers fallback...
+cmake --build "%BUILDDIR%" --target ps2_drivers --verbose
 if errorlevel 1 (
-    echo ERROR: ps2_drivers build failed.
-    goto :fail
+    echo ERROR: ps2_drivers CMake build failed.
+    goto :fail_keep
 )
 
 echo.
-echo Built ps2_drivers archives:
-set "FOUND_ARCHIVE=0"
-for /r "%BUILDDIR%" %%P in (*ps2_drivers*.a) do (
-    echo   %%~fP
-    set "FOUND_ARCHIVE=1"
-)
-if "!FOUND_ARCHIVE!"=="0" (
-    echo   WARNING: no *ps2_drivers*.a archive was found under the CMake build directory.
-)
-
-echo.
-echo Installing ps2_drivers into the PS2Build world package tree...
+echo Installing CMake fallback...
 cmake --install "%BUILDDIR%"
 if errorlevel 1 (
-    echo ERROR: ps2_drivers install failed.
-    goto :fail
+    echo ERROR: ps2_drivers CMake install failed.
+    goto :fail_keep
 )
 
-rem PS2Build's custom-package contract is packages\world\<name>. Upstream
-rem ps2_drivers still installs through its INSTALL_LIB_DIR / INSTALL_INC_DIR cache
-rem variables, so set those explicitly in addition to CMAKE_INSTALL_PREFIX.
-rem Keep two defensive fallbacks:
-rem upstream revisions have changed their CMake install details more than once,
-rem but the public headers and the built archive are stable inputs we can place
-rem into the package deterministically if an install rule omits them.
+:finalize
+echo.
+echo Finalizing PS2Build package...
+
+rem Some revisions build correctly but omit install rules for public headers.
 if not exist "%DEST%\include\ps2_filesystem_driver.h" (
     if exist "!SRCDIR!\include\ps2_filesystem_driver.h" (
-        echo.
-        echo CMake did not install the public headers; copying them from source...
+        echo Copying public headers from source...
         if not exist "%DEST%\include" mkdir "%DEST%\include"
         xcopy /E /I /Y "!SRCDIR!\include\*" "%DEST%\include\" >nul
         if errorlevel 1 (
             echo ERROR: Failed to copy ps2_drivers public headers.
-            goto :fail
+            goto :fail_keep
         )
     )
 )
 
+rem If the native installer placed the archive in a generated/build location,
+rem normalize it into the custom package's lib directory.
 if not exist "%DEST%\lib\libps2_drivers.a" (
     set "BUILT_LIB="
-    rem Prefer the final combined archive and deliberately ignore the implementation-only archive.
-    for /r "%BUILDDIR%" %%P in (*ps2_drivers*.a) do (
-        if /i not "%%~nxP"=="libps2_drivers_impl.a" (
-            if not defined BUILT_LIB set "BUILT_LIB=%%~fP"
+
+    for /r "%TMPROOT%" %%P in (libps2_drivers.a) do (
+        if not defined BUILT_LIB set "BUILT_LIB=%%~fP"
+    )
+
+    if not defined BUILT_LIB (
+        for /r "%PACKAGES_ROOT%" %%P in (libps2_drivers.a) do (
+            if /i not "%%~fP"=="%DEST%\lib\libps2_drivers.a" (
+                if not defined BUILT_LIB set "BUILT_LIB=%%~fP"
+            )
         )
     )
+
     if defined BUILT_LIB (
-        echo.
-        echo CMake did not install libps2_drivers.a; copying:
+        echo Normalizing built archive:
         echo   !BUILT_LIB!
         if not exist "%DEST%\lib" mkdir "%DEST%\lib"
         copy /Y "!BUILT_LIB!" "%DEST%\lib\libps2_drivers.a" >nul
         if errorlevel 1 (
             echo ERROR: Failed to copy libps2_drivers.a.
-            goto :fail
+            goto :fail_keep
         )
-    ) else (
-        echo.
-        echo ERROR: CMake reported a successful ps2_drivers build but no final combined
-        echo        ps2_drivers archive could be found. The archive listing above is authoritative.
-        goto :fail
     )
 )
 
-echo.
-echo Writing PS2Build package metadata...
-if exist "!SRCDIR!\package.yaml" (
-    echo Using upstream PS2Build package metadata...
-    copy /Y "!SRCDIR!\package.yaml" "%DEST%\package.yaml" >nul
-    if errorlevel 1 (
-        echo ERROR: Failed to copy upstream package.yaml.
-        goto :fail
-    )
-) else (
-    echo Upstream package.yaml not present; writing compatible fallback metadata...
+rem Keep package metadata explicit if the upstream installer did not provide it.
+if not exist "%DEST%\package.yaml" (
+    echo Writing compatible PS2Build package metadata...
     > "%DEST%\package.yaml" echo name: ps2_drivers
     >>"%DEST%\package.yaml" echo origin: ps2_drivers
     >>"%DEST%\package.yaml" echo tier: world
@@ -232,31 +248,37 @@ echo.
 echo Verifying installed package...
 if not exist "%DEST%\package.yaml" (
     echo ERROR: Missing "%DEST%\package.yaml".
-    goto :fail
+    goto :fail_keep
 )
 if not exist "%DEST%\include\ps2_filesystem_driver.h" (
     echo ERROR: Missing "%DEST%\include\ps2_filesystem_driver.h".
-    goto :fail
+    goto :fail_keep
 )
 if not exist "%DEST%\include\ps2_mouse_driver.h" (
     echo ERROR: Missing "%DEST%\include\ps2_mouse_driver.h".
-    goto :fail
+    goto :fail_keep
 )
 if not exist "%DEST%\include\ps2_keyboard_driver.h" (
     echo ERROR: Missing "%DEST%\include\ps2_keyboard_driver.h".
-    goto :fail
+    goto :fail_keep
 )
 if not exist "%DEST%\include\ps2_usbd_driver.h" (
     echo ERROR: Missing "%DEST%\include\ps2_usbd_driver.h".
-    goto :fail
+    goto :fail_keep
 )
 if not exist "%DEST%\include\ps2_fileXio_driver.h" (
     echo ERROR: Missing "%DEST%\include\ps2_fileXio_driver.h".
-    goto :fail
+    goto :fail_keep
 )
 if not exist "%DEST%\lib\libps2_drivers.a" (
     echo ERROR: Missing "%DEST%\lib\libps2_drivers.a".
-    goto :fail
+    echo.
+    echo Diagnostic: archives produced under the temporary source/build tree:
+    for /r "%TMPROOT%" %%P in (*.a) do echo   %%~fP
+    echo.
+    echo Temporary files were kept for inspection:
+    echo   %TMPROOT%
+    goto :fail_keep
 )
 
 echo.
@@ -272,10 +294,7 @@ echo   include\ps2_usbd_driver.h
 echo   include\ps2_fileXio_driver.h
 echo   lib\libps2_drivers.a
 echo.
-echo PS2Build can now resolve:
-echo   libs: [ps2_drivers]
-echo.
-echo Now run your normal:
+echo You can now run:
 echo   ps2build build
 echo.
 
@@ -287,4 +306,11 @@ echo.
 echo ERROR: ps2_drivers installation failed.
 if exist "%DEST%" rmdir /s /q "%DEST%" >nul 2>nul
 if exist "%TMPROOT%" rmdir /s /q "%TMPROOT%" >nul 2>nul
+exit /b 1
+
+:fail_keep
+echo.
+echo ERROR: ps2_drivers installation failed.
+echo Temporary source/build files were kept for diagnostics:
+echo   %TMPROOT%
 exit /b 1
