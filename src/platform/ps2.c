@@ -12,7 +12,6 @@
 #include <sbv_patches.h>
 #include <ps2_filesystem_driver.h>
 #include <ps2_fileXio_driver.h>
-#include <ps2_sio2man_driver.h>
 #include <ps2_usbd_driver.h>
 #include <ps2_mouse_driver.h>
 #include <ps2_keyboard_driver.h>
@@ -713,23 +712,39 @@ bool platform_init(void) {
     rs2_log("fs: boot filesystem restored cwd=%s\n", ready_cwd);
     ps2_boot_progress(88);
 
-    // MMCE installs a loadcore hook waiting for a SIO2MAN implementation it knows how to wrap.
-    // Keep the filesystem sequence untouched, then satisfy that hook with the embedded PS2SDK
-    // SIO2MAN. This is intentionally AFTER MMCEMAN has initialized; preloading PS2SDK SIO2MAN
-    // before MMCEMAN was tested on real hardware and stalled the first loading bar.
-    //
-    // All non-MMCE boots retain the proven ROM SIO2MAN path.
+    // MMCEMAN's SIO2 hook supports PS2SDK SIO2MAN or Sony SIO2MAN 2.7+.
+    // For MMCE boots, prefer the newer ROM XSIO2MAN/XPADMAN pair used by PS2SDK's own pad sample.
+    // This keeps controller setup after the proven MMCE filesystem sequence and avoids loading the
+    // embedded PS2SDK SIO2MAN, which repeatedly stalled real hardware around the first loading bar.
     const bool mmce_pad_path = ps2_is_mmce_boot();
-    int sio2man_ret = mmce_pad_path
-        ? (int)init_sio2man_driver()
-        : SifLoadModule("rom0:SIO2MAN", 0, NULL);
-    int padman_ret = SifLoadModule("rom0:PADMAN", 0, NULL);
+    int sio2man_ret = -1;
+    int padman_ret = -1;
+    const char *pad_source = "rom";
+
+    if (mmce_pad_path) {
+        sio2man_ret = SifLoadModule("rom0:XSIO2MAN", 0, NULL);
+        if (sio2man_ret >= 0) {
+            padman_ret = SifLoadModule("rom0:XPADMAN", 0, NULL);
+            pad_source = "rom-x";
+        }
+
+        // Older ROMs may not expose the X modules. Fall back to the legacy pair rather than
+        // preventing boot; logs tell us which path the console actually accepted.
+        if (sio2man_ret < 0 || padman_ret < 0) {
+            sio2man_ret = SifLoadModule("rom0:SIO2MAN", 0, NULL);
+            padman_ret = SifLoadModule("rom0:PADMAN", 0, NULL);
+            pad_source = "rom-legacy";
+        }
+    } else {
+        sio2man_ret = SifLoadModule("rom0:SIO2MAN", 0, NULL);
+        padman_ret = SifLoadModule("rom0:PADMAN", 0, NULL);
+    }
+
     int pad_init_ret = padInit(0);
     int pad_open_ret = padPortOpen(0, 0, padDmaBuf);
     int pad_state_after_open = padGetState(0, 0);
     rs2_log("pad: source=%s SIO2MAN=%d PADMAN=%d padInit=%d padOpen=%d state=%d\n",
-            mmce_pad_path ? "ps2sdk-post-mmce" : "rom",
-            sio2man_ret, padman_ret, pad_init_ret, pad_open_ret, pad_state_after_open);
+            pad_source, sio2man_ret, padman_ret, pad_init_ret, pad_open_ret, pad_state_after_open);
 
     // Force DualShock2 analog mode, locked so the player can't toggle it back off with the
     // physical Analog button. Without this the pad boots in digital mode (confirmed via a real
