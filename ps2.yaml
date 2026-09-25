@@ -137,15 +137,17 @@ targets:
       - smap:smap_embed
       # IRXs expected by the vendored ps2_drivers sources. Aliases deliberately
       # match their EXTERN_IRX(...) symbol names.
-      - sio2man:sio2man
+      # Preserve the hardware-good storage blob footprint/order in low memory.
+      - usbd:usbd
       - iomanx:iomanX
+      - bdm:bdm
+      - bdmfs_fatfs:bdmfs_fatfs
+      - usbmass_bd:usbmass_bd
+      # New boot-device/HID support lives in the high-memory driver overlay.
+      - sio2man:sio2man
       - filexio:fileXio
       - mcman:mcman
       - mcserv:mcserv
-      - bdm:bdm
-      - bdmfs_fatfs:bdmfs_fatfs
-      - usbd:usbd
-      - usbmass_bd:usbmass_bd
       - mx4sio_bd:mx4sio_bd
       - cdfs:cdfs
       - mouse:ps2mouse
