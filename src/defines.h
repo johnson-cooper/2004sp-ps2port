@@ -182,6 +182,10 @@
 // returns to the traversal-proven 80x80 bridge window, so black terrain and dense-loc pressure are no
 // longer tied to the same knob.
 #define PS2_DEFER_STATIC_LOCATIONS 0
+// Caps how many animated locs (fires, torches, fountains...) can actually rebuild their model via
+// loctype_get_model()/model_calculate_normals() in one pushLocs() call. Needs real-hardware tuning -
+// see the pushLocs()/client_draw_scene() comments for why this exists instead of an unlimited rebuild.
+#define PS2_MAX_LOC_ANIM_REBUILDS_PER_FRAME 4
 // The 512x512 minimap and map-function sprites cost too much for the current gameplay baseline.
 #define PS2_DISABLE_MINIMAP 1
 #define PS2_SIMPLE_UI 1

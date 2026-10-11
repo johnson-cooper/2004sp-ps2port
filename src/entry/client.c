@@ -12068,13 +12068,17 @@ void client_draw_scene(Client *c) {
     // TODO see if defines are needed
     // 2026-09-14: __PS2__ added per the original C client author's suggestion. pushLocs() doesn't just
     // advance animation timers - on every frame an animated loc's seqFrame rolls over, it re-enters
-    // loctype_get_model() -> model_calculate_normals() (see the "append" block below) to regenerate
-    // that loc's model geometry. That's the exact function this session's real-hardware checkpoint
-    // bisection isolated the scene-build hang to, and the exact function that had a real unguarded-OOM
-    // NULL-deref hazard (see model_calculate_normals()'s vertex_normal allocation, fixed this session).
-    // Skipping loc animation entirely on PS2 removes both the extra memory churn AND the repeated,
-    // ongoing (not just first-load) exposure to that code path during live gameplay.
-#if !defined(_arch_dreamcast) && !defined(__NDS__) && !defined(__PS2__)
+    // loctype_get_model() -> model_calculate_normals() to regenerate that loc's model geometry, which
+    // used to have a real unguarded-OOM NULL-deref hazard and was the exact function a real-hardware
+    // checkpoint bisection isolated a scene-build hang to. That hazard is now guarded (OOM there logs
+    // and bails instead of dereferencing NULL - see model_calculate_normals()'s vertex_normal checks).
+    // Disabling loc animation entirely froze every ambient animated loc (fires, torches, fountains...)
+    // for the whole session instead.
+    // 2026-09-30: re-enabled. pushLocs() now caps how many locs can actually rebuild their model per
+    // call (PS2_MAX_LOC_ANIM_REBUILDS_PER_FRAME) - the rest keep ticking seqFrame/seqCycle and catch
+    // their visual up over the next few frames, bounding the per-frame cost instead of reintroducing
+    // an unlimited number of model rebuilds per frame.
+#if !defined(_arch_dreamcast) && !defined(__NDS__)
     pushLocs(c);
 #endif
 
@@ -12402,8 +12406,27 @@ void orbitCamera(Client *c, int targetX, int targetY, int targetZ, int yaw, int 
 }
 
 void pushLocs(Client *c) {
+#ifdef __PS2__
+    // The budget below used to be spent strictly in c->locList iteration order, which starves
+    // anything after the first few fast-cycling animated locs (e.g. wall torches with a 5-frame,
+    // sub-second loop) forever - they re-enter the budget every single frame and are always first,
+    // so nothing placed later in the list (such as a fire the player just lit) ever gets a turn.
+    // Rotate a serving window of the budget's size through ordinal list position instead: each
+    // frame covers a different slice, so every pending loc eventually gets served regardless of
+    // what else is contending for the same frame's budget.
+    static int ps2RebuildWindowStart = 0;
+    int ps2LocCount = 0;
+    for (LocEntity *probe = (LocEntity *)linklist_head(c->locList); probe; probe = (LocEntity *)linklist_next(c->locList)) {
+        ps2LocCount++;
+    }
+    int ps2Ordinal = 0;
+#endif
     for (LocEntity *loc = (LocEntity *)linklist_head(c->locList); loc; loc = (LocEntity *)linklist_next(c->locList)) {
         bool append = false;
+#ifdef __PS2__
+        bool freed = false;
+        int ordinal = ps2Ordinal++;
+#endif
         loc->seqCycle += c->scene_delta;
         if (loc->seqFrame == -1) {
             loc->seqFrame = 0;
@@ -12423,12 +12446,37 @@ void pushLocs(Client *c) {
                     linkable_unlink(&loc->link);
                     free(loc);
                     append = false;
+#ifdef __PS2__
+                    freed = true;
+#endif
                     break;
                 }
             }
         }
 
+#ifdef __PS2__
+        // Bound how many locs actually rebuild their model this frame - loctype_get_model() re-enters
+        // model_calculate_normals(), the expensive path. Locs beyond the budget keep their seqFrame/
+        // seqCycle ticking normally and just catch their visual up over the next few frames instead of
+        // freezing (see the call site comment in client_draw_scene()).
+        if (!freed) {
+            if (append) {
+                loc->pendingRebuild = true;
+            }
+            bool inWindow = ps2LocCount > 0 &&
+                             ((ordinal - ps2RebuildWindowStart + ps2LocCount) % ps2LocCount) < PS2_MAX_LOC_ANIM_REBUILDS_PER_FRAME;
+            if (loc->pendingRebuild && inWindow) {
+                append = true;
+            } else {
+                append = false;
+            }
+        }
+#endif
+
         if (append) {
+#ifdef __PS2__
+            loc->pendingRebuild = false;
+#endif
             int level = loc->level;
             int x = loc->x;
             int z = loc->z;
@@ -12502,6 +12550,11 @@ void pushLocs(Client *c) {
             }
         }
     }
+#ifdef __PS2__
+    if (ps2LocCount > 0) {
+        ps2RebuildWindowStart = (ps2RebuildWindowStart + PS2_MAX_LOC_ANIM_REBUILDS_PER_FRAME) % ps2LocCount;
+    }
+#endif
 }
 
 void pushSpotanims(Client *c) {
