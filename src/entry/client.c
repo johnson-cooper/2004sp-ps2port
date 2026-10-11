@@ -14074,6 +14074,8 @@ int main(int argc, char **argv) {
 #else
 #ifdef __TINYC__ // tcc -run passes many args
     if (load_ini_args()) {
+#elif defined(__PS2__) // OPL/BDM loaders may pass extra argc too
+    if (load_ini_args()) {
 #else
     // some console sdks (nxdk) have argc set to 0 with empty argv
     if (argc <= 1 && load_ini_args()) {
