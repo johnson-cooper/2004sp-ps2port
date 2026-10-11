@@ -8697,14 +8697,35 @@ static void client_build_scene(Client *c) {
         int x = (c->sceneMapIndex[i] >> 8) * 64 - c->sceneBaseTileX;
         int z = (c->sceneMapIndex[i] & 0xff) * 64 - c->sceneBaseTileZ;
         int8_t *src = c->sceneMapLandData[i];
+        int srcLength = c->sceneMapLandDataIndexLength[i];
+#ifdef __PS2__
+        // Under lowmem, client_build_scene() re-runs for the same region on every level change
+        // (stairs/ladders) against a brand-new World (see world_new() above), which needs land data
+        // decoded again from scratch. The first build already freed and NULLed this mapsquare's
+        // buffer below (to avoid holding every land blob during loc/model construction) - without
+        // reloading it here, a 2nd+ build would see src==NULL, fall into the clearLandscape() branch
+        // instead of world_load_ground(), and leave the new World's underlay/overlay ids at zero for
+        // every level. Mirrors the loc loop's own on-demand reload further down.
+        bool ps2LandLoadedOnDemand = false;
+        if (!src) {
+            int mapsquareX = c->sceneMapIndex[i] >> 8;
+            int mapsquareZ = c->sceneMapIndex[i] & 0xff;
+            src = client_load_map_file("m", mapsquareX, mapsquareZ, &srcLength);
+            ps2LandLoadedOnDemand = src != NULL;
+        }
+#endif
 
         if (src) {
-            Packet *buf = packet_new(src, c->sceneMapLandDataIndexLength[i]);
+            Packet *buf = packet_new(src, srcLength);
 #ifdef __PS2__
             if (!buf) {
-                free(src);
-                c->sceneMapLandData[i] = NULL;
-                c->sceneMapLandDataIndexLength[i] = 0;
+                if (ps2LandLoadedOnDemand) {
+                    free(src);
+                } else if (c->sceneMapLandData[i] == src) {
+                    free(src);
+                    c->sceneMapLandData[i] = NULL;
+                    c->sceneMapLandDataIndexLength[i] = 0;
+                }
                 continue;
             }
 #endif
@@ -8722,9 +8743,13 @@ static void client_build_scene(Client *c) {
                           "100000-byte scratch buffer, skipping to avoid heap corruption\n",
                           c->sceneMapIndex[i] >> 8, c->sceneMapIndex[i] & 0xff, length);
                 free(buf);
-                free(src);
-                c->sceneMapLandData[i] = NULL;
-                c->sceneMapLandDataIndexLength[i] = 0;
+                if (ps2LandLoadedOnDemand) {
+                    free(src);
+                } else if (c->sceneMapLandData[i] == src) {
+                    free(src);
+                    c->sceneMapLandData[i] = NULL;
+                    c->sceneMapLandDataIndexLength[i] = 0;
+                }
                 continue;
             }
 #endif
@@ -8733,17 +8758,22 @@ static void client_build_scene(Client *c) {
             // done" in any real-hardware test so far - only loc decode (below) needs the full
             // on-screen checkpoint treatment. Still gets log-only diagnostics for free (same
             // ps2_scene_checkpoint() calls inside bzip_decompress(), just skipping the screen draw).
-            bzip_decompress(data, src, c->sceneMapLandDataIndexLength[i] - 4, 4, NULL, 100000);
+            bzip_decompress(data, src, srcLength - 4, 4, NULL, 100000);
 #else
-            bzip_decompress(data, src, c->sceneMapLandDataIndexLength[i] - 4, 4);
+            bzip_decompress(data, src, srcLength - 4, 4);
 #endif
             free(buf);
 #ifdef __PS2__
             // world_load_ground() consumes only the decompressed scratch data. Drop the compressed
-            // source now rather than carrying every land blob through loc/model construction.
-            free(src);
-            c->sceneMapLandData[i] = NULL;
-            c->sceneMapLandDataIndexLength[i] = 0;
+            // source now rather than carrying every land blob through loc/model construction - it'll
+            // be reloaded on demand above if a later lowmem rebuild needs this mapsquare again.
+            if (ps2LandLoadedOnDemand) {
+                free(src);
+            } else if (c->sceneMapLandData[i] == src) {
+                free(src);
+                c->sceneMapLandData[i] = NULL;
+                c->sceneMapLandDataIndexLength[i] = 0;
+            }
 #endif
             world_load_ground(world, (c->sceneCenterZoneX - 6) * 8, (c->sceneCenterZoneZ - 6) * 8, x, z, data, length);
         } else if (c->sceneCenterZoneZ < 800) {
